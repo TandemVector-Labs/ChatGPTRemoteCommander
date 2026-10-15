@@ -8,7 +8,7 @@ import net from 'node:net';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { ensureRouterSource } from '../tools/router-source-bootstrap.mjs';
+import { ensureRouterSource, assertRouterStatusUrl } from '../tools/router-source-bootstrap.mjs';
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const sha = file => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -57,4 +57,45 @@ test('failed candidate router rolls back to exact old source and route',async()=
     await waitStatus(`http://127.0.0.1:${f.port}/router/status`,sha(f.oldSource));
     assert.deepEqual(await fsp.readFile(f.stateFile),f.routeBytes);
   }finally{await killRuntime(f.runtimeFile);await fsp.rm(f.root,{recursive:true,force:true,maxRetries:20,retryDelay:100});}
+});
+
+test('router source URL must target the exact owned local status port without credentials or redirects', () => {
+  const port = 47831;
+  assert.equal(assertRouterStatusUrl('http://127.0.0.1:47831/router/status', port), 'http://127.0.0.1:47831/router/status');
+  assert.equal(assertRouterStatusUrl('http://[::1]:47831/router/status', port), 'http://[::1]:47831/router/status');
+  for (const url of [
+    'https://127.0.0.1:47831/router/status',
+    'http://example.invalid:47831/router/status',
+    'http://localhost:47831/router/status',
+    'http://127.0.0.1:12345/router/status',
+    'http://127.0.0.1:47831/private',
+    'http://127.0.0.1:47831/router/status?url=http://evil.invalid/',
+    'http://127.0.0.1:47831/router/status#fragment',
+    'http://user@127.0.0.1:47831/router/status',
+    'http://127.0.0.1:47831@evil.invalid/router/status',
+    'http://127.0.0.1:47831/router/%73tatus',
+    'http://127.0.0.1:47831/router/status/',
+    'file:///etc/passwd',
+    'javascript:alert(1)',
+    null, undefined
+  ]) {
+    assert.throws(() => assertRouterStatusUrl(url, port), /ROUTER_STATUS_URL_DENIED/, String(url));
+  }
+  assert.throws(() => assertRouterStatusUrl('http://127.0.0.1:47831/router/status', 1), /ROUTER_STATUS_URL_DENIED/);
+});
+
+test('router bootstrap rejects an untrusted URL before making a network request or affecting the router', async () => {
+  const f = await fixture(source => source + '\n// trusted fixture candidate\n');
+  try {
+    const before = JSON.parse(await fsp.readFile(f.runtimeFile, 'utf8'));
+    await assert.rejects(
+      () => ensureRouterSource({url: 'http://127.0.0.1:47832/router/status', stateFile:f.stateFile,
+        runtimeFile:f.runtimeFile,candidateSource:f.candidateSource,logFile:f.logFile}),
+      /ROUTER_STATUS_URL_DENIED/
+    );
+    assert.deepEqual(JSON.parse(await fsp.readFile(f.runtimeFile,'utf8')), before);
+    const status = await waitStatus('http://127.0.0.1:' + f.port + '/router/status', sha(f.oldSource));
+    assert.equal(status.sourceSha256, sha(f.oldSource));
+    assert.deepEqual(await fsp.readFile(f.stateFile), f.routeBytes);
+  } finally { await killRuntime(f.runtimeFile); await fsp.rm(f.root,{recursive:true,force:true,maxRetries:20,retryDelay:100}); }
 });
