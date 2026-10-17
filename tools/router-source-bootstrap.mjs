@@ -11,8 +11,22 @@ const readJson = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 const canonical = value => path.resolve(String(value));
 const alive = pid => { try { process.kill(Number(pid), 0); return true; } catch { return false; } };
 
+export function assertRouterStatusUrl(url, expectedPort) {
+  if (typeof url !== 'string' || url.length > 256 || url.includes('\\')) throw new Error('ROUTER_STATUS_URL_DENIED');
+  let parsed;
+  try { parsed = new URL(url); } catch { throw new Error('ROUTER_STATUS_URL_DENIED'); }
+  if (parsed.protocol !== 'http:' || !['127.0.0.1', '[::1]'].includes(parsed.hostname)
+      || parsed.username || parsed.password || parsed.search || parsed.hash
+      || parsed.pathname !== '/router/status'
+      || !Number.isSafeInteger(expectedPort) || expectedPort < 1024 || expectedPort > 65535
+      || Number(parsed.port) !== expectedPort || url !== parsed.href) {
+    throw new Error('ROUTER_STATUS_URL_DENIED');
+  }
+  return parsed.href;
+}
+
 async function routerStatus(url) {
-  const response = await fetch(url, { signal: AbortSignal.timeout(2000) });
+  const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(2000) });
   if (!response.ok) throw new Error('ROUTER_STATUS_HTTP_' + response.status);
   const body = await response.json();
   if (body?.ok !== true || body?.router !== true) throw new Error('ROUTER_STATUS_INVALID');
@@ -89,17 +103,18 @@ export async function ensureRouterSource({ url, stateFile, runtimeFile, candidat
   logFile = canonical(logFile);
   if (!fs.existsSync(candidateSource) || !fs.statSync(candidateSource).isFile()) throw new Error('ROUTER_CANDIDATE_SOURCE_MISSING');
   const candidateSha256 = sha256File(candidateSource);
+  if (!fs.existsSync(runtimeFile)) throw new Error('ROUTER_RUNTIME_MISSING');
+  const runtime = readJson(runtimeFile);
+  const port = Number(runtime.port);
+  if (!Number.isSafeInteger(port) || port < 1024 || port > 65535) throw new Error('ROUTER_RUNTIME_PORT_INVALID');
+  url = assertRouterStatusUrl(url, port);
   const beforeStatus = await routerStatus(url);
   if (beforeStatus.sourceSha256 === candidateSha256) {
     return { ok: true, changed: false, sourceSha256: candidateSha256, pid: Number(readJson(runtimeFile).pid) };
   }
-  if (!fs.existsSync(runtimeFile)) throw new Error('ROUTER_RUNTIME_MISSING');
-  const runtime = readJson(runtimeFile);
   const routeBytes = fs.readFileSync(stateFile);
   const routeHash = sha256Bytes(routeBytes);
   const route = JSON.parse(routeBytes.toString('utf8'));
-  const port = Number(runtime.port);
-  if (!Number.isSafeInteger(port) || port < 1024 || port > 65535) throw new Error('ROUTER_RUNTIME_PORT_INVALID');
   if (canonical(runtime.stateFile) !== stateFile || runtime.sourceSha256 !== beforeStatus.sourceSha256) throw new Error('ROUTER_RUNTIME_IDENTITY_MISMATCH');
   verifyProcessIdentity(runtime.pid, port, stateFile);
   const oldProject = canonical(route?.active?.projectDir || '');

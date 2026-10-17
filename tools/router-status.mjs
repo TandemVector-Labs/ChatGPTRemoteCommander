@@ -1,3 +1,5 @@
+import { assertRouterStatusUrl } from './router-source-bootstrap.mjs';
+
 function parse(argv){
   const o={timeoutMs:3000,json:false};
   for(let i=0;i<argv.length;i++){
@@ -14,8 +16,8 @@ function parse(argv){
 }
 const o=parse(process.argv.slice(2));
 const u=new URL(o.url);
-if(!['127.0.0.1','localhost','::1','[::1]'].includes(u.hostname))throw new Error('ROUTER_STATUS_LOOPBACK');
-const r=await fetch(u,{redirect:'error',signal:AbortSignal.timeout(o.timeoutMs)});
+const safeUrl=assertRouterStatusUrl(o.url,Number(u.port));
+const r=await fetch(safeUrl,{redirect:'error',signal:AbortSignal.timeout(o.timeoutMs)});
 if(!r.ok)throw new Error('ROUTER_STATUS_HTTP_'+r.status);
 const s=await r.json();
 if(!s?.ok||!s?.router)throw new Error('ROUTER_STATUS_INVALID');
