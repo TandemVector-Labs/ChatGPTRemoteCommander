@@ -108,15 +108,18 @@ export async function ensureRouterSource({ url, stateFile, runtimeFile, candidat
   const port = Number(runtime.port);
   if (!Number.isSafeInteger(port) || port < 1024 || port > 65535) throw new Error('ROUTER_RUNTIME_PORT_INVALID');
   url = assertRouterStatusUrl(url, port);
+  // Validate the claimed owner before sending even one HTTP request. In particular,
+  // a matching source hash from a foreign listener must never bypass these checks.
+  if (canonical(runtime.stateFile) !== stateFile) throw new Error('ROUTER_RUNTIME_IDENTITY_MISMATCH');
+  verifyProcessIdentity(runtime.pid, port, stateFile);
   const beforeStatus = await routerStatus(url);
+  if (runtime.sourceSha256 !== beforeStatus.sourceSha256) throw new Error('ROUTER_RUNTIME_IDENTITY_MISMATCH');
   if (beforeStatus.sourceSha256 === candidateSha256) {
-    return { ok: true, changed: false, sourceSha256: candidateSha256, pid: Number(readJson(runtimeFile).pid) };
+    return { ok: true, changed: false, sourceSha256: candidateSha256, pid: Number(runtime.pid) };
   }
   const routeBytes = fs.readFileSync(stateFile);
   const routeHash = sha256Bytes(routeBytes);
   const route = JSON.parse(routeBytes.toString('utf8'));
-  if (canonical(runtime.stateFile) !== stateFile || runtime.sourceSha256 !== beforeStatus.sourceSha256) throw new Error('ROUTER_RUNTIME_IDENTITY_MISMATCH');
-  verifyProcessIdentity(runtime.pid, port, stateFile);
   const oldProject = canonical(route?.active?.projectDir || '');
   const oldSource = path.join(oldProject, 'src', 'stable-router.mjs');
   if (!fs.existsSync(oldSource)) throw new Error('ROUTER_ROLLBACK_SOURCE_MISSING');

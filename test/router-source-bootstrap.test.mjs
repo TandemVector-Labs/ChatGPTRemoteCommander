@@ -5,6 +5,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import net from 'node:net';
+import http from 'node:http';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -98,4 +99,42 @@ test('router bootstrap rejects an untrusted URL before making a network request 
     assert.equal(status.sourceSha256, sha(f.oldSource));
     assert.deepEqual(await fsp.readFile(f.stateFile), f.routeBytes);
   } finally { await killRuntime(f.runtimeFile); await fsp.rm(f.root,{recursive:true,force:true,maxRetries:20,retryDelay:100}); }
+});
+
+
+test('foreign loopback responder cannot spoof a no-op for an unowned Router identity', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'rc-router-identity-mock-'));
+  const candidateSource = path.join(root, 'candidate-source.mjs');
+  const stateFile = path.join(root, 'NONEXISTENT-state.json');
+  const runtimeFile = path.join(root, 'fake-runtime.json');
+  const logFile = path.join(root, 'unused.log');
+  await fsp.writeFile(candidateSource, '// harmless candidate for isolated identity negative test\n');
+  let hits = 0;
+  const listener = http.createServer((_req, res) => {
+    hits += 1;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, router: true, sourceSha256: sha(candidateSource) }));
+  });
+  listener.listen(0, '127.0.0.1');
+  await once(listener, 'listening');
+  try {
+    const port = listener.address().port;
+    const url = 'http://127.0.0.1:' + port + '/router/status';
+    const runtime = { port, pid: 999999999, stateFile: path.join(root, 'foreign-state.json'), sourceSha256: sha(candidateSource) };
+    const check = () => ensureRouterSource({url, stateFile, runtimeFile, candidateSource, logFile});
+    await fsp.writeFile(runtimeFile, JSON.stringify(runtime));
+    await assert.rejects(check, /ROUTER_RUNTIME_IDENTITY_MISMATCH/);
+    assert.equal(hits, 0, 'state-file mismatch must fail before any HTTP');
+    runtime.stateFile = stateFile;
+    await fsp.writeFile(runtimeFile, JSON.stringify(runtime));
+    await assert.rejects(check, /ROUTER_PROCESS_MISSING/);
+    assert.equal(hits, 0, 'nonexistent PID must fail before any HTTP');
+    runtime.pid = process.pid;
+    await fsp.writeFile(runtimeFile, JSON.stringify(runtime));
+    await assert.rejects(check, /ROUTER_PROCESS_IDENTITY_MISMATCH/);
+    assert.equal(hits, 0, 'unrelated live process must fail before any HTTP');
+  } finally {
+    await new Promise(resolve => listener.close(resolve));
+    await fsp.rm(root, {recursive: true, force: true});
+  }
 });
