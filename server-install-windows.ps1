@@ -1,5 +1,5 @@
 param(
-  [string]$SourceRef = 'v0.10.21',
+  [string]$SourceRef = 'v0.10.23',
   [string]$ExpectedCommit = '',
   [ValidateSet('Power','Standard')][string]$AccessMode = 'Power',
   [ValidateSet('Auto','On','Off')][string]$GuiControl = 'Auto',
@@ -38,7 +38,7 @@ function Refresh-Path {
 
 function Invoke-Download([string]$Url,[string]$Destination) {
   Write-Host "Downloading $Url"
-  Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination -Headers @{'User-Agent'='ChatGPTRemoteCommander-ServerInstaller/0.10.21'}
+  Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination -Headers @{'User-Agent'='ChatGPTRemoteCommander-ServerInstaller/0.10.23'}
   if (-not (Test-Path -LiteralPath $Destination -PathType Leaf)) { throw "Download did not create $Destination" }
 }
 
@@ -176,7 +176,7 @@ function Ensure-Git([string]$Arch) {
   # Public GitHub shared runner IPs can exhaust the unauthenticated REST limit.
   # Authentication is optional, fixed to this release-metadata endpoint only.
   $headers = @{
-    'User-Agent'='ChatGPTRemoteCommander-ServerInstaller/0.10.21'
+    'User-Agent'='ChatGPTRemoteCommander-ServerInstaller/0.10.23'
     'X-GitHub-Api-Version'='2022-11-28'
   }
   if ($script:BootstrapGitHubToken) {

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SOURCE_REF="${REMOTE_COMMANDER_SOURCE_REF:-v0.10.21}"
+SOURCE_REF="${REMOTE_COMMANDER_SOURCE_REF:-v0.10.23}"
 EXPECTED_COMMIT="${REMOTE_COMMANDER_EXPECTED_COMMIT:-}"
 INSTALL_DIR=""
 ENABLE_GUI=0
@@ -11,7 +11,7 @@ REPO_URL="${REMOTE_COMMANDER_REPO_URL:-https://github.com/GOD13emad/ChatGPTRemot
 usage() {
   cat <<'USAGE'
 Usage: server-install-linux.sh [options]
-  --source-ref REF          Git ref to install (default: v0.10.21)
+  --source-ref REF          Git ref to install (default: v0.10.23)
   --expected-commit SHA     Require the fetched ref to resolve to this exact commit
   --install-dir PATH        Override the normal per-user install directory
   --enable-gui              Keep GUI capabilities enabled (desktop Linux only)

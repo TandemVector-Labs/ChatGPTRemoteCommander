@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
-$log = Join-Path $root 'var\final-gate-v0.10.21.log'
+$log = Join-Path $root 'var\final-gate-v0.10.23.log'
 New-Item -ItemType Directory -Force (Split-Path -Parent $log) | Out-Null
 "FINAL_GATE_START $(Get-Date -Format o)" | Set-Content $log
 function Invoke-Gate([string]$Name,[scriptblock]$Block) {

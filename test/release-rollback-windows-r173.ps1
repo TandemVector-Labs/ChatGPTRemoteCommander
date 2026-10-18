@@ -59,10 +59,11 @@ function Update([string]$Name,[string]$Sha){
   $script:Stages+=@{name=$Name;exit=$exitCode;status=$status;updaterPid=$updater.Id;stdoutPath=$stdout;stderrPath=$stderr}
   Write-Output ('R185_'+$Name+'_PROCESS_EXIT='+$exitCode+'_STATUS='+$status)
   # CI-only R252: retain exact hashed qualification failure names, no raw logs.
-  if($Name -eq 'ROLLBACK' -and ($exitCode -ne 0 -or $status -ne 'PROMOTED')){
+  if(($Name -eq 'PROMOTE' -or $Name -eq 'ROLLBACK') -and ($exitCode -ne 0 -or $status -ne 'PROMOTED')){
     try{
       $lines=Get-Content -LiteralPath $stdout -ErrorAction Stop
-      $rx='^GATE_OUTPUT_FILES runId=(qualification-test-'+$Baseline.Substring(0,12)+'-[0-9a-f]{32}) stdout=([^\r\n]+?) stderr='
+      $diagnosticCommit=if($Name -eq 'PROMOTE'){$ExpectedCommit}else{$Baseline}
+      $rx='^GATE_OUTPUT_FILES runId=(qualification-test-'+$diagnosticCommit.Substring(0,12)+'-[0-9a-f]{32}) stdout=([^\r\n]+?) stderr='
       $matches=@($lines|Where-Object {$_ -match $rx})
       if($matches.Count -ne 1){throw 'NO_UNIQUE_TEST_OUTPUT'}
       $null=$matches[0] -match $rx
@@ -76,11 +77,17 @@ function Update([string]$Name,[string]$Sha){
         throw 'LOG_HASH_UNATTESTED'
       }
       $found=0
+      $sawFailure=$false
       foreach($line in [IO.File]::ReadLines($inner)){
         if($line -match '^\s*(?:not ok \d+ -|#\s*(?:fail|pass|tests)\s+\d+|.*\b(?:AssertionError|ERR_TEST_FAILURE)\b)'){
+          $sawFailure=$true
           $safe=($line -replace '[^A-Za-z0-9 ._:(),/\[\]-]','?')
           if($safe.Length -gt 160){$safe=$safe.Substring(0,160)}
           Write-Output ('R252_QUAL_TEST_RESULT_'+$found+'='+$safe)
+          $found++;if($found -ge 24){break}
+        }elseif($sawFailure -and $line -match '[/\\](?<area>test|tools)[/\\](?<file>[A-Za-z0-9._-]+\.(?:mjs|js|ps1)):(?<row>\d+)'){
+          $relative=$Matches['area']+'/'+$Matches['file']+':'+$Matches['row']
+          Write-Output ('R252_QUAL_FAILURE_SOURCE_'+$found+'='+$relative)
           $found++;if($found -ge 24){break}
         }
       }
@@ -115,7 +122,7 @@ function Cleanup {
 if((Get-NetTCPConnection -State Listen -LocalPort 47831 -ErrorAction SilentlyContinue)){throw 'R173_CANONICAL_PORT_IN_USE'}
 if((Test-Path -LiteralPath $Root) -or (Test-Path -LiteralPath (Join-Path $OldLocal 'ChatGPTRemoteCommander'))){throw 'R173_NOT_ISOLATED'}
 Assert-Head $Source $ExpectedCommit
-if((Get-Content (Join-Path $Source 'package.json') -Raw|ConvertFrom-Json).version -ne '0.10.21'){throw 'R173_CANDIDATE_VERSION'}
+if((Get-Content (Join-Path $Source 'package.json') -Raw|ConvertFrom-Json).version -ne '0.10.23'){throw 'R173_CANDIDATE_VERSION'}
 New-Item -ItemType Directory -Path (Join-Path $Root 'STATE'),(Join-Path $Root 'ROAMING') -ErrorAction Stop|Out-Null
 & git.exe -c core.autocrlf=false clone --depth 1 --branch v0.10.20 https://github.com/GOD13emad/ChatGPTRemoteCommander.git $Install | Out-Host
 if($LASTEXITCODE -ne 0){throw 'R173_CLONE_FAIL'}
@@ -140,7 +147,7 @@ $env:APPDATA=Join-Path $Root 'ROAMING'
 try {
   Update 'PROMOTE' $ExpectedCommit
   Assert-Head $Install $ExpectedCommit
-  Readback 'PROMOTE' $ExpectedCommit '0.10.21'
+  Readback 'PROMOTE' $ExpectedCommit '0.10.23'
   Update 'ROLLBACK' $Baseline
   Assert-Head $Install $Baseline
   Readback 'ROLLBACK' $Baseline '0.10.20'
