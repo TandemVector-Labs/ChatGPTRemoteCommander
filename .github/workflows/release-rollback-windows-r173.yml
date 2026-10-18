@@ -36,7 +36,7 @@ jobs:
           $ErrorActionPreference='Stop'
           $sha='${{ github.event.pull_request.head.sha || github.sha }}'
           if((git rev-parse HEAD).Trim() -ne $sha){throw 'R173_WRONG_CHECKOUT_SHA'}
-          if((Get-Content package.json -Raw|ConvertFrom-Json).version -ne '0.10.21'){throw 'R173_WRONG_VERSION'}
+          if((Get-Content package.json -Raw|ConvertFrom-Json).version -ne '0.10.23'){throw 'R173_WRONG_VERSION'}
           $tokens=$null;$errs=$null
           [Management.Automation.Language.Parser]::ParseFile((Join-Path $env:GITHUB_WORKSPACE 'test/release-rollback-windows-r173.ps1'),[ref]$tokens,[ref]$errs)|Out-Null
           if(@($errs).Count){throw ('R173_PARSER_ERRORS_'+@($errs).Count)}
@@ -46,7 +46,7 @@ jobs:
           if(Test-Path $p){throw 'R173_NO_BLIND_RERUN'}
           if(Test-Path (Join-Path $env:LOCALAPPDATA 'ChatGPTRemoteCommander')){throw 'R173_PREEXISTING_INSTALL'}
           Write-Output 'R173_STATIC_EXACT_HEAD_PRESTATE_PASS'
-      - name: Real candidate v0.10.21 promotion then stable v0.10.20 rollback
+      - name: Real candidate v0.10.23 promotion then stable v0.10.20 rollback
         shell: pwsh
         timeout-minutes: 53
         run: |

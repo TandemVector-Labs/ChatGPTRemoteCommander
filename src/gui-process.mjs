@@ -12,6 +12,16 @@ function parseGuiResult(bytes) {
   if (value.ok !== true) {
     const safeCode = /^[A-Z][A-Z0-9_]{1,79}$/.test(value.error ?? '') ? value.error : 'GUI_NATIVE_FAILED';
     const failure = guiError(safeCode);
+    // Only the fixed Windows helper can report a mutex denial before dispatch.
+    // Exact closed schema: extra fields, naked errors and transport failures are unsafe.
+    if (safeCode === 'GUI_NATIVE_BUSY' && value.ok === false &&
+        value.error === 'GUI_NATIVE_BUSY' && value.submission === 'NOT_SUBMITTED' &&
+        Object.getPrototypeOf(value) === Object.prototype &&
+        Reflect.ownKeys(value).length === 3 &&
+        ['ok','error','submission'].every(key => Object.hasOwn(value,key))) {
+      failure.guiNotApplied = true;
+      failure.guiWindowsMutexPreDispatch = true;
+    }
     // Only the pinned Linux native guard may attest rejection before input dispatch.
     if (safeCode === 'GUI_FOREGROUND_OR_GEOMETRY_CHANGED' &&
         value.effect === 'NOT_APPLIED' && value.phase === 'PRE_DISPATCH_GUARD') {

@@ -8,7 +8,7 @@ export function evaluateWindowsRelease({signed,version,tag,policy,releaseNotes})
   if (signed === 'true') return {mode:'AUTHENTICODE_SIGNED',allowed:true};
   if (signed !== 'false') throw new Error('WINDOWS_RELEASE_SIGNATURE_STATUS_UNVERIFIED');
   if (policy?.schema !== 'commander-unsigned-windows-release-v1' ||
-      policy.version !== '0.10.21' || policy.tag !== 'v0.10.21' ||
+      policy.version !== '0.10.23' || policy.tag !== 'v0.10.23' ||
       policy.version !== version || policy.tag !== tag ||
       policy.allowUnsignedWithGitHubAttestation !== true ||
       policy.scope !== 'only-this-version' ||

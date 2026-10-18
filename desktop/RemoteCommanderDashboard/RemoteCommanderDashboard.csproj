@@ -9,8 +9,8 @@
     <ApplicationIcon>remote-commander.ico</ApplicationIcon>
     <AssemblyName>RemoteCommander</AssemblyName>
     <RootNamespace>RemoteCommander</RootNamespace>
-    <Version>0.10.21</Version>
-    <FileVersion>0.10.21.0</FileVersion>
-    <AssemblyVersion>0.10.21.0</AssemblyVersion>
+    <Version>0.10.23</Version>
+    <FileVersion>0.10.23.0</FileVersion>
+    <AssemblyVersion>0.10.23.0</AssemblyVersion>
   </PropertyGroup>
 </Project>

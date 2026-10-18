@@ -19,7 +19,7 @@ on:
       - 'test/unsigned-windows-release-policy.test.mjs'
       - 'tools/verify-windows-release-policy.mjs'
       - 'docs/UNSIGNED_WINDOWS_RELEASE_POLICY.*'
-      - 'docs/RELEASE_0.10.21.md'
+      - 'docs/RELEASE_0.10.23.md'
 
 permissions:
   contents: read

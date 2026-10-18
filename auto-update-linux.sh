@@ -460,8 +460,19 @@ promote_control(){
     fi
     log 'CONTROL_EOL_DRIFT_TOLERATED'
   fi
-  git -C "$INSTALL_DIR" fetch --no-tags origin "$ref"
-  resolved="$(git -C "$INSTALL_DIR" rev-parse 'FETCH_HEAD^{commit}')"
+  # The already-qualified staged checkout is the authoritative commit source.
+  # Fetching ref from public origin is unsafe for private rollback refs and
+  # can be indeterminate when the source history is shallow.
+  [[ -n "$STAGE_DIR" && -d "$STAGE_DIR/.git" && ! -L "$STAGE_DIR" ]] || {
+    echo 'control staged source unavailable' >&2; return 1;
+  }
+  local staged_head
+  staged_head="$(git -C "$STAGE_DIR" rev-parse HEAD 2>/dev/null || true)"
+  [[ "$staged_head" == "$commit" ]] || {
+    echo 'control staged commit mismatch' >&2; return 1;
+  }
+  git -C "$INSTALL_DIR" fetch --update-shallow --no-tags "$STAGE_DIR" "$commit"
+  resolved="$(git -C "$INSTALL_DIR" rev-parse 'FETCH_HEAD^{commit}' 2>/dev/null || true)"
   [[ "$resolved" == "$commit" ]] || { echo 'control commit mismatch' >&2; return 1; }
   git -C "$INSTALL_DIR" checkout --detach --force "$commit" >/dev/null
   promoted="$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null || true)"

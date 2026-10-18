@@ -14,7 +14,7 @@ TARGET="$(git -C "$WORKSPACE" rev-parse HEAD)"
 EXPECTED="$1"
 BASELINE='362375c464948be3001b307650c13fc3353ed05b'
 [[ "$TARGET" == "$EXPECTED" && "$TARGET" =~ ^[a-f0-9]{40}$ ]] || { echo R170_SOURCE_SHA_MISMATCH >&2; exit 62; }
-[[ "$(node -p "require('$WORKSPACE/package.json').version")" == 0.10.21 ]] || { echo R170_SOURCE_VERSION_CHANGED >&2; exit 63; }
+[[ "$(node -p "require('$WORKSPACE/package.json').version")" == 0.10.23 ]] || { echo R170_SOURCE_VERSION_CHANGED >&2; exit 63; }
 ROOT="$TEMPBASE/remote-commander-rollback-r170"
 [[ "$ROOT" == "$TEMPBASE/"* && ! -e "$ROOT" ]] || { echo R170_SANDBOX_NOT_FRESH >&2; exit 64; }
 [[ ! -e "$HOME/.local/share/ChatGPTRemoteCommander" ]] || { echo R170_OWNER_INSTALL_DETECTED >&2; exit 65; }
@@ -41,7 +41,7 @@ git clone --quiet --depth 1 --branch v0.10.20 https://github.com/GOD13emad/ChatG
 [[ "$(git -C "$ROOT/install" rev-parse HEAD)" == "$BASELINE" ]] || { echo R170_BASELINE_SHA_MISMATCH >&2; exit 68; }
 # Immutable v0.10.20 has a documented CRLF Git-blob vs eol=crlf attribute conflict.
 # Accept ONLY that one known tracked path, with zero staged or non-EOL semantic differences.
-# New v0.10.21 source corrects the Git index blob; never reset or rewrite the signed old tag.
+# New v0.10.23 source corrects the Git index blob; never reset or rewrite the signed old tag.
 dirty="$(git -C "$ROOT/install" status --porcelain --untracked-files=no)"
 if [[ -n "$dirty" ]]; then
   [[ "$dirty" == ' M enable-boot-recovery.ps1' ]] || { echo R170_UNEXPECTED_BASELINE_DIRTY >&2; exit 69; }
@@ -84,7 +84,7 @@ if [[ "$PROMOTE_CODE" != 0 ]]; then
   exit 70
 fi
 [[ "$(git -C "$ROOT/install" rev-parse HEAD)" == "$TARGET" ]] || { echo R170_PROMOTE_CONTROL_SHA_FAIL >&2; exit 71; }
-grep -q 'AUTO_UPDATE_PASS version=0.10.21' "$ROOT/PROMOTE_R170.log" || { echo R170_PROMOTE_NOT_ACCEPTED >&2; exit 72; }
+grep -q 'AUTO_UPDATE_PASS version=0.10.23' "$ROOT/PROMOTE_R170.log" || { echo R170_PROMOTE_NOT_ACCEPTED >&2; exit 72; }
 ROUTE="$ROOT/state/chatgpt-remote-commander/routing/default.json"
 [[ -f "$ROUTE" ]] || { echo R170_NO_ROUTER_STATE >&2; exit 73; }
 node "$WORKSPACE/tools/router-state.mjs" --state "$ROUTE" > "$ROOT/ROUTE_AFTER_PROMOTE.json"
@@ -92,7 +92,7 @@ python3 - "$ROOT/ROUTE_AFTER_PROMOTE.json" "$TARGET" <<'PY'
 import json,sys
 r=json.load(open(sys.argv[1]))
 assert r['profile']=='default' and r['active']['commit']==sys.argv[2]
-assert r['active']['version']=='0.10.21'
+assert r['active']['version']=='0.10.23'
 print('R170_LINUX_PROMOTION_ROUTE_PASS')
 PY
 curl -fsS --connect-timeout 2 --max-time 5 http://127.0.0.1:47831/health > "$ROOT/HEALTH_PROMOTED.json"
