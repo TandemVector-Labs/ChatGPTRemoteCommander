@@ -116,8 +116,25 @@ jobs:
           }
           $leftover=@(Get-CimInstance Win32_Process -Filter "Name='node.exe'"|Where-Object {([string]$_.CommandLine).Contains($root)})
           if($leftover.Count -gt 0){throw ('R157_ORPHANS_'+$leftover.Count)}
-          $stage=Join-Path $state ('releases\v0.10.21-'+$sha.Substring(0,12))
-          if(-not(Test-Path $stage) -or (git -C $stage rev-parse HEAD).Trim() -ne $sha){throw 'R157_EXACT_STAGE_MISSING'}
+          # Derive the exact release pathname from the validated updater receipt.
+          # Keep the old HEAD check fail-closed: no stage/no SHA match => fail.
+          $version=[string]$report.version
+          if($version -notmatch '^\d+\.\d+\.\d+$'){throw 'R157_STAGE_VERSION_UNVERIFIED'}
+          $releaseRoot=Join-Path $state 'releases'
+          $stage=Join-Path $releaseRoot ('v'+$version+'-'+$sha.Substring(0,12))
+          if(-not(Test-Path -LiteralPath $stage -PathType Container)){
+            $dirs=@(Get-ChildItem -LiteralPath $releaseRoot -Directory -ErrorAction SilentlyContinue)
+            $recognized=@($dirs | Where-Object { $_.Name -match '^v\d+\.\d+\.\d+-[a-f0-9]{12}$' })
+            $sameShaSuffix=@($dirs | Where-Object { $_.Name.EndsWith('-'+$sha.Substring(0,12)) })
+            Write-Output ('R157_STAGE_DIAG present=false directoryCount='+$dirs.Count+' versionedCount='+$recognized.Count+' matchingShaSuffix='+$sameShaSuffix.Count)
+            throw 'R157_EXACT_STAGE_MISSING'
+          }
+          $actual=(& git.exe -C $stage rev-parse HEAD 2>$null | Select-Object -Last 1)
+          $gitExit=$LASTEXITCODE
+          if($gitExit -ne 0 -or ([string]$actual).Trim() -cne $sha){
+            Write-Output ('R157_STAGE_DIAG present=true gitExit='+$gitExit+' exactHeadMatch='+(([string]$actual).Trim() -ceq $sha))
+            throw 'R157_STAGE_GIT_HEAD_MISMATCH'
+          }
           $receipt=[ordered]@{schema=1;revision='R157';status='PASS_HOSTED_WINDOWS_UPDATER_NOPROMOTE'
             exactCommit=$sha;qualifierReceipts=3;doctor='PASS';shadowStore='PASS'
             liveStoreCompatibility='PASS';ownedChildren=0;promoted=$false;stableBrowserUntouched=$true
