@@ -30,8 +30,29 @@ if(Test-Path -LiteralPath $logRoot -PathType Container){
     if($sourceBytes -gt 8388608){$status='LOG_TOO_LARGE'}
     else {
       $sourceSha=(Get-FileHash -LiteralPath $source.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-      $status='TAP_SUMMARY_EXTRACTED'
+      $status='OUTPUT_FORMAT_UNRECOGNIZED'
       foreach($line in [IO.File]::ReadLines($source.FullName)){
+        # Both Node spec and TAP output occur in qualification logs; only
+        # retain bounded public test labels and summary counters.
+        if($line -match '^\s*[\u2716\u2717\u00d7]\s+(.+?)\s*$'){
+          $label=[regex]::Replace([string]$Matches[1],'\s+\([0-9]+(?:\.[0-9]+)?ms\)\s*$','')
+          if($label -match '(?i)bearer|password|secret|cookie|token|private.?key|authorization|api.?key'){$label='REDACTED_TEST_NAME'}
+          $label=[regex]::Replace($label,'[^A-Za-z0-9 _().:/+\-]','?')
+          if($label.Length -gt 112){$label=$label.Substring(0,112)}
+          if($label -match '^(?i:failing tests?):?\s*$'){continue}
+          $alreadySeen=@($failures|Where-Object { $null -eq $_.index -and $_.publicTestName -ceq $label }).Count -gt 0
+          if(-not $alreadySeen -and $failures.Count -lt 24){$failures+=([pscustomobject]@{index=$null;publicTestName=$label})}
+          $status='SPEC_SUMMARY_EXTRACTED'
+          continue
+        }
+        if($line -match '^\s*[\u2139]\s+(tests|pass|fail|cancelled|skipped|todo|duration_ms)\s+([0-9]+(?:\.[0-9]+)?)\s*$'){
+          $totals[[string]$Matches[1]]=[string]$Matches[2]
+          $status='SPEC_SUMMARY_EXTRACTED'
+          continue
+        }
+        if($line -match '^\s*(?:not ok\s+\d+\s+-|#\s*(?:tests|pass|fail|cancelled|skipped|todo|duration_ms)\s+\d+)'){
+          if($status -ne 'SPEC_SUMMARY_EXTRACTED'){$status='TAP_SUMMARY_EXTRACTED'}
+        }
         if($line -match '^\s*not ok\s+([0-9]+)\s+-\s+([^\r\n]+)$'){
           $number=[int]$Matches[1]
           $label=[string]$Matches[2]

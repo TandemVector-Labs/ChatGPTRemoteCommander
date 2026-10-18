@@ -288,3 +288,73 @@ test('R157 staged Windows receipt verifier must parse as PowerShell and retain s
     assert.equal(result.status,0,'PowerShell syntax invalid: '+result.stderr);
   }
 });
+
+
+test('R470 native dual-reporter diagnostics remain bounded, redacted, and fail closed', t=>{
+  if(process.platform!=='win32') return t.skip('requires PowerShell on Windows; static checks remain cross-platform');
+  const sourceSha='05bcc809b65a43c5f383bc9d1e65eb5c03151253';
+  const script=path.join(root,'tools','diagnose-updater-gate-r470.ps1');
+  const base=fs.mkdtempSync(path.join(os.tmpdir(),'rc-r470-dual-reporter-'));
+  const fixture=path.join(base,'expected-failure.test.mjs');
+  const fixtureBody=[
+    "import test from 'node:test';",
+    "test('bounded public fixture failure',()=>{ throw new Error('EXPECTED_SYNTHETIC_TEST_FAILURE') });",
+    ''
+  ].join('\n');
+  try {
+    fs.writeFileSync(fixture,fixtureBody,'utf8');
+    function verifyFormat(kind) {
+      const dir=path.join(base,kind);
+      const logDir=path.join(dir,'STATE','ChatGPTRemoteCommander','update-logs');
+      fs.mkdirSync(logDir,{recursive:true});
+      const name='qualification-output-qualification-test-'+sourceSha.slice(0,12)+'-fixture.stdout.log';
+      const log=path.join(logDir,name);
+      if(['tap','spec'].includes(kind)){
+        const childEnv={...process.env};
+        delete childEnv.NODE_TEST_CONTEXT; // nested test runner must not reuse parent test-worker identity
+        const native=spawnSync(process.execPath,['--test','--test-reporter='+kind,fixture],
+          {encoding:'utf8',timeout:15000,env:childEnv});
+        assert.equal(native.status,1,'synthetic Node test must fail: '+kind);
+        fs.writeFileSync(log,native.stdout,'utf8');
+      } else if(kind==='unknown'){
+        fs.writeFileSync(log,'NOT_A_RECOGNIZED_NODE_REPORTER\n','utf8');
+      } else if(kind==='redaction'){
+        fs.writeFileSync(log,'\u2716 bearer authorization private_key SENSITIVE_SENTINEL\n\u2139 fail 1\n','utf8');
+      } else if(kind==='multiple'){
+        fs.writeFileSync(log,'TAP version 13\n','utf8');
+        fs.writeFileSync(path.join(logDir,name.replace('fixture','other')),'TAP version 13\n','utf8');
+      } else {throw new Error('unexpected fixture');}
+      const diagnostic=spawnSync('pwsh.exe',['-NoProfile','-NonInteractive','-File',
+        script,'-Root',dir,'-ExpectedCommit',sourceSha],{encoding:'utf8',timeout:15000});
+      assert.equal(diagnostic.status,0,'sanitized diagnostic failed: '+kind+' '+diagnostic.stderr);
+      const reportText=fs.readFileSync(path.join(dir,'DIAGNOSTIC_R470.json'),'utf8');
+      assert.ok(!reportText.includes(base),'do not include absolute fixture paths');
+      assert.ok(!reportText.includes('SENSITIVE_SENTINEL'),'do not include test-only secret sentinel');
+      const report=JSON.parse(reportText);
+      assert.equal(report.rawLogIncluded,false);
+      assert.equal(report.secretsIncluded,false);
+      return report;
+    }
+    const tap=verifyFormat('tap');
+    assert.equal(tap.status,'TAP_SUMMARY_EXTRACTED');
+    assert.equal(tap.tapCounts.fail,'1');
+    assert.equal(tap.failureTests.length,1);
+    const spec=verifyFormat('spec');
+    assert.equal(spec.status,'SPEC_SUMMARY_EXTRACTED');
+    assert.equal(spec.tapCounts.fail,'1');
+    assert.equal(spec.failureTests.length,1,'spec summary must not count duplicate failure labels');
+    assert.ok(spec.failureTests[0].publicTestName.includes('bounded public fixture failure'));
+    const unknown=verifyFormat('unknown');
+    assert.equal(unknown.status,'OUTPUT_FORMAT_UNRECOGNIZED');
+    assert.equal(unknown.failureTests.length,0);
+    const sensitive=verifyFormat('redaction');
+    assert.equal(sensitive.status,'SPEC_SUMMARY_EXTRACTED');
+    assert.equal(sensitive.failureTests[0].publicTestName,'REDACTED_TEST_NAME');
+    const ambiguous=verifyFormat('multiple');
+    assert.equal(ambiguous.status,'AMBIGUOUS_MULTIPLE_MATCHING_LOGS');
+    assert.equal(ambiguous.matchingLogCount,2);
+    assert.equal(ambiguous.failureTests.length,0);
+  } finally {
+    fs.rmSync(base,{recursive:true,force:true});
+  }
+});
