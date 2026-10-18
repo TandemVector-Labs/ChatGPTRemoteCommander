@@ -236,3 +236,55 @@ test('R470 Windows fixture extracts failing test and counters without persisting
   assert.equal(many.status,'AMBIGUOUS_MULTIPLE_MATCHING_LOGS');
   assert.equal(many.failureTests.length,0,'never guess newest');
 });
+
+test('R157 stage verifier derives version from the validated updater receipt and reports fail-closed stage identity',()=>{
+  const workflow=read('.github/workflows/windows-updater-e2e-r157.yml');
+  assert.ok(workflow.includes("$" + "report.version"),'expected stage version must come from actual updater receipt');
+  assert.ok(workflow.includes("R157_STAGE_VERSION_UNVERIFIED"));
+  assert.ok(workflow.includes("R157_STAGE_DIAG"),'stage probe should expose only bounded, nonsensitive counts');
+  assert.ok(workflow.includes("R157_EXACT_STAGE_MISSING"));
+  assert.ok(workflow.includes("R157_STAGE_GIT_HEAD_MISMATCH"));
+  assert.ok(workflow.includes("git.exe -C $" + "stage rev-parse HEAD"),'staged checkout must match immutable PR commit');
+  assert.ok(!workflow.includes("('releases\\v0.10.21-'+$" + "sha.Substring(0,12))"),'hardcoded release version is not authoritative');
+  assert.ok(workflow.includes("R157_UNEXPECTED_ROUTE_PROMOTION"),'positive/negative NoPromote checks preserved');
+});
+
+
+test('R157 staged Windows receipt verifier must parse as PowerShell and retain step order',()=>{
+  const workflow=read('.github/workflows/windows-updater-e2e-r157.yml');
+  const marker='      - name: Independently verify exact Job receipts and no promotion';
+  const next='      - name: R470 derive a bounded, allowlisted failure diagnostic';
+  const first=workflow.indexOf(marker);
+  const last=workflow.indexOf(next,first);
+  assert.ok(first>=0 && last>first,'expected exactly ordered qualification/verifier and diagnostic steps');
+  assert.equal(workflow.indexOf(marker,first+1),-1,'single stage verifier step only');
+  const section=workflow.slice(first,last);
+  const runHeader='        run: |';
+  const runStart=section.indexOf(runHeader);
+  assert.ok(runStart>=0,'verifier must contain a real run script');
+  const body=section.slice(runStart+runHeader.length).replace(/^\r?\n/,'');
+  const lines=body.split(/\r?\n/).filter(x=>x.length>0);
+  assert.ok(lines.length>=45,'missing verifier script lines');
+  assert.ok(lines.every(x=>x.startsWith('          ')),
+    'all verifier script source must remain inside YAML block scalar');
+  const script=lines.map(x=>x.slice(10)).join('\n');
+  const sequence=[
+    'R157_BAD_RESULT_','R157_PROFILE_GATE_FAIL',
+    'R157_JOB_COUNT_','R157_UNEXPECTED_ROUTE_PROMOTION',
+    'R157_ORPHANS_','R157_STAGE_VERSION_UNVERIFIED',
+    'R157_EXACT_STAGE_MISSING','R157_STAGE_GIT_HEAD_MISMATCH',
+    'R157_PASS source='
+  ];
+  let index=-1;
+  for(const item of sequence){
+    const at=script.indexOf(item,index+1);
+    assert.ok(at>index,'missing or out-of-order fail-closed gate: '+item);
+    index=at;
+  }
+  if(process.platform==='win32'){
+    const verify='$tokens=$null; $errors=$null; [Management.Automation.Language.Parser]::ParseInput([Console]::In.ReadToEnd(),[ref]$tokens,[ref]$errors)|Out-Null; if(@($errors).Count){ $errors | ForEach-Object { [Console]::Error.WriteLine($_.Message) }; exit 1 }';
+    const result=spawnSync('pwsh.exe',['-NoLogo','-NoProfile','-NonInteractive','-Command',verify],
+      {input:script,encoding:'utf8',timeout:10000});
+    assert.equal(result.status,0,'PowerShell syntax invalid: '+result.stderr);
+  }
+});
