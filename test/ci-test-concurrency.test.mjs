@@ -322,6 +322,8 @@ test('R470 native dual-reporter diagnostics remain bounded, redacted, and fail c
         fs.writeFileSync(log,'\u2716 bearer authorization private_key SENSITIVE_SENTINEL\n\u2139 fail 1\n','utf8');
       } else if(kind==='private-win-path'){
         fs.writeFileSync(log,'\u2716 failure at C:/Users/PRIVATE_ACCOUNT/Documents/confidential-data\n\u2139 fail 1\n','utf8');
+      } else if(kind==='public-url'){
+        fs.writeFileSync(log,'\u2716 request http://127.0.0.1:47831/router/status failed\n\u2139 fail 1\n','utf8');
       } else if(kind==='private-posix-path'){
         fs.writeFileSync(log,'not ok 1 - failure at /home/PRIVATE_ACCOUNT/confidential-data\n# fail 1\n','utf8');
       } else if(kind==='multiple'){
@@ -357,6 +359,10 @@ test('R470 native dual-reporter diagnostics remain bounded, redacted, and fail c
     const winPrivate=verifyFormat('private-win-path');
     assert.equal(winPrivate.status,'SPEC_SUMMARY_EXTRACTED');
     assert.equal(winPrivate.failureTests[0].publicTestName,'REDACTED_TEST_NAME');
+    const publicUrl=verifyFormat('public-url');
+    assert.equal(publicUrl.status,'SPEC_SUMMARY_EXTRACTED');
+    assert.ok(publicUrl.failureTests[0].publicTestName.includes('http://127.0.0.1:47831/router/status'),
+      'public localhost endpoint must not be mistaken for a host filesystem path');
     const posixPrivate=verifyFormat('private-posix-path');
     assert.equal(posixPrivate.status,'TAP_SUMMARY_EXTRACTED');
     assert.equal(posixPrivate.failureTests[0].publicTestName,'REDACTED_TEST_NAME');
