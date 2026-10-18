@@ -320,6 +320,10 @@ test('R470 native dual-reporter diagnostics remain bounded, redacted, and fail c
         fs.writeFileSync(log,'NOT_A_RECOGNIZED_NODE_REPORTER\n','utf8');
       } else if(kind==='redaction'){
         fs.writeFileSync(log,'\u2716 bearer authorization private_key SENSITIVE_SENTINEL\n\u2139 fail 1\n','utf8');
+      } else if(kind==='private-win-path'){
+        fs.writeFileSync(log,'\u2716 failure at C:/Users/PRIVATE_ACCOUNT/Documents/confidential-data\n\u2139 fail 1\n','utf8');
+      } else if(kind==='private-posix-path'){
+        fs.writeFileSync(log,'not ok 1 - failure at /home/PRIVATE_ACCOUNT/confidential-data\n# fail 1\n','utf8');
       } else if(kind==='multiple'){
         fs.writeFileSync(log,'TAP version 13\n','utf8');
         fs.writeFileSync(path.join(logDir,name.replace('fixture','other')),'TAP version 13\n','utf8');
@@ -350,6 +354,12 @@ test('R470 native dual-reporter diagnostics remain bounded, redacted, and fail c
     const sensitive=verifyFormat('redaction');
     assert.equal(sensitive.status,'SPEC_SUMMARY_EXTRACTED');
     assert.equal(sensitive.failureTests[0].publicTestName,'REDACTED_TEST_NAME');
+    const winPrivate=verifyFormat('private-win-path');
+    assert.equal(winPrivate.status,'SPEC_SUMMARY_EXTRACTED');
+    assert.equal(winPrivate.failureTests[0].publicTestName,'REDACTED_TEST_NAME');
+    const posixPrivate=verifyFormat('private-posix-path');
+    assert.equal(posixPrivate.status,'TAP_SUMMARY_EXTRACTED');
+    assert.equal(posixPrivate.failureTests[0].publicTestName,'REDACTED_TEST_NAME');
     const ambiguous=verifyFormat('multiple');
     assert.equal(ambiguous.status,'AMBIGUOUS_MULTIPLE_MATCHING_LOGS');
     assert.equal(ambiguous.matchingLogCount,2);

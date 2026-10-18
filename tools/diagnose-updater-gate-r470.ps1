@@ -36,7 +36,7 @@ if(Test-Path -LiteralPath $logRoot -PathType Container){
         # retain bounded public test labels and summary counters.
         if($line -match '^\s*[\u2716\u2717\u00d7]\s+(.+?)\s*$'){
           $label=[regex]::Replace([string]$Matches[1],'\s+\([0-9]+(?:\.[0-9]+)?ms\)\s*$','')
-          if($label -match '(?i)bearer|password|secret|cookie|token|private.?key|authorization|api.?key'){$label='REDACTED_TEST_NAME'}
+          if($label -match '(?i)bearer|password|secret|cookie|token|private.?key|authorization|api.?key' -or $label -match '(?i)(?:[a-z]:[\\/]|\\\\[^\\/\s]+[\\/]|(?<![a-z0-9:/])/[^\s]+|(?:^|[\s=])~[\\/])'){$label='REDACTED_TEST_NAME'}
           $label=[regex]::Replace($label,'[^A-Za-z0-9 _().:/+\-]','?')
           if($label.Length -gt 112){$label=$label.Substring(0,112)}
           if($label -match '^(?i:failing tests?):?\s*$'){continue}
@@ -56,7 +56,7 @@ if(Test-Path -LiteralPath $logRoot -PathType Container){
         if($line -match '^\s*not ok\s+([0-9]+)\s+-\s+([^\r\n]+)$'){
           $number=[int]$Matches[1]
           $label=[string]$Matches[2]
-          if($label -match '(?i)bearer|password|secret|cookie|token|private.?key|authorization|api.?key'){ $label='REDACTED_TEST_NAME' }
+          if($label -match '(?i)bearer|password|secret|cookie|token|private.?key|authorization|api.?key' -or $label -match '(?i)(?:[a-z]:[\\/]|\\\\[^\\/\s]+[\\/]|(?<![a-z0-9:/])/[^\s]+|(?:^|[\s=])~[\\/])'){ $label='REDACTED_TEST_NAME' }
           $label=[regex]::Replace($label,'[^A-Za-z0-9 _().:/+\-]','?')
           if($label.Length -gt 112){$label=$label.Substring(0,112)}
           if($failures.Count -lt 24){$failures+=([pscustomobject]@{index=$number;publicTestName=$label})}
