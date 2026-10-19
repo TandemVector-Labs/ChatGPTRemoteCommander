@@ -967,6 +967,27 @@ try{
   $stage=Stage-Release $ref
   $report.ref=$ref;$report.commit=$stage.Commit;$report.version=$stage.Version
   $script:QualificationCommit=$stage.Commit
+  # R-fleet: An accepted newer route is a durable version authority even when
+  # the canonical MCP is temporarily unavailable during a restart. An unattended
+  # Stable check must not silently replace a newer approved preview with Stable.
+  # An explicit -Force remains the deliberate rollback escape hatch.
+  if(-not $Force){
+    $persistedRoutePath=Get-RoutePath 'default'
+    if(Test-Path -LiteralPath $persistedRoutePath -PathType Leaf){
+      $persistedRoute=Read-Json $persistedRoutePath
+      $persistedVersion=[string]$persistedRoute.active.version
+      if(-not $persistedVersion){throw 'AUTO_UPDATE_PERSISTED_ROUTE_VERSION_MISSING'}
+      if(Test-VersionGreater $persistedVersion $stage.Version){
+        $report.status='NEWER_CURRENT'
+        $report.currentVersion=$persistedVersion
+        $report.authoritySource='PERSISTED_ROUTE'
+        $report.completedAt=(Get-Date).ToUniversalTime().ToString('o')
+        Atomic-Json $ResultFile $report
+        Log "AUTO_UPDATE_NEWER_PERSISTED_ROUTE current=$persistedVersion target=$($stage.Version)"
+        exit 0
+      }
+    }
+  }
   $currentStatus=$null
   try{$currentStatus=Invoke-Mcp 47831 'system_status'}catch{}
   if(-not $Force -and $currentStatus -and (Test-VersionGreater ([string]$currentStatus.version) $stage.Version)){
