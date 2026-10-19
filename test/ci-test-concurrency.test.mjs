@@ -394,3 +394,21 @@ test('concurrency smoke bounds startup and detects failed owned child without we
   assert.ok(!smoke.includes('server did not become healthy: ${serverOutput}'),
     'do not expose unsanitized child output in public CI');
 });
+
+test('CI events avoid redundant feature-branch push while retaining required full PR and main/tag coverage',()=>{
+  const workflow=read('.github/workflows/ci.yml');
+  const events=workflow.match(/^on:\r?\n([\s\S]*?)^permissions:/m)?.[1];
+  assert.ok(events,'CI event block must be present');
+  const push=events.match(/^  push:\r?\n([\s\S]*?)(?=^  pull_request:)/m)?.[1];
+  assert.ok(push,'CI still needs a push event');
+  assert.match(push,/^    branches:\r?\n      - main\r?$/m,'main pushes must still run CI');
+  assert.match(push,/^    tags:\r?\n      - '\*\*'\r?$/m,'all tag pushes retain CI');
+  assert.match(events,/^  pull_request:\s*$/m,'PR checks remain unfiltered, including stacked PRs');
+  assert.equal((events.match(/^  push:/gm)||[]).length,1);
+  assert.equal((events.match(/^  pull_request:/gm)||[]).length,1);
+  const remainder=workflow.slice(workflow.indexOf('permissions:'));
+  assert.match(remainder,/os: \[windows-latest, ubuntu-latest\]/,'both operating systems remain required');
+  assert.ok(remainder.includes('Run qualification check with bounded Windows file concurrency'));
+  assert.ok(remainder.includes('Run qualification suite with bounded Windows file concurrency'));
+  assert.ok(remainder.includes('run: npm run audit'),'security audit remains required');
+});
