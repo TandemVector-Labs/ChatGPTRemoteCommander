@@ -52,9 +52,40 @@ test('MCP Tasks extension maps durable Commander operations without changing fal
       powerMode:{enabled:false,fullFilesystem:false,allowShell:false,allowProcessControl:false,allowPermanentDelete:false,guiControl:{enabled:false},browserControl:{enabled:false}}};
     const configPath=path.join(serverRoot,'config.json');await fs.writeFile(configPath,JSON.stringify(config,null,2));
     child=spawn(process.execPath,[path.join(serverRoot,'src','server-v0.3.mjs')],{cwd:serverRoot,env:{...process.env,REMOTE_COMMANDER_CONFIG:configPath},stdio:['ignore','pipe','pipe']});
-    let stderr='';child.stderr.on('data',c=>stderr+=c.toString('utf8'));
-    let healthy=false;for(let i=0;i<400;i++){try{const r=await fetch(`http://127.0.0.1:${port}/health`);if(r.ok){healthy=true;break;}}catch{}await wait(25);}
-    assert.equal(healthy,true,stderr);
+    let serverStderrBytes=0;
+    child.stderr.on('data',chunk=>{serverStderrBytes+=chunk.byteLength;});
+    let childOutcome='RUNNING';
+    child.once('exit',(code,signal)=>{
+      childOutcome=code===null?'SIGNAL_'+String(signal??'UNKNOWN'):'CODE_'+String(code);
+    });
+    child.once('error',(error)=>{
+      childOutcome='SPAWN_'+(['ENOENT','EACCES','EPERM'].includes(error?.code)?error.code:'ERROR');
+    });
+    // One bounded startup window; independently cap each HTTP probe and detect early exit.
+    const startedAt=Date.now(), startupDeadline=startedAt+30000;
+    let healthy=false, attempts=0, lastProbe='NOT_STARTED';
+    while(Date.now()<startupDeadline){
+      if(childOutcome!=='RUNNING'||child.exitCode!==null||child.signalCode!==null)break;
+      const remaining=Math.max(1,startupDeadline-Date.now());
+      try{
+        const response=await fetch(`http://127.0.0.1:${port}/health`,{
+          signal:AbortSignal.timeout(Math.min(1000,remaining))
+        });
+        if(response.ok){healthy=true;break;}
+        lastProbe='HTTP_'+String(response.status);
+      }catch(error){
+        const code=error?.cause?.code;
+        lastProbe=['ECONNREFUSED','ECONNRESET','ETIMEDOUT'].includes(code)
+          ?code:error?.name==='TimeoutError'?'PROBE_TIMEOUT':'PROBE_ERROR';
+      }
+      attempts++;
+      const pause=Math.min(25,Math.max(0,startupDeadline-Date.now()));
+      if(pause)await wait(pause);
+    }
+    assert.equal(healthy,true,
+      'MCP_TASKS_HEALTH_'+(childOutcome==='RUNNING'?'STARTUP_TIMEOUT':'CHILD_EXIT')+
+      ' elapsedMs='+(Date.now()-startedAt)+' attempts='+attempts+
+      ' lastProbe='+lastProbe+' stderrBytes='+serverStderrBytes+' child='+childOutcome);
 
     const discover=await rpc(port,1,'server/discover',{_meta:meta(true)},undefined);
     assert.equal(discover.status,200);

@@ -44,20 +44,53 @@ const server = spawn(process.execPath, [path.join(isolatedSrc, 'server-v0.3.mjs'
   env: { ...process.env, REMOTE_COMMANDER_CONFIG: configPath },
   stdio: ['ignore', 'pipe', 'pipe']
 });
-let serverOutput = '';
-server.stdout.on('data', (chunk) => { serverOutput += chunk.toString('utf8'); });
-server.stderr.on('data', (chunk) => { serverOutput += chunk.toString('utf8'); });
+let serverOutputBytes = 0;
+const captureOutput = (chunk) => { serverOutputBytes += chunk.byteLength; };
+server.stdout.on('data', captureOutput);
+server.stderr.on('data', captureOutput);
+let serverExited = false;
+let serverExitReason = 'NONE';
+server.once('exit', (code, signal) => {
+  serverExited = true;
+  serverExitReason = code === null ? 'SIGNAL_' + String(signal ?? 'UNKNOWN') : 'CODE_' + String(code);
+});
+server.once('error', (error) => {
+  serverExited = true;
+  serverExitReason = 'SPAWN_' + (/^[A-Z0-9_]{1,32}$/.test(error?.code ?? '') ? error.code : 'ERROR');
+});
 process.once('exit', () => { try { server.kill('SIGTERM'); } catch {} });
 
+// Use one bounded 30s startup budget for health and owned runtime state.
+// A hosted Windows health probe exceeded the old ~10s window; cause remains
+// unverified, so early process exit and per-probe failures remain observable.
+const startupStartedAt = Date.now();
+const startupDeadline = startupStartedAt + 30000;
 async function waitForHealth() {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  let attempts = 0;
+  let lastProbe = 'NOT_STARTED';
+  while (Date.now() < startupDeadline) {
+    if (serverExited || server.exitCode !== null || server.signalCode !== null) {
+      throw new Error('CONCURRENCY_HEALTH_CHILD_EXIT ' + serverExitReason);
+    }
+    const remaining = Math.max(1, startupDeadline - Date.now());
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/health`);
+      const response = await fetch(`http://127.0.0.1:${port}/health`, {
+        signal: AbortSignal.timeout(Math.min(1000, remaining))
+      });
       if (response.ok) return;
-    } catch { /* startup */ }
-    await new Promise((resolve) => setTimeout(resolve, 100));
+      lastProbe = 'HTTP_' + String(response.status);
+    } catch (error) {
+      const code = error?.cause?.code;
+      lastProbe = ['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT'].includes(code)
+        ? code : error?.name === 'TimeoutError' ? 'FETCH_TIMEOUT' : 'FETCH_ERROR';
+    }
+    attempts += 1;
+    const pause = Math.min(100, Math.max(0, startupDeadline - Date.now()));
+    if (pause) await new Promise((resolve) => setTimeout(resolve, pause));
   }
-  throw new Error(`server did not become healthy: ${serverOutput}`);
+  throw new Error('CONCURRENCY_HEALTH_STARTUP_TIMEOUT elapsedMs=' +
+    (Date.now() - startupStartedAt) + ' attempts=' + attempts +
+    ' probe=' + lastProbe + ' outputBytes=' + serverOutputBytes);
 }
 
 async function waitForRuntimeState(timeoutMs = 30000) {
@@ -74,7 +107,10 @@ async function waitForRuntimeState(timeoutMs = 30000) {
     }
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  throw new Error(`runtime state did not become ready: ${lastError?.message ?? 'unknown'}; ${serverOutput}`);
+  const reason = lastError?.code === 'ENOENT' ? 'STATE_MISSING'
+    : lastError instanceof SyntaxError ? 'STATE_INVALID_JSON' : 'STATE_IDENTITY';
+  throw new Error('CONCURRENCY_STATE_STARTUP_TIMEOUT reason=' + reason +
+    ' outputBytes=' + serverOutputBytes + ' childExited=' + serverExited);
 }
 
 let nextId = 1;
@@ -95,7 +131,7 @@ async function callTool(name, args = {}) {
 
 try {
   await waitForHealth();
-  const isolatedState = await waitForRuntimeState();
+  const isolatedState = await waitForRuntimeState(Math.max(1, startupDeadline - Date.now()));
   assert.equal(isolatedState.port, port);
   assert.equal(path.resolve(isolatedState.projectDir), isolatedApp);
 

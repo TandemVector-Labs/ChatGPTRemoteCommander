@@ -374,3 +374,23 @@ test('R470 native dual-reporter diagnostics remain bounded, redacted, and fail c
     fs.rmSync(base,{recursive:true,force:true});
   }
 });
+
+test('concurrency smoke bounds startup and detects failed owned child without weakening action assertions',()=>{
+  const smoke=read('test/concurrency-smoke.mjs');
+  for (const marker of [
+    'const startupDeadline = startupStartedAt + 30000',
+    "server.once('exit'",
+    "server.once('error'",
+    'AbortSignal.timeout(Math.min(1000, remaining))',
+    'CONCURRENCY_HEALTH_CHILD_EXIT',
+    'CONCURRENCY_HEALTH_STARTUP_TIMEOUT',
+    'CONCURRENCY_STATE_STARTUP_TIMEOUT',
+    'waitForRuntimeState(Math.max(1, startupDeadline - Date.now()))',
+    'CONCURRENCY_SMOKE_PASS',
+    'liveRuntimeStateAfter'
+  ]) assert.ok(smoke.includes(marker),marker);
+  assert.ok(!smoke.includes('for (let attempt = 0; attempt < 100; attempt += 1)'),
+    'obsolete fixed 10-second polling loop must not be revived');
+  assert.ok(!smoke.includes('server did not become healthy: ${serverOutput}'),
+    'do not expose unsanitized child output in public CI');
+});
