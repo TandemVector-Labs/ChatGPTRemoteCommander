@@ -6,7 +6,8 @@ namespace RemoteCommander;
 internal sealed record ProfileRow(
     string Name, int Generation, string Version, string Commit,
     int BackendPort, int RouterPort, int RouterPid,
-    DateTimeOffset? UpdatedAt, string ProjectDir);
+    DateTimeOffset? UpdatedAt, string ProjectDir,
+    string BackendConfigSha256, string RouterSourceSha256);
 
 internal static class Program
 {
@@ -34,7 +35,8 @@ internal static class Program
             throw new Exception("R34_DARK_LIGHT_THEME_NOT_APPLIED");
 
         var profiles = new ProfileRow[] {
-            new("default", 34, "0.10.20", "362375c", 48831, 48831, 42, null, "C:/private")
+            new("default", 34, "0.10.20", "362375c", 48831, 48831, 42, null, "C:/private",
+                new string('a', 64), new string('b', 64))
         };
         chrome.Update(profiles);
         var actual = table.Controls.OfType<Panel>()
@@ -58,6 +60,38 @@ internal static class Program
         primary.Size = new Size(700, 110);
         if (primary.Region is null)
             throw new Exception("R34_ROUNDED_CARD_REGION");
+        // Pure read-only router/backend/profiles matching: never generate a user GUI action.
+        const string commit = "362375c464948be3001b307650c13fc3353ed05b";
+        var expected = new ProfileRow("default", 34, "0.10.20", commit,
+            48831, 47831, 42, null, "C:/private", new string('a', 64), new string('b', 64));
+        var route = System.Text.Json.JsonSerializer.Serialize(new {
+            ok=true, router=true, listenPort=47831, sourceSha256=new string('b',64),
+            state=new { profile="default", generation=34,
+                active=new {version="0.10.20", commit, port=48831, configSha256=new string('a',64)} }
+        });
+        var backend = System.Text.Json.JsonSerializer.Serialize(new {
+            ok=true, name="chatgpt-remote-commander", version="0.10.20",
+            configSha256=new string('a',64), instance=new { profile="default" }
+        });
+        if (!ProfileHealthEvidence.Matches(expected, route, backend))
+            throw new Exception("R590_VALID_PROFILE_IDENTITY_NOT_ACCEPTED");
+        foreach (var bad in new[] {
+            route.Replace("\"default\"","\"wrong\""),
+            route.Replace("47831","40000"),
+            route.Replace(new string('b',64),new string('f',64)),
+            route.Replace(commit, new string('0',40))
+        }) if (ProfileHealthEvidence.Matches(expected, bad, backend))
+            throw new Exception("R590_FALSE_ROUTER_IDENTITY_ACCEPTED");
+        foreach (var bad in new[] {
+            backend.Replace("\"default\"","\"wrong\""),
+            backend.Replace(new string('a',64),new string('f',64)),
+            backend.Replace("0.10.20","0.10.22")
+        }) if (ProfileHealthEvidence.Matches(expected, route, bad))
+            throw new Exception("R590_FALSE_BACKEND_IDENTITY_ACCEPTED");
+        if (ProfileHealthEvidence.Matches(expected, "{", backend))
+            throw new Exception("R590_BAD_JSON_ACCEPTED");
+        Console.WriteLine("R590_ROUTER_BACKEND_PROFILE_IDENTITY_OFFSCREEN_PASS");
+
         chrome.Footer.Dispose();
         chrome.Search.Dispose();
         chrome.Metrics.Dispose();

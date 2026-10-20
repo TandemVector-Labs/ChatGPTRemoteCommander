@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createWorkflowTools } from '../src/workflow-tools.mjs';
+import { createWorkflowTools,WORKFLOW_TOOL_DEFINITIONS,PROJECT_ENGINE_TOOL_DEFINITIONS } from '../src/workflow-tools.mjs';
 import { validateJsonSchema } from '../src/schema-validator.mjs';
 import { listDirectory,readText,writeText } from '../src/tools-v0.3.mjs';
 
@@ -105,7 +105,12 @@ test('uncertain mutation blocks continuation and is never automatically replayed
 test('runner status is opt-in while the project-engine tool schema stays stable',async()=>{
   const f=fixture(async()=>proposal('read_text',{path:'x'}));let legacy;
   try{const opts={...f.options,config:{...f.options.config,durableWorkflows:{...f.options.config.durableWorkflows,directory:path.join(f.root,'legacy'),runner:{enabled:false}}}};
-    legacy=createWorkflowTools(opts);assert.equal(legacy.definitions.length,22);assert.equal(f.api.definitions.length,22);assert.ok(legacy.definitions.some(x=>x.name==='workflow_needs_chat'));
+    legacy=createWorkflowTools(opts);
+    const expected=WORKFLOW_TOOL_DEFINITIONS.length+PROJECT_ENGINE_TOOL_DEFINITIONS.length;
+    assert.equal(legacy.definitions.length,expected);
+    assert.equal(f.api.definitions.length,expected);
+    for(const toolName of ['workflow_needs_chat','workflow_roadmap','workflow_plan_insert','workflow_plan_edit','workflow_plan_prioritize'])
+      assert.ok(legacy.definitions.some(x=>x.name===toolName),toolName);
     const disabled=await legacy.execute('workflow_status',{});assert.equal(disabled.runnerConfigured,false);assert.equal(disabled.automaticExecution,false);
     await assert.rejects(legacy.execute('workflow_run_status',{runId:'disabled'}),/WORKFLOW_RUNNER_DISABLED/);
     const enabled=await f.api.execute('workflow_status',{});assert.equal(enabled.runnerConfigured,true);assert.equal(enabled.automaticExecution,false);

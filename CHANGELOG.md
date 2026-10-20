@@ -1,3 +1,18 @@
+# 0.10.25 - SOURCE CANDIDATE ONLY (2026-10-17, NOT RELEASED)
+
+- Native owner-editable durable roadmap in Commander, source parent merged PR #238 at 99d3908e848eee01714eb8e2832b4f5eba5f8df1.
+- Candidate identity raised to 0.10.25 across runtime, package, desktop and Commander Plugin templates.
+- No tag, public release, rollout, Runner auto-enrollment, Codex handoff or new privilege.
+- Previous v0.10.24 UNSIGNED Preview policy remains limited to that exact version; **v0.10.25 unsigned distribution is NOT approved**.
+- Existing installer default source refs deliberately remain at v0.10.24 until a separate versioned owner-reviewed release/rollback gate.
+- Qualification: full local/hosted suite, exact isolated native tool canary, no-conflict rollback snapshot before any considered live promotion.
+
+# 0.10.24 - 2026-10-15 (SOURCE QUALIFICATION ONLY, NO TAG)
+
+- Align new candidate source version after security, Coucou privacy and verified Control Center patches.
+- Disallow unsigned v0.10.24 distribution until a fresh owner decision or Authenticode signature.
+- Preserve published v0.10.20 Stable and older v0.10.23 Draft and its release evidence.
+
 ## 0.10.23 - 2026-10-15 (SOURCE CANDIDATE, NOT PUBLISHED STABLE)
 
 - Integrate owner-host Linux rollback control Git fix from PR #219: exact verified staged SHA and shallow update. R566-R569 regression-first, full isolated QA and hosted Windows/Linux CI accepted before integration.
