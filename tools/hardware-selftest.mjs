@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import { validateHardwareSelftestEndpoint } from './hardware-selftest-endpoint.mjs';
+import { readBoundedHardwareResponse } from './hardware-selftest-response.mjs';
 
-const MAX_RESPONSE=2*1024*1024;
 function fail(code,detail=''){const e=new Error(detail?code+': '+detail:code);e.code=code;throw e;}
 function parse(argv){
   const o={timeoutMs:10000};
@@ -21,8 +21,7 @@ function parse(argv){
   return o;
 }
 async function readBounded(r){
-  const t=await r.text();
-  if(Buffer.byteLength(t)>MAX_RESPONSE)fail('SELFTEST_RESPONSE_TOO_LARGE');
+  const t=await readBoundedHardwareResponse(r);
   if(!r.ok)fail('SELFTEST_HTTP_'+r.status,t.slice(0,300));
   return t?JSON.parse(t):null;
 }
