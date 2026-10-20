@@ -202,6 +202,42 @@ export function parseQualificationArgs(argv){
   return out;
 }
 
+/**
+ * Accept only repository-owned Node qualification commands, not arbitrary shell source.
+ * R157 phase markers become bounded console output instead of shell commands.
+ */
+export function parseNodeQualificationPlan(command) {
+  if(typeof command!=='string'||!command||command.length>20000)
+    throw new Error('CI_TEST_COMMAND_INVALID');
+  const parts=command.split(' && ');
+  if(!parts.length||parts.some(part=>!part||part!==part.trim()))
+    throw new Error('CI_TEST_COMMAND_SHAPE_INVALID');
+  return parts.map(part=>{
+    if(/^echo RC_QUAL_PHASE_(?:START|PASS)_[0-9]{2}$/.test(part))
+      return {kind:'marker',value:part.slice('echo '.length)};
+    const tokens=part.split(' ');
+    if(tokens[0]!=='node'||tokens.some(x=>!x))
+      throw new Error('CI_TEST_COMMAND_NOT_NODE');
+    let fileStart=1;
+    if(tokens[1]==='--test'){
+      fileStart=2;
+      if(/^--test-concurrency=[1-8]$/.test(tokens[2]??''))fileStart=3;
+      else if(tokens[2]?.startsWith('--'))throw new Error('CI_TEST_OPTION_INVALID');
+    }else if(tokens[1]==='--check'){
+      fileStart=2;
+      if(tokens.length!==3)throw new Error('CI_TEST_CHECK_CARDINALITY');
+    }else if(tokens[1]?.startsWith('--'))throw new Error('CI_TEST_OPTION_INVALID');
+    const files=tokens.slice(fileStart);
+    const isOwnedSource=file=>{
+      if(!/^(?:src|test|tools)\/[a-zA-Z0-9._/-]+\.mjs$/.test(file))return false;
+      return file.split('/').every(part=>part!=='.'&&part!=='..'&&part.length>0);
+    };
+    if(!files.length||!files.every(isOwnedSource))
+      throw new Error('CI_TEST_SOURCE_PATH_INVALID');
+    return {kind:'node',args:tokens.slice(1)};
+  });
+}
+
 function run(){
   const args=parseQualificationArgs(process.argv.slice(2));
   const pkg=JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8'));
@@ -224,12 +260,22 @@ function run(){
   if(process.platform==='win32'&&args.script==='test'&&process.env.RC_QUALIFICATION_RUN_ID)
     command=markIsolatedQualificationPhases(command);
   console.log('CI_TEST_CONCURRENCY script='+args.script+' requestedConcurrency='+requestedConcurrency+' effectiveConcurrency='+effectiveConcurrency+' replacements='+bounded.replacements+' prioritizeSensitive='+prioritizeSensitive);
-  const child=process.platform==='win32'
-    ? spawnSync(process.env.ComSpec||'cmd.exe',['/d','/s','/c',command],{cwd:root,env:process.env,stdio:'inherit'})
-    : spawnSync('/bin/sh',['-lc',command],{cwd:root,env:process.env,stdio:'inherit'});
-  if(child.error)throw child.error;
-  if(child.signal)throw new Error(`CI_TEST_SIGNAL_${child.signal}`);
-  process.exitCode=Number.isInteger(child.status)?child.status:1;
+  // Parse all commands before starting any child. Never invoke an OS shell.
+  const plan=parseNodeQualificationPlan(command);
+  for(const step of plan){
+    if(step.kind==='marker'){console.log(step.value);continue;}
+    const child=spawnSync(process.execPath,step.args,{
+      cwd:root,env:process.env,stdio:'inherit',windowsHide:true,shell:false
+    });
+    if(child.error)throw child.error;
+    if(child.signal)throw new Error('CI_TEST_SIGNAL_'+child.signal);
+    if(!Number.isInteger(child.status)||child.status!==0){
+      process.exitCode=Number.isInteger(child.status)?child.status:1;
+      return;
+    }
+  }
+  process.exitCode=0;
+
 }
 
 if(process.argv[1]&&path.resolve(process.argv[1])===path.resolve(self)){

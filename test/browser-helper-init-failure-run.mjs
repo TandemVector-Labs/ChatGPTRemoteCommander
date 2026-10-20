@@ -21,12 +21,12 @@ const send=o=>child.stdin.write(JSON.stringify(o)+'\n');
 try{
  const ready=await next();if(ready.ok!==true||ready.ready!==true)throw Error('HELPER_NOT_READY');
  send({action:'start',profileDir:profile,isolated:true,executable:process.execPath});const failed=await next();
- if(failed.ok!==false||!['BROWSER_LAUNCH_FAILED','BROWSER_DEVTOOLS_TIMEOUT','BROWSER_DEVTOOLS_UNAVAILABLE'].includes(failed.error))throw Error('EXPECTED_INIT_FAILURE');
+ if(failed.ok!==false||failed.error!=='BROWSER_EXECUTABLE_NOT_FOUND')throw Error('UNTRUSTED_EXECUTABLE_NOT_REJECTED');
  for(let i=0;i<80&&fs.existsSync(profile);i++)await new Promise(r=>setTimeout(r,50));
  if(fs.existsSync(profile))throw Error('INIT_FAILURE_PROFILE_NOT_REMOVED');
  send({action:'status'});const status=await next();
  if(status.ok!==true||status.active!==false)throw Error('HELPER_NOT_RECOVERED_AFTER_INIT_FAILURE');
- console.log(JSON.stringify({status:'BROWSER_INIT_FAILURE_CLEANUP_PASS',error:failed.error,profileRemoved:true,helperAlive:true}));
+ console.log(JSON.stringify({status:'BROWSER_UNTRUSTED_EXECUTABLE_REJECTED',error:failed.error,profileRemoved:true,helperAlive:true}));
 }finally{
  rl.close();
  if(child.exitCode===null){try{child.stdin.end();}catch{}await Promise.race([once(child,'close'),new Promise(resolve=>setTimeout(resolve,1500))]);}

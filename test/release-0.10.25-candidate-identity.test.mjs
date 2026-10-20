@@ -49,3 +49,19 @@ test('future tagged release workflow remains guarded and no automatic publisher 
   assert.ok(read('test/release-assets-contract.test.mjs').includes('RELEASE_0.10.24.md'));
   assert.ok(read('docs/RELEASE_0.10.21.md').includes('Core v0.10.21'));
 });
+
+test('current publication documents use canonical organization while keeping historical source lineage',()=>{
+  const attribution=read('docs/PUBLISHER_AND_MAINTAINERS.md');
+  const candidate=read('docs/RELEASE_CANDIDATE_0.10.25.md');
+  for(const doc of [attribution,candidate]){
+    assert.match(doc,/TandemVector-Labs\/ChatGPTRemoteCommander/);
+    assert.match(doc,/Aliakbar Emadoddin/);
+    assert.match(doc,/MMZ/);
+  }
+  assert.match(attribution,/Usefull-Skills/,'migration provenance must be preserved');
+  assert.match(attribution,/v0\.10\.24 only/);
+  assert.match(candidate,/SOURCE CANDIDATE ONLY/);
+  assert.match(candidate,/local Commander Core `0\.10\.25` runtime/);
+  assert.doesNotMatch(candidate,/NOT tagged, released, installed/);
+  assert.doesNotMatch(attribution,/\*\*Distribution repository:\*\*\s*https:\/\/github\.com\/GOD13emad/);
+});
