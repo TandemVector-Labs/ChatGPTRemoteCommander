@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import {verifySyncthingDaemon} from './doctor-rest-identity.mjs';
+import {verifySyncthingDaemon,configuredLoopbackRest} from './doctor-rest-identity.mjs';
 
 const id='EFE6R4U-O3B6JVV-N4OKZFL-7X4U24W-A5GFD4G-TM4OPRK-AXBDALA-OCJUBQ6';
 test('authenticated Syncthing REST identity and version retain doctor output contract',()=>{
@@ -14,6 +14,31 @@ test('fail closed for daemon mismatch, missing identity and bad version',()=>{
   assert.throws(()=>verifySyncthingDaemon({myID:id},version,id),/Daemon version invalid/);
  assert.throws(()=>verifySyncthingDaemon({myID:id},{version:'v2.1.6'},'BAD'),/Expected device ID invalid/);
 });
+
+test('REST endpoint and key are bound to one explicit loopback GUI config',()=>{
+ const config=(address,attrs='enabled="true" tls="false"')=>
+  '<configuration><gui '+attrs+'><address>'+address+'</address>'+
+  '<apikey>fixture-only-key</apikey></gui></configuration>';
+ for(const [address,expected] of [
+   ['127.0.0.1:8384','http://127.0.0.1:8384'],
+   ['127.0.0.1:18384','http://127.0.0.1:18384'],
+   ['[::1]:8384','http://[::1]:8384']
+ ])assert.deepEqual(configuredLoopbackRest(config(address)),
+   {base:expected,apiKey:'fixture-only-key'});
+ for(const address of ['0.0.0.0:8384','localhost:8384','127.0.0.2:8384',
+                       '127.0.0.1:0','127.0.0.1:65536','127.0.0.1:8384.evil'])
+  assert.throws(()=>configuredLoopbackRest(config(address)),/loopback IP/);
+ assert.throws(()=>configuredLoopbackRest(config('127.0.0.1:8384','enabled="false" tls="false"')),
+  /disabled/);
+ assert.throws(()=>configuredLoopbackRest(config('127.0.0.1:8384','enabled="true" tls="true"')),
+  /verified HTTPS/);
+ assert.throws(()=>configuredLoopbackRest('<config/>'),/Exactly one/);
+ assert.throws(()=>configuredLoopbackRest(config('127.0.0.1:8384')+config('127.0.0.1:18384')),
+  /Exactly one/);
+ assert.throws(()=>configuredLoopbackRest('<gui enabled="true" tls="false"><address>127.0.0.1:8384</address></gui>'),
+  /address\/API key/);
+});
+
 test('doctor uses authenticated local REST checks, not executable paths',()=>{
  const src=fs.readFileSync(new URL('./doctor.mjs',import.meta.url),'utf8');
  assert.ok(!src.includes('child_process')&&!src.includes('execFileSync('));
@@ -21,6 +46,8 @@ test('doctor uses authenticated local REST checks, not executable paths',()=>{
   assert.ok(src.includes("'"+endpoint+"'"));
  assert.ok(src.includes("redirect:'error'"));
  assert.ok(src.includes('verifySyncthingDaemon(status,version,IDS[node.alias])'));
+ assert.ok(src.includes('configuredLoopbackRest(xml)'));
+ assert.ok(!src.includes('const candidates='));
 });
 
 test('mocked local REST doctor works without launching a substituted binary',async(t)=>{
@@ -39,7 +66,7 @@ test('mocked local REST doctor works without launching a substituted binary',asy
    Amirreza:'X6EKTD2-6ZF3WUF-L2AQAHU-VYIQACY-A5BXTIP-F5U5UJE-AT6EREF-2PG6UA6'
   };
   fs.writeFileSync(path.join(root,'node.json'),JSON.stringify({alias:'Linux',deviceID:ids.Linux}));
-  fs.writeFileSync(path.join(root,'state','config.xml'),'<config><apikey>fake-local-fixture-key</apikey></config>');
+  fs.writeFileSync(path.join(root,'state','config.xml'),'<configuration><gui enabled="true" tls="false"><address>127.0.0.1:8384</address><apikey>fake-local-fixture-key</apikey></gui></configuration>');
   const marker=path.join(root,'binary-was-executed'),fake=path.join(root,'bin','syncthing');
   fs.writeFileSync(fake,'#!/bin/sh\ntouch "'+marker+'"\nexit 0\n');
   fs.chmodSync(fake,0o700);
@@ -56,7 +83,7 @@ test('mocked local REST doctor works without launching a substituted binary',asy
     " if(!String(url).startsWith('http://127.0.0.1:')||opts?.redirect!=='error')throw Error('UNSAFE_FETCH_TARGET');",
     " const p=new URL(url).pathname;",
     " const body={",
-    "  '/rest/noauth/health':{status:'OK'},",
+    "  '/rest/noauth/health':{status:process.env.FAKE_HEALTH_BAD?'BROKEN':'OK'},",
     "  '/rest/system/status':{myID:process.env.FAKE_BAD_ID?'WRONG':ids.Linux},",
     "  '/rest/system/version':{version:process.env.FAKE_BAD_VERSION?'BAD':'v2.1.6'},",
     "  '/rest/config/folders':folders,",
@@ -85,6 +112,9 @@ test('mocked local REST doctor works without launching a substituted binary',asy
    assert.equal(out.status,1);
    assert.match(out.stdout,expected);
   }
+  const wrong=run({FAKE_HEALTH_BAD:'1'});
+  assert.equal(wrong.status,1);
+  assert.match(wrong.stdout,/Configured local Syncthing REST health unavailable/);
   assert.equal(fs.existsSync(marker),false,'unexpected binary launch');
  }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
