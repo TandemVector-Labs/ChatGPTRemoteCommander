@@ -64,9 +64,10 @@ test('CLI rejects hostile version before any release-policy file access',async()
    assert.match(out.stderr,/WINDOWS_RELEASE_TAG_VERSION_MISMATCH/,version);
    assert.doesNotMatch(out.stderr,/ENOENT|EACCES/,version);
   }
+  const approvedVersion=JSON.parse(readFileSync(new URL('../docs/UNSIGNED_WINDOWS_RELEASE_POLICY.json',import.meta.url),'utf8')).version;
   const valid=spawnSync(process.execPath,[cli],{
    cwd,encoding:'utf8',
-   env:{...process.env,SETUP_SIGNED:'false',RELEASE_VERSION:'0.10.23',RELEASE_TAG:'v0.10.23'}
+   env:{...process.env,SETUP_SIGNED:'false',RELEASE_VERSION:approvedVersion,RELEASE_TAG:'v'+approvedVersion}
   });
   assert.equal(valid.status,0,valid.stderr);
   assert.match(valid.stdout,/UNSIGNED_WITH_REQUIRED_SIGSTORE_PROVENANCE/);
