@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import {verifySyncthingDaemon} from './doctor-rest-identity.mjs';
+import {verifySyncthingDaemon,configuredLoopbackRest} from './doctor-rest-identity.mjs';
 const IDS={
  PC:'EFE6R4U-O3B6JVV-N4OKZFL-7X4U24W-A5GFD4G-TM4OPRK-AXBDALA-OCJUBQ6',
  Linux:'6YUIRAM-GDPWPT4-XXX2DD7-K2M7G23-F246XXK-ENQQ3G2-RHIQI2Y-TDRJGAB',
@@ -21,21 +21,15 @@ try {
  output.alias=node.alias;
  if(!Object.hasOwn(IDS,node.alias)||node.deviceID!==IDS[node.alias])throw new Error('Node identity mismatch');
  const xml=fs.readFileSync(path.join(root,'state','config.xml'),'utf8');
- const key=xml.match(/<apikey>([^<]+)<\/apikey>/)?.[1];
- if(!key)throw new Error('Local REST key missing');
+ const {base,apiKey:key}=configuredLoopbackRest(xml);
  const fetchLocal=async(base,url,authenticated=true)=>{
   const h=authenticated?{'X-API-Key':key}:{};
   const r=await fetch(base+url,{headers:h,redirect:'error',signal:AbortSignal.timeout(2600)});
   if(!r.ok)throw new Error('Local API HTTP '+r.status);
   return await r.json();
  };
- const candidates=process.platform==='win32'?[8384,18384]:[8384];
- let base;
- for(const port of candidates) {
-  const u='http://127.0.0.1:'+port;
-  try {const health=await fetchLocal(u,'/rest/noauth/health',false);if(health.status==='OK'){base=u;break;}}catch{}
- }
- if(!base)throw new Error('Local Syncthing REST health unavailable');
+ const health=await fetchLocal(base,'/rest/noauth/health',false);
+ if(health.status!=='OK')throw new Error('Configured local Syncthing REST health unavailable');
  // Query the already-authenticated local daemon; never run a binary from a
  // potentially environment-selected installation directory.
  const status=await fetchLocal(base,'/rest/system/status');
