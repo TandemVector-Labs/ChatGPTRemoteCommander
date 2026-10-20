@@ -12,6 +12,7 @@ const readOnlyCalls = Object.freeze([
   ['grdctl', ['--headless', 'status']],
   ['systemctl', ['--user', 'show', 'gnome-remote-desktop-headless.service', '-p', 'ActiveState', '-p', 'UnitFileState']],
   ['systemctl', ['--user', 'show', 'gnome-remote-desktop.service', '-p', 'ActiveState', '-p', 'UnitFileState']],
+  ['systemctl', ['--user', 'show', 'gnome-remote-desktop-headless.service', '-p', 'Conflicts']],
   ['ss', ['-H', '-ltn']],
 ]);
 
@@ -51,6 +52,17 @@ export function parseUnit(output) {
   };
 }
 
+export function parseUnitConflicts(output) {
+  if (typeof output !== 'string') return { observed: false, sharesConflict: false };
+  const match = output.match(/^Conflicts=(.*)$/m);
+  if (!match) return { observed: false, sharesConflict: false };
+  const exactServices = match[1].trim().split(/\s+/);
+  return {
+    observed: true,
+    sharesConflict: exactServices.includes('gnome-remote-desktop.service'),
+  };
+}
+
 export function parseListeners(output) {
   if (typeof output !== 'string') return [];
   return output.split(/\r?\n/).flatMap(line => {
@@ -68,15 +80,22 @@ export function parseListeners(output) {
   });
 }
 
-export function classifyHeadlessSeat({ headless, headlessUnit, sharingUnit, listeners }) {
+export function classifyHeadlessSeat({
+  headless, headlessUnit, sharingUnit, headlessUnitConflicts =
+    { observed: false, sharesConflict: false }, listeners,
+}) {
   const portBound = headless.port !== null && listeners.some(entry => entry.port === headless.port);
   const networkListener = headless.port !== null && listeners.some(entry => entry.port === headless.port && entry.scope !== 'loopback');
   const sharingActive = sharingUnit.active;
+  const destructiveDesktopConflict = sharingActive && headlessUnitConflicts.sharesConflict;
   const readyToStart = headless.observed && headlessUnit.observed && sharingUnit.observed &&
+    headlessUnitConflicts.observed && !destructiveDesktopConflict &&
     headless.rdp === 'enabled' && headlessUnit.active && headless.credentialsPresent &&
     headless.tlsPathsConfigured && !networkListener;
   const blockers = [];
-  if (!headless.observed || !headlessUnit.observed || !sharingUnit.observed) blockers.push('INSUFFICIENT_OBSERVATION');
+  if (!headless.observed || !headlessUnit.observed || !sharingUnit.observed ||
+      !headlessUnitConflicts.observed) blockers.push('INSUFFICIENT_OBSERVATION');
+  if (destructiveDesktopConflict) blockers.push('HEADLESS_CONFLICTS_ACTIVE_DESKTOP_SHARING');
   if (headless.rdp !== 'enabled') blockers.push('HEADLESS_RDP_NOT_ENABLED');
   if (!headless.credentialsPresent) blockers.push('HEADLESS_CREDENTIALS_NOT_CONFIGURED');
   if (!headless.tlsPathsConfigured) blockers.push('HEADLESS_TLS_PATHS_NOT_CONFIGURED');
@@ -96,6 +115,8 @@ export function classifyHeadlessSeat({ headless, headlessUnit, sharingUnit, list
       port: headless.port,
       credentialsConfigured: headless.credentialsPresent,
       tlsPathsConfigured: headless.tlsPathsConfigured,
+      conflictsWithDesktopSharing: headlessUnitConflicts.sharesConflict,
+      conflictPropertyObserved: headlessUnitConflicts.observed,
     },
     desktopSharingActive: sharingActive,
     configuredPortAlreadyListening: portBound,
@@ -120,7 +141,8 @@ export async function assess({ run = executeReadOnly, platform = process.platfor
     headless: parseHeadlessStatus(values[0]),
     headlessUnit: parseUnit(values[1]),
     sharingUnit: parseUnit(values[2]),
-    listeners: parseListeners(values[3]),
+    headlessUnitConflicts: parseUnitConflicts(values[3]),
+    listeners: parseListeners(values[4]),
   });
 }
 
