@@ -7,9 +7,42 @@ import net from 'node:net';
 import { spawn, spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
+import { validateHardwareSelftestEndpoint } from '../tools/hardware-selftest-endpoint.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const read=f=>fs.readFileSync(path.join(root,f),'utf8');
+
+test('hardware selftest URL admits only canonical numeric loopback MCP endpoints',()=>{
+  for (const url of ['http://127.0.0.1:47831/mcp','http://[::1]:47831/mcp','http://127.0.0.1:65535/mcp'])
+    assert.equal(validateHardwareSelftestEndpoint(url),url);
+  for (const url of [
+    'http://localhost:47831/mcp',
+    'http://example.invalid:47831/mcp',
+    'https://127.0.0.1:47831/mcp',
+    'http://0x7f000001:47831/mcp',
+    'http://127.0.0.1/mcp',
+    'http://127.0.0.1:80/mcp',
+    'http://127.0.0.1:47831/health',
+    'http://127.0.0.1:47831/foo/mcp',
+    'http://127.0.0.1:47831/mcp/',
+    'http://127.0.0.1:47831/mcp?next=example.invalid',
+    'http://127.0.0.1:47831/mcp#fragment',
+    'http://user:pass@127.0.0.1:47831/mcp',
+    'file:///etc/passwd'
+  ]) assert.throws(()=>validateHardwareSelftestEndpoint(url),/SELFTEST_LOOPBACK_ONLY/,url);
+});
+
+test('hardware selftest denies invalid URL before loading config or sending requests',()=>{
+  const script=path.join(root,'tools','hardware-selftest.mjs');
+  const missing=path.join(os.tmpdir(),'hardware-selftest-config-should-not-exist-48177.json');
+  const r=spawnSync(process.execPath,[script,'--url','http://localhost:47831/mcp','--config',missing],{
+    encoding:'utf8',timeout:5000
+  });
+  assert.notEqual(r.status,0);
+  assert.match(r.stderr,/SELFTEST_LOOPBACK_ONLY/);
+  assert.doesNotMatch(r.stderr,/ENOENT|ECONNREFUSED|fetch failed/);
+});
+
 
 test('R205 retirement preflight is before any old release deletion on Windows and Linux',()=>{
  const win=read('auto-update-windows.ps1'),linux=read('auto-update-linux.sh'),helper=read('tools/release-retirement-gate-r205.mjs');

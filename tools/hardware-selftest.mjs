@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import os from 'node:os';
+import { validateHardwareSelftestEndpoint } from './hardware-selftest-endpoint.mjs';
 
 const MAX_RESPONSE=2*1024*1024;
 function fail(code,detail=''){const e=new Error(detail?code+': '+detail:code);e.code=code;throw e;}
@@ -16,8 +17,7 @@ function parse(argv){
   }
   if(!o.url||!o.config)fail('SELFTEST_REQUIRED');
   if(!Number.isSafeInteger(o.timeoutMs)||o.timeoutMs<500||o.timeoutMs>60000)fail('SELFTEST_TIMEOUT');
-  const u=new URL(o.url);
-  if(!['127.0.0.1','localhost','::1','[::1]'].includes(u.hostname)||!u.pathname.endsWith('/mcp'))fail('SELFTEST_LOOPBACK_ONLY');
+  o.url=validateHardwareSelftestEndpoint(o.url);
   return o;
 }
 async function readBounded(r){
