@@ -40,15 +40,16 @@ function fixture(){
 function promoteInFixture(f,stage,commit,ref='refs/heads/rollback-r521'){
   const sh=[
     'set -Eeuo pipefail',
-    'INSTALL_DIR="'+f.control+'"',
-    'STAGE_DIR="'+stage.dir+'"',
+    'INSTALL_DIR="${QA_INSTALL_DIR:?}"',
+    'STAGE_DIR="${QA_STAGE_DIR:?}"',
     'log(){ :; }',
     promote,
     'promote_control "$1" "$2"'
   ].join('\n');
   return spawnSync('bash',['-c',sh,'rc-r566',commit,ref],{
     encoding:'utf8',timeout:20000,
-    env:{...process.env,GIT_TERMINAL_PROMPT:'0',GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_SYSTEM:'/dev/null',GIT_ALLOW_PROTOCOL:'file'}
+    env:{...process.env,QA_INSTALL_DIR:f.control,QA_STAGE_DIR:stage.dir,
+      GIT_TERMINAL_PROMPT:'0',GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_SYSTEM:'/dev/null',GIT_ALLOW_PROTOCOL:'file'}
   });
 }
 function withFixture(fn){
@@ -56,6 +57,21 @@ function withFixture(fn){
   try{return fn(f);}
   finally{fs.rmSync(f.root,{recursive:true,force:true});}
 }
+test('adversarial path names remain literal data, never Bash substitutions',
+  {skip:process.platform!=='linux'?'Requires native Linux Bash fixture':false},
+  ()=>withFixture(f=>{
+    // Stage and installation directories can contain shell metacharacters as ordinary text.
+    const oldLiteral=path.join(f.root,'stage-$(printf substituted)');
+    const controlLiteral=path.join(f.root,'control-$(printf substituted)');
+    fs.renameSync(f.old.dir,oldLiteral);
+    fs.renameSync(f.control,controlLiteral);
+    f.old={...f.old,dir:oldLiteral};
+    f.control=controlLiteral;
+    const p=promoteInFixture(f,f.old,f.old.commit);
+    assert.equal(p.status,0,p.stdout+'\n'+p.stderr);
+    assert.equal(git(['-C',f.control,'rev-parse','HEAD']),f.old.commit);
+    assert.equal(fs.readFileSync(path.join(f.control,'keep.txt'),'utf8'),f.sentinel);
+  }));
 test('cross-platform updater contract validates exact staged commit and no origin lookup',()=>{
   assert.match(promote,/staged_head="\$\(git -C "\$STAGE_DIR" rev-parse HEAD/);
   assert.match(promote,/\[\[ "\$staged_head" == "\$commit" \]\]/);
