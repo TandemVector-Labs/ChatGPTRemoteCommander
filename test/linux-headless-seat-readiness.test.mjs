@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseHeadlessStatus, parseUnit, parseUnitConflicts, parseListeners,
-  classifyHeadlessSeat, assess, executeReadOnly,
+  classifyHeadlessSeat, classifySystemRemoteLogin, assess, executeReadOnly,
 } from '../tools/linux-headless-seat-readiness.mjs';
 
 const headlessDisabled = [
@@ -100,9 +100,9 @@ test('missing observations or malformed port fail closed', () => {
   assert.ok(report.blockers.includes('INSUFFICIENT_OBSERVATION'));
 });
 
-test('probe may execute only five exact read-only calls and no shell', async () => {
+test('probe may execute only seven exact read-only calls and no shell', async () => {
   const seen = [];
-  const samples = [headlessDisabled, inactive, active, unitConflict, 'LISTEN 0 5 *:3389 *:*'];
+  const samples = [headlessDisabled, inactive, active, unitConflict, 'LISTEN 0 5 *:3389 *:*', active, inactive];
   const report = await assess({ platform:'linux', run:async (cmd,args) => {
     seen.push([cmd,args]);
     return samples[seen.length-1];
@@ -113,8 +113,16 @@ test('probe may execute only five exact read-only calls and no shell', async () 
     ['systemctl',['--user','show','gnome-remote-desktop.service','-p','ActiveState','-p','UnitFileState']],
     ['systemctl',['--user','show','gnome-remote-desktop-headless.service','-p','Conflicts']],
     ['ss',['-H','-ltn']],
+    ['systemctl',['show','gdm.service','-p','ActiveState','-p','UnitFileState']],
+    ['systemctl',['show','gnome-remote-desktop.service','-p','ActiveState','-p','UnitFileState']],
   ]);
   assert.equal(report.admission,'NOT_READY');
+  assert.equal(report.systemRemoteLogin.status,'NOT_CONFIGURED');
+  assert.deepEqual(report.systemRemoteLogin.blockers,[
+    'SYSTEM_REMOTE_LOGIN_DAEMON_NOT_ACTIVE',
+    'SYSTEM_REMOTE_LOGIN_AUTH_AND_NETWORK_NOT_VERIFIED',
+    'INDEPENDENT_USER_SEAT_INPUT_NOT_ACCEPTED',
+  ]);
   assert.throws(() => executeReadOnly('systemctl',['--user','start','gnome-remote-desktop-headless.service']),
     /UNAPPROVED_PREFLIGHT_COMMAND/);
 });
@@ -153,6 +161,45 @@ test('missing systemd conflict property fails closed before any enablement', () 
   assert.equal(report.headless.conflictPropertyObserved, false);
   assert.ok(report.blockers.includes('INSUFFICIENT_OBSERVATION'));
   assert.equal(report.safeToAutoEnable, false);
+});
+
+
+test('system GDM Remote Login is reported separately from active user desktop sharing', () => {
+  const candidate = classifySystemRemoteLogin({
+    gdmUnit:parseUnit(active),systemRemoteUnit:parseUnit(inactive),
+  });
+  assert.equal(candidate.status,'NOT_CONFIGURED');
+  assert.equal(candidate.gdm,'active');
+  assert.equal(candidate.systemDaemon,'inactive_or_unknown');
+  assert.equal(candidate.safeToAutoEnable,false);
+  assert.ok(candidate.blockers.includes('SYSTEM_REMOTE_LOGIN_DAEMON_NOT_ACTIVE'));
+});
+
+test('even fully active system service remains unaccepted without network, auth and input proofs', () => {
+  const candidate = classifySystemRemoteLogin({
+    gdmUnit:parseUnit(active),systemRemoteUnit:parseUnit(active),
+  });
+  assert.equal(candidate.status,'ACTIVE_BUT_UNVERIFIED');
+  assert.equal(candidate.safeToAutoEnable,false);
+  assert.deepEqual(candidate.blockers,[
+    'SYSTEM_REMOTE_LOGIN_AUTH_AND_NETWORK_NOT_VERIFIED',
+    'INDEPENDENT_USER_SEAT_INPUT_NOT_ACCEPTED',
+  ]);
+});
+
+test('unreadable system service properties do not imply an available broker', () => {
+  const candidate = classifySystemRemoteLogin({
+    gdmUnit:parseUnit(''),systemRemoteUnit:parseUnit(inactive),
+  });
+  assert.equal(candidate.status,'UNKNOWN');
+  assert.ok(candidate.blockers.includes('SYSTEM_REMOTE_LOGIN_OBSERVATION_INCOMPLETE'));
+});
+
+test('system probe does not authorize account creation, login or unit mutation', () => {
+  assert.throws(() => executeReadOnly('systemctl',['start','gnome-remote-desktop.service']),
+    /UNAPPROVED_PREFLIGHT_COMMAND/);
+  assert.throws(() => executeReadOnly('grdctl',['--system','rdp','enable']),
+    /UNAPPROVED_PREFLIGHT_COMMAND/);
 });
 
 test('unsupported platform does not execute any host command', async () => {

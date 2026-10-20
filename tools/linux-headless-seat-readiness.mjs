@@ -14,6 +14,10 @@ const readOnlyCalls = Object.freeze([
   ['systemctl', ['--user', 'show', 'gnome-remote-desktop.service', '-p', 'ActiveState', '-p', 'UnitFileState']],
   ['systemctl', ['--user', 'show', 'gnome-remote-desktop-headless.service', '-p', 'Conflicts']],
   ['ss', ['-H', '-ltn']],
+  // The GDM-backed system Remote Login is distinct from the owner's
+  // conflicting same-user headless unit. Observe, never start or configure.
+  ['systemctl', ['show', 'gdm.service', '-p', 'ActiveState', '-p', 'UnitFileState']],
+  ['systemctl', ['show', 'gnome-remote-desktop.service', '-p', 'ActiveState', '-p', 'UnitFileState']],
 ]);
 
 export function parseHeadlessStatus(output) {
@@ -52,6 +56,28 @@ export function parseUnit(output) {
   };
 }
 
+export function classifySystemRemoteLogin({ gdmUnit, systemRemoteUnit }) {
+  const observed = gdmUnit.observed && systemRemoteUnit.observed;
+  const blockers = [];
+  if (!observed) blockers.push('SYSTEM_REMOTE_LOGIN_OBSERVATION_INCOMPLETE');
+  if (!gdmUnit.active) blockers.push('GDM_NOT_ACTIVE');
+  if (!systemRemoteUnit.active) blockers.push('SYSTEM_REMOTE_LOGIN_DAEMON_NOT_ACTIVE');
+  // Unit status alone does not establish a safe authenticated endpoint,
+  // user-session isolation, or a dedicated trusted local RDP binding.
+  blockers.push('SYSTEM_REMOTE_LOGIN_AUTH_AND_NETWORK_NOT_VERIFIED');
+  blockers.push('INDEPENDENT_USER_SEAT_INPUT_NOT_ACCEPTED');
+  return {
+    status: !observed ? 'UNKNOWN' :
+      gdmUnit.active && systemRemoteUnit.active ? 'ACTIVE_BUT_UNVERIFIED' :
+        'NOT_CONFIGURED',
+    gdm: gdmUnit.active ? 'active' : 'inactive_or_unknown',
+    systemDaemon: systemRemoteUnit.active ? 'active' : 'inactive_or_unknown',
+    serviceEnabled: systemRemoteUnit.enabled,
+    safeToAutoEnable: false,
+    blockers,
+  };
+}
+
 export function parseUnitConflicts(output) {
   if (typeof output !== 'string') return { observed: false, sharesConflict: false };
   const match = output.match(/^Conflicts=(.*)$/m);
@@ -83,6 +109,8 @@ export function parseListeners(output) {
 export function classifyHeadlessSeat({
   headless, headlessUnit, sharingUnit, headlessUnitConflicts =
     { observed: false, sharesConflict: false }, listeners,
+  gdmUnit = { observed: false, active: false, enabled: false },
+  systemRemoteUnit = { observed: false, active: false, enabled: false },
 }) {
   const portBound = headless.port !== null && listeners.some(entry => entry.port === headless.port);
   const networkListener = headless.port !== null && listeners.some(entry => entry.port === headless.port && entry.scope !== 'loopback');
@@ -119,6 +147,7 @@ export function classifyHeadlessSeat({
       conflictPropertyObserved: headlessUnitConflicts.observed,
     },
     desktopSharingActive: sharingActive,
+    systemRemoteLogin: classifySystemRemoteLogin({ gdmUnit, systemRemoteUnit }),
     configuredPortAlreadyListening: portBound,
     configuredPortNetworkReachable: networkListener,
     blockers,
@@ -143,6 +172,8 @@ export async function assess({ run = executeReadOnly, platform = process.platfor
     sharingUnit: parseUnit(values[2]),
     headlessUnitConflicts: parseUnitConflicts(values[3]),
     listeners: parseListeners(values[4]),
+    gdmUnit: parseUnit(values[5]),
+    systemRemoteUnit: parseUnit(values[6]),
   });
 }
 
