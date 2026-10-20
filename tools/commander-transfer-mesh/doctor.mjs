@@ -4,6 +4,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import {verifySyncthingDaemon,configuredLoopbackRest} from './doctor-rest-identity.mjs';
+// Four-host pilot only: the PC launcher has a fixed --gui-address override.
+// This is an exact per-node destination, NOT a candidate port scan.
+const GUI_OVERRIDES={PC:'127.0.0.1:18384'};
 const IDS={
  PC:'EFE6R4U-O3B6JVV-N4OKZFL-7X4U24W-A5GFD4G-TM4OPRK-AXBDALA-OCJUBQ6',
  Linux:'6YUIRAM-GDPWPT4-XXX2DD7-K2M7G23-F246XXK-ENQQ3G2-RHIQI2Y-TDRJGAB',
@@ -21,7 +24,7 @@ try {
  output.alias=node.alias;
  if(!Object.hasOwn(IDS,node.alias)||node.deviceID!==IDS[node.alias])throw new Error('Node identity mismatch');
  const xml=fs.readFileSync(path.join(root,'state','config.xml'),'utf8');
- const {base,apiKey:key}=configuredLoopbackRest(xml);
+ const {base,apiKey:key}=configuredLoopbackRest(xml,GUI_OVERRIDES[node.alias]);
  const fetchLocal=async(base,url,authenticated=true)=>{
   const h=authenticated?{'X-API-Key':key}:{};
   const r=await fetch(base+url,{headers:h,redirect:'error',signal:AbortSignal.timeout(2600)});
