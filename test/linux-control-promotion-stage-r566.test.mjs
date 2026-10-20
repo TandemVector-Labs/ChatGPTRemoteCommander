@@ -46,11 +46,21 @@ function promoteInFixture(f,stage,commit,ref='refs/heads/rollback-r521'){
     promote,
     'promote_control "$1" "$2"'
   ].join('\n');
-  return spawnSync('bash',['-c',sh,'rc-r566',commit,ref],{
-    encoding:'utf8',timeout:20000,
-    env:{...process.env,QA_INSTALL_DIR:f.control,QA_STAGE_DIR:stage.dir,
-      GIT_TERMINAL_PROMPT:'0',GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_SYSTEM:'/dev/null',GIT_ALLOW_PROTOCOL:'file'}
-  });
+  // Never interpolate generated fixture source through a -c argument.
+  // The fixture root is a private mkdtemp directory; an exclusive 0600
+  // script is removed even if spawning fails.
+  const scriptDir=fs.mkdtempSync(path.join(f.root,'.r566-bash-'));
+  const script=path.join(scriptDir,'fixture.sh');
+  try{
+    fs.writeFileSync(script,sh,{encoding:'utf8',flag:'wx',mode:0o600});
+    return spawnSync('bash',[script,commit,ref],{
+      encoding:'utf8',timeout:20000,
+      env:{...process.env,QA_INSTALL_DIR:f.control,QA_STAGE_DIR:stage.dir,
+        GIT_TERMINAL_PROMPT:'0',GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_SYSTEM:'/dev/null',GIT_ALLOW_PROTOCOL:'file'}
+    });
+  }finally{
+    fs.rmSync(scriptDir,{recursive:true,force:true});
+  }
 }
 function withFixture(fn){
   const f=fixture();
@@ -71,6 +81,7 @@ test('adversarial path names remain literal data, never Bash substitutions',
     assert.equal(p.status,0,p.stdout+'\n'+p.stderr);
     assert.equal(git(['-C',f.control,'rev-parse','HEAD']),f.old.commit);
     assert.equal(fs.readFileSync(path.join(f.control,'keep.txt'),'utf8'),f.sentinel);
+    assert.equal(fs.readdirSync(f.root).filter(x=>x.startsWith('.r566-bash-')).length,0);
   }));
 test('cross-platform updater contract validates exact staged commit and no origin lookup',()=>{
   assert.match(promote,/staged_head="\$\(git -C "\$STAGE_DIR" rev-parse HEAD/);
