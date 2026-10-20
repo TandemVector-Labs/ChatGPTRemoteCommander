@@ -46,3 +46,30 @@ test('on-disk CLI supports version-specific unsigned and refuses future unsigned
  assert.notEqual(bad.status,0);
  assert.match(bad.stderr,/WINDOWS_RELEASE_DISTRIBUTION_POLICY_DENIED/);
 });
+
+test('CLI rejects hostile version before any release-policy file access',async()=>{
+ const {mkdtempSync,rmSync}=await import('node:fs');
+ const {tmpdir}=await import('node:os');
+ const {join}=await import('node:path');
+ const cwd=mkdtempSync(join(tmpdir(),'release-policy-version-validation-'));
+ try {
+  const {fileURLToPath}=await import('node:url');
+ const cli=fileURLToPath(new URL('../tools/verify-windows-release-policy.mjs',import.meta.url));
+  for(const version of ['../../outside','0.10.23\n','0.10.23/../../outside','0.10.23\u2028','', '0.10.23.1']) {
+   const out=spawnSync(process.execPath,[cli],{
+    cwd,encoding:'utf8',
+    env:{...process.env,SETUP_SIGNED:'false',RELEASE_VERSION:version,RELEASE_TAG:'v'+version}
+   });
+   assert.notEqual(out.status,0,version);
+   assert.match(out.stderr,/WINDOWS_RELEASE_TAG_VERSION_MISMATCH/,version);
+   assert.doesNotMatch(out.stderr,/ENOENT|EACCES/,version);
+  }
+  const approvedVersion=JSON.parse(readFileSync(new URL('../docs/UNSIGNED_WINDOWS_RELEASE_POLICY.json',import.meta.url),'utf8')).version;
+  const valid=spawnSync(process.execPath,[cli],{
+   cwd,encoding:'utf8',
+   env:{...process.env,SETUP_SIGNED:'false',RELEASE_VERSION:approvedVersion,RELEASE_TAG:'v'+approvedVersion}
+  });
+  assert.equal(valid.status,0,valid.stderr);
+  assert.match(valid.stdout,/UNSIGNED_WITH_REQUIRED_SIGSTORE_PROVENANCE/);
+ }finally{rmSync(cwd,{recursive:true,force:true});}
+});
