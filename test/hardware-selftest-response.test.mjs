@@ -34,3 +34,13 @@ test('oversized response aborts iteration before a third attacker-controlled chu
 test('missing response body remains an empty response', async () => {
   assert.equal(await readBoundedHardwareResponse({body:null}), '');
 });
+
+test('a single oversized chunk is rejected before the next stream read', async () => {
+  let reads = 0;
+  const body = (async function* () {
+    reads++; yield Buffer.alloc(LIMIT + 1);
+    reads++; yield Buffer.from('SHOULD_NOT_READ');
+  })();
+  await assert.rejects(readBoundedHardwareResponse({body}), {code:'SELFTEST_RESPONSE_TOO_LARGE'});
+  assert.equal(reads, 1);
+});
