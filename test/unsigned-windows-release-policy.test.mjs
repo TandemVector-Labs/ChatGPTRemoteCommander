@@ -59,9 +59,9 @@ test('public company and release disclosure are unambiguous without false OS pub
  for(const keyword of ['Windows installer: UNSIGNED','Unknown publisher','SmartScreen','GitHub attestation',
   'v0.10.20','J01','TandemVector Labs','Aliakbar Emadoddin','mohammadmohammadzadeh19960-code','prerelease'])
   assert.ok(releaseNotes.includes(keyword),keyword);
- assert.match(credits,/legal company/);
- assert.match(credits,/UNSIGNED/);
- assert.match(credits,/not a trusted Authenticode/);
+ assert.match(credits,/not evidence of independently verified legal incorporation/);
+ assert.ok(credits.includes('does NOT authorize unsigned **v0.10.25**'));
+ assert.match(credits,/not substitutes for Authenticode/);
 });
 
 test('company branding in package and Windows installer is project metadata only',()=>{
