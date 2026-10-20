@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { terminateProcessesUsingBrowserProfile, waitForBrowserDevToolsPort } from '../src/browser-owned-processes.mjs';
+import {selectTrustedChromium} from './browser-chromium-executable-policy.mjs';
 import { createInterface } from 'node:readline';
 
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
@@ -19,29 +20,8 @@ const redactUrl=value=>{
   return {url:u.href,queryRedacted:hadSearch,fragmentRedacted:hadHash,schemeRedacted:false};
  }catch{return {url:null,queryRedacted:false,fragmentRedacted:false,schemeRedacted:false};}
 };
-const exists=p=>{try{return fs.statSync(p).isFile();}catch{return false;}};
-function which(name){
- const exts=process.platform==='win32'?['.exe','.cmd','']:[''];
- for(const dir of String(process.env.PATH??'').split(path.delimiter).filter(Boolean)){
-  for(const ext of exts){const p=path.join(dir,name+ext);if(exists(p))return p;}
- }
- return null;
-}
 function detectBrowser(explicit){
- if(typeof explicit==='string'&&explicit&&exists(explicit))return path.resolve(explicit);
- const candidates=[];
- if(process.platform==='win32'){
-  for(const base of [process.env.LOCALAPPDATA,process.env.PROGRAMFILES,process.env['PROGRAMFILES(X86)']].filter(Boolean)){
-   candidates.push(path.join(base,'Google','Chrome','Application','chrome.exe'));
-   candidates.push(path.join(base,'Microsoft','Edge','Application','msedge.exe'));
-  }
- }else{
-  for(const n of ['google-chrome','google-chrome-stable','chromium','chromium-browser','microsoft-edge','msedge']){
-   const p=which(n);if(p)candidates.push(p);
-  }
-  candidates.push('/usr/bin/google-chrome','/usr/bin/chromium','/usr/bin/chromium-browser','/usr/bin/microsoft-edge');
- }
- return candidates.find(exists)??null;
+ return selectTrustedChromium(explicit);
 }
 class Cdp {
  constructor(url){this.url=url;this.ws=null;this.seq=0;this.pending=new Map();}
