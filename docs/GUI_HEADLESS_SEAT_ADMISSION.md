@@ -38,3 +38,9 @@ GNOME Remote Desktop officially distinguishes desktop sharing, system remote log
 **Current decision:** No automatic headless enablement, no RDP port change, no credential creation, no product merge/publish based solely on this document or doctor. Keep existing Commander Core `0.10.25`, CEF launcher and browser profile unchanged.
 
 The GNOME/Mutter RemoteDesktop low-level API is private and version-dependent; do not treat its ability to create multiple API sessions as proof of multiple isolated compositor seats.
+
+## Exact candidate canary in the organization fork
+
+The organization fork PR canary was initially blocked by both Linux and Windows bootstrap scripts fetching an organization-only feature ref from the **upstream production repository**. The installers are deliberately upstream-pinned and must remain so in real installations. The disposable `.github/workflows/server-install-canary.yml` now supplies a **process-local, fixed Git `url.*.insteadOf` rewrite** to the organization's HTTPS Git remote, **only** when `github.repository` is the exact trusted organization repo; upstream runs use `GIT_CONFIG_COUNT=0` and retain their original behavior. The existing `RC_EXPECTED_COMMIT` SHA equality checks and same-repo privileged-job guard remain mandatory. No production installer default, token scope, host Git configuration or OS service changes.
+
+The workflow-specific assertion test `test/server-install-canary-candidate-source.test.mjs` checks this route without attempting a live installation. A passed hosted Linux/Windows canary, not just this test, is required before accepting the source identity correction.

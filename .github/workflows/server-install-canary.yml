@@ -19,6 +19,9 @@ permissions:
 env:
   RC_SOURCE_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
   RC_EXPECTED_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+  # Candidate branches exist only in the org fork. Confine the Git URL rewrite
+  # to this disposable canary so production installers still pin upstream.
+  RC_CANDIDATE_REWRITE_COUNT: ${{ github.repository == 'TandemVector-Labs/ChatGPTRemoteCommander' && '1' || '0' }}
 
 jobs:
   windows-server-bootstrap:
@@ -35,6 +38,9 @@ jobs:
         shell: pwsh
         env:
           RC_GITHUB_API_TOKEN: ${{ github.token }}
+          GIT_CONFIG_COUNT: ${{ env.RC_CANDIDATE_REWRITE_COUNT }}
+          GIT_CONFIG_KEY_0: url.https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/GOD13emad/ChatGPTRemoteCommander.git
         run: |
           $ErrorActionPreference='Stop'
           $script=Join-Path $env:GITHUB_WORKSPACE 'server-install-windows.ps1'
@@ -80,7 +86,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker run --rm             -e RC_SOURCE_REF="$RC_SOURCE_REF"             -e RC_EXPECTED_COMMIT="$RC_EXPECTED_COMMIT"             -v "$GITHUB_WORKSPACE:/src:ro"             ubuntu:24.04 bash -lc '
+          docker run --rm \
+            -e RC_SOURCE_REF="$RC_SOURCE_REF" \
+            -e RC_EXPECTED_COMMIT="$RC_EXPECTED_COMMIT" \
+            -e GIT_CONFIG_COUNT="$RC_CANDIDATE_REWRITE_COUNT" \
+            -e GIT_CONFIG_KEY_0="url.https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git.insteadOf" \
+            -e GIT_CONFIG_VALUE_0="https://github.com/GOD13emad/ChatGPTRemoteCommander.git" \
+            -v "$GITHUB_WORKSPACE:/src:ro" \
+            ubuntu:24.04 bash -lc '
               set -euo pipefail
               bash /src/server-install-linux.sh                 --source-ref "$RC_SOURCE_REF"                 --expected-commit "$RC_EXPECTED_COMMIT"                 --install-dir /opt/chatgpt-remote-commander/app                 --no-start
               test "$(git -C /opt/chatgpt-remote-commander/app rev-parse HEAD)" = "$RC_EXPECTED_COMMIT"
