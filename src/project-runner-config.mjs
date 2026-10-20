@@ -4,13 +4,6 @@ import { codexLaunchAuthorized, isCodexExecutable } from './no-codex-policy.mjs'
 const RUNNER_ALLOWED_TOOLS = Object.freeze([
   'list_directory','read_text','file_info','write_text','create_directory'
 ]);
-const RUNNER_TEAM = Object.freeze({
-  workers: [
-    { id: 'builder', role: 'Propose the safest bounded next step using current evidence.' },
-    { id: 'reviewer', role: 'Check missing prerequisites, evidence and failure risks before the coordinator acts.' }
-  ],
-  maxParallel: 2
-});
 
 function clone(value) { return JSON.parse(JSON.stringify(value ?? {})); }
 
@@ -77,7 +70,9 @@ function normalizedExplicitRunner(existing) {
       maxExtensions: Number.isSafeInteger(Number(current.adaptive?.maxExtensions))
         ? Number(current.adaptive.maxExtensions) : 4
     },
-    team: current.team ?? clone(RUNNER_TEAM),
+    // Absence of team means single-planner mode. Never silently add workers
+    // during configuration migration, update, or normalization.
+    ...(current.team == null ? {} : { team: current.team }),
     worker: {
       enabled: current.worker?.enabled !== false,
       maxArtifactBytes: Number.isSafeInteger(Number(current.worker?.maxArtifactBytes))
