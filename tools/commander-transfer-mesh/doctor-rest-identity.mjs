@@ -8,3 +8,22 @@ export function verifySyncthingDaemon(status,version,expectedId){
   throw new Error('Daemon version invalid');
  return 'syncthing '+release;
 }
+
+
+// Bind the REST destination and API key to the same local Syncthing GUI config.
+// The unauthenticated /rest/noauth/health response is never destination authority.
+export function configuredLoopbackRest(xml){
+ if(typeof xml!=='string')throw new Error('Syncthing GUI config unavailable');
+ const gui=[...xml.matchAll(/<gui\b([^>]*)>([\s\S]*?)<\/gui>/gi)];
+ if(gui.length!==1)throw new Error('Exactly one Syncthing GUI config required');
+ const attrs=gui[0][1],body=gui[0][2];
+ if(/\benabled\s*=\s*["']false["']/i.test(attrs))throw new Error('Syncthing GUI is disabled');
+ if(/\btls\s*=\s*["']true["']/i.test(attrs))throw new Error('Syncthing GUI TLS requires a verified HTTPS client');
+ const addresses=[...body.matchAll(/<address>([^<]*)<\/address>/gi)];
+ const keys=[...body.matchAll(/<apikey>([^<]+)<\/apikey>/gi)];
+ if(addresses.length!==1||keys.length!==1)throw new Error('Syncthing GUI address/API key missing or ambiguous');
+ const addr=addresses[0][1].trim();
+ const match=/^(127\.0\.0\.1|\[::1\]):([1-9][0-9]{0,4})$/.exec(addr);
+ if(!match||Number(match[2])>65535)throw new Error('Syncthing GUI address must be an explicit loopback IP and valid port');
+ return {base:'http://'+addr,apiKey:keys[0][1]};
+}
