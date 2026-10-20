@@ -32,6 +32,10 @@ test('REST endpoint and key are bound to one explicit loopback GUI config',()=>{
   /disabled/);
  assert.throws(()=>configuredLoopbackRest(config('127.0.0.1:8384','enabled="true" tls="true"')),
   /verified HTTPS/);
+ assert.deepEqual(configuredLoopbackRest(config('127.0.0.1:8384'),'127.0.0.1:18384'),
+   {base:'http://127.0.0.1:18384',apiKey:'fixture-only-key'});
+ for(const bad of ['127.0.0.1:0','http://127.0.0.1:18384','127.0.0.1:70000','0.0.0.0:18384'])
+  assert.throws(()=>configuredLoopbackRest(config('127.0.0.1:8384'),bad),/loopback IP/);
  assert.throws(()=>configuredLoopbackRest('<config/>'),/Exactly one/);
  assert.throws(()=>configuredLoopbackRest(config('127.0.0.1:8384')+config('127.0.0.1:18384')),
   /Exactly one/);
@@ -46,8 +50,9 @@ test('doctor uses authenticated local REST checks, not executable paths',()=>{
   assert.ok(src.includes("'"+endpoint+"'"));
  assert.ok(src.includes("redirect:'error'"));
  assert.ok(src.includes('verifySyncthingDaemon(status,version,IDS[node.alias])'));
- assert.ok(src.includes('configuredLoopbackRest(xml)'));
+ assert.ok(src.includes('configuredLoopbackRest(xml,GUI_OVERRIDES[node.alias])'));
  assert.ok(!src.includes('const candidates='));
+ assert.ok(src.includes("const GUI_OVERRIDES={PC:'127.0.0.1:18384'}"));
 });
 
 test('mocked local REST doctor works without launching a substituted binary',async(t)=>{
