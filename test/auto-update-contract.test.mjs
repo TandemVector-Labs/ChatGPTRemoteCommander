@@ -12,6 +12,40 @@ import { validateHardwareSelftestEndpoint } from '../tools/hardware-selftest-end
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const read=f=>fs.readFileSync(path.join(root,f),'utf8');
 
+// Execute generated Bash qualification fixtures as private, owned script files,
+// never as data supplied to bash -c. Arguments remain separate argv data.
+// All files stay under the existing test-owned sandbox and are removed immediately.
+function runPrivateBashFixture(source, args, options, sandbox) {
+  assert.equal(path.dirname(path.resolve(sandbox)),path.resolve(os.tmpdir()),
+    'generated Bash fixture must remain under an owned OS-temp test sandbox');
+  assert.ok(typeof source==='string'&&source.startsWith('set -Eeuo pipefail'));
+  assert.ok(Array.isArray(args)&&args.every(value=>typeof value==='string'));
+  const stage=fs.mkdtempSync(path.join(sandbox,'.bash-fixture-'));
+  const file=path.join(stage,'fixture.sh');
+  try {
+    fs.writeFileSync(file,source,{encoding:'utf8',flag:'wx',mode:0o600});
+    return spawnSync('bash',[file,...args],options);
+  }finally{
+    fs.rmSync(stage,{recursive:true,force:true});
+  }
+}
+
+
+test('private Bash fixture treats untrusted argv as literal data, not shell commands',t=>{
+  if(process.platform!=='linux')return t.skip('native Bash fixture only');
+  const sandbox=fs.mkdtempSync(path.join(os.tmpdir(),'rc-bash-argv-safety-'));
+  t.after(()=>fs.rmSync(sandbox,{recursive:true,force:true}));
+  const marker=path.join(sandbox,'must-not-be-created');
+  const injected='$(touch '+marker+')';
+  const result=runPrivateBashFixture(
+    'set -Eeuo pipefail\nprintf "%s\n" "$1"',
+    [injected],{encoding:'utf8',timeout:5000},sandbox);
+  assert.equal(result.status,0,result.stderr);
+  assert.equal(result.stdout.trim(),injected);
+  assert.equal(fs.existsSync(marker),false,'argv must never be interpreted as Bash source');
+  assert.equal(fs.readdirSync(sandbox).length,0,'private script and stage must be removed');
+});
+
 test('hardware selftest URL admits only canonical numeric loopback MCP endpoints',()=>{
   for (const url of ['http://127.0.0.1:47831/mcp','http://[::1]:47831/mcp','http://127.0.0.1:65535/mcp'])
     assert.equal(validateHardwareSelftestEndpoint(url),url);
@@ -120,7 +154,7 @@ test('R230 real updater helper execution leaves arbitrary legacy projection sent
        linuxFn,
        'ensure_project_provider'
      ].join('\n');
-     result=spawnSync('bash',['-c',command,'--',sandbox,promote?'1':'0'],{encoding:'utf8',timeout:15000});
+     result=runPrivateBashFixture(command,[sandbox,promote?'1':'0'],{encoding:'utf8',timeout:15000},sandbox);
    }else{
      return t.skip('R230 native execution is required only on Windows and Linux');
    }
@@ -1051,7 +1085,7 @@ test('R234 Linux work-plugin updater preserves arbitrary owner data and retains 
     func,
     'sync_work_plugin_projection "$3" "$4" "$5"'
   ].join('\n');
-  const invoke=()=>spawnSync('bash',['-c',bash,'--',backup,data,project,version,commit],{encoding:'utf8',timeout:15000});
+  const invoke=()=>runPrivateBashFixture(bash,[backup,data,project,version,commit],{encoding:'utf8',timeout:15000},sandbox);
   const first=invoke();
   assert.equal(first.error,undefined,first.error?.message);
   assert.equal(first.status,0,first.stderr+' '+first.stdout);
@@ -1105,7 +1139,7 @@ test('R254 Linux plugin post-verify failure preserves owner data and quarantines
  func,
  'sync_work_plugin_projection "$3" "$4" "$5"'
  ].join('\n');
- const invoke=()=>spawnSync('bash',['-c',script,'--',backup,data,project,version,commit],{encoding:'utf8',timeout:15000});
+ const invoke=()=>runPrivateBashFixture(script,[backup,data,project,version,commit],{encoding:'utf8',timeout:15000},box);
  const result=invoke();
  assert.equal(result.error,undefined,result.error?.message);
  assert.notEqual(result.status,0,'fault-injected post-verify must fail closed');

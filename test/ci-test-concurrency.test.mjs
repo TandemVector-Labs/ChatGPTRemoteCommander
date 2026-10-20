@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { boundNodeTestConcurrency, parseQualificationArgs, prioritizeSensitiveQualificationCommands, isolateWindowsLeaseRegression, isolateWindowsTimingSensitiveRegressions, isolateWindowsProcessTreeRegression, isolateWindowsAgentHttpRegression, isolateWindowsTransferMeshHttpRegression, isolateWindowsWorkflowPlanRegression, markIsolatedQualificationPhases } from '../tools/run-bounded-test-script.mjs';
+import { parseNodeQualificationPlan, markIsolatedQualificationPhases, boundNodeTestConcurrency, parseQualificationArgs, prioritizeSensitiveQualificationCommands, isolateWindowsLeaseRegression, isolateWindowsTimingSensitiveRegressions, isolateWindowsProcessTreeRegression, isolateWindowsAgentHttpRegression, isolateWindowsTransferMeshHttpRegression, isolateWindowsWorkflowPlanRegression } from '../tools/run-bounded-test-script.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const read=rel=>fs.readFileSync(path.join(root,rel),'utf8');
@@ -433,4 +433,69 @@ test('CI Windows runs the Transfer Mesh HTTP fixture alone without weakening rea
   assert.ok(fixture.includes('for(let i=0;i<200;i++)'),'same bounded readiness budget');
   assert.ok(fixture.includes('await wait(25)'),'same server-readiness poll');
   assert.ok(fixture.includes('assert.equal(healthy,true,stderr)'),'still fail closed if server cannot start');
+});
+
+
+test('shell-free qualification plan preserves all existing Node test/check commands',()=>{
+  const pkg=JSON.parse(read('package.json'));
+  for(const kind of ['test','check']){
+    const bounded=boundNodeTestConcurrency(pkg.scripts[kind],2).command;
+    const segments=bounded.split(' && ');
+    const plan=parseNodeQualificationPlan(bounded);
+    assert.equal(plan.length,segments.length,kind);
+    assert.ok(plan.every(step=>step.kind==='node'));
+    assert.equal(plan.map(step=>'node '+step.args.join(' ')).join(' && '),bounded);
+    for(const step of plan)assert.equal(step.args.some(t=>/[;&|$\x60]/.test(t)),false);
+  }
+  const phases=markIsolatedQualificationPhases('node --test --test-concurrency=1 test/a.test.mjs && node --check src/b.mjs');
+  const plan=parseNodeQualificationPlan(phases);
+  assert.deepEqual(plan.map(step=>step.kind),['marker','node','marker','marker','node','marker']);
+  assert.equal(plan[0].value,'RC_QUAL_PHASE_START_00');
+  assert.equal(plan[3].value,'RC_QUAL_PHASE_START_01');
+});
+
+test('shell-free qualification planner rejects injection before execution',()=>{
+  for(const invalid of [
+    'node --test --test-concurrency=2 test/safe.test.mjs; touch /tmp/unsafe',
+    'node --test --test-concurrency=2 test/safe.test.mjs && curl https://example.invalid',
+    'node --test --test-concurrency=2 test/../../tmp/unsafe.mjs',
+    'node --test --test-concurrency=2 test/evil$(touch /tmp/unsafe).mjs',
+    'node --test --test-concurrency=2 test/a.test.mjs | node test/b.mjs',
+    'echo arbitrary',
+    'node --eval process.exit(0)',
+    'node --check test/a.mjs test/b.mjs',
+    'node --test --test-concurrency=99 test/a.test.mjs'
+  ]) assert.throws(()=>parseNodeQualificationPlan(invalid),/CI_TEST_/,invalid);
+});
+
+
+test('shell-free qualification planning preserves the actual Windows scheduling phases',()=>{
+  const pkg=JSON.parse(read('package.json'));
+  for(const kind of ['test','check']){
+    let command=prioritizeSensitiveQualificationCommands(
+      boundNodeTestConcurrency(pkg.scripts[kind],1).command
+    );
+    command=isolateWindowsAgentHttpRegression(command);
+    if(kind==='test'){
+      command=isolateWindowsTimingSensitiveRegressions(command);
+      command=isolateWindowsProcessTreeRegression(command);
+      command=isolateWindowsTransferMeshHttpRegression(command);
+      command=isolateWindowsLeaseRegression(command);
+      command=isolateWindowsWorkflowPlanRegression(command);
+    }
+    const expected=command.split(' && ');
+    // R157 stamps the test path with ordered START/PASS receipts.
+    const plan=parseNodeQualificationPlan(kind==='test'
+      ? markIsolatedQualificationPhases(command) : command);
+    const nodes=plan.filter(step=>step.kind==='node');
+    assert.equal(nodes.length,expected.length,'preserve every test/check subprocess');
+    assert.deepEqual(nodes.map(step=>'node '+step.args.join(' ')),expected);
+    if(kind==='test'){
+      const markers=plan.filter(step=>step.kind==='marker');
+      assert.equal(markers.length,2*expected.length,'retain each R157 receipt');
+      assert.equal(markers[0].value,'RC_QUAL_PHASE_START_00');
+      assert.equal(markers.at(-1).value,
+        'RC_QUAL_PHASE_PASS_'+String(expected.length-1).padStart(2,'0'));
+    }
+  }
 });
