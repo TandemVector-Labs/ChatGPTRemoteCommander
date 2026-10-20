@@ -7,6 +7,31 @@ import {execFileSync} from 'node:child_process';
 import {inspectRetirement} from '../tools/release-retirement-gate-r205.mjs';
 
 function git(root,...a){return execFileSync('git',['-C',root,...a],{encoding:'utf8',timeout:10000}).trim()}
+// CI candidate canaries may redirect the upstream Git *transport* to the
+// organization fork via GIT_CONFIG_COUNT, but R205 fixture origins must test
+// the canonical stored origin exactly. Neutralize only this precise,
+// trusted CI-only rewrite while invoking synchronous fixture inspection.
+function withCanonicalFixtureOrigin(fn) {
+  const names = ['GIT_CONFIG_COUNT','GIT_CONFIG_KEY_0','GIT_CONFIG_VALUE_0'];
+  const isCanaryRewrite =
+    process.env.GIT_CONFIG_COUNT === '1' &&
+    process.env.GIT_CONFIG_KEY_0 ===
+      'url.https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git.insteadOf' &&
+    process.env.GIT_CONFIG_VALUE_0 ===
+      'https://github.com/GOD13emad/ChatGPTRemoteCommander.git';
+  if (!isCanaryRewrite) return fn();
+  const prior = names.map(key => process.env[key]);
+  try {
+    for (const key of names) delete process.env[key];
+    return fn();
+  } finally {
+    names.forEach((key, i) => {
+      if (prior[i] === undefined) delete process.env[key];
+      else process.env[key] = prior[i];
+    });
+  }
+}
+
 function repo(dir,version){
   fs.mkdirSync(dir,{recursive:true});
   git(dir,'init','-q');
@@ -37,7 +62,7 @@ function fixture(){
     ownerUser:os.userInfo().username,rollbackVerified:true,browserLoginPreserved:true,soakAccepted:true,
     explicitRetirementAccepted:true,acceptedUtc:'2026-10-12T11:00:00Z',expiresUtc:'2026-10-12T14:00:00Z'
   };
-  const read=(o={})=>inspectRetirement({stateRoot,releaseRoot,candidate,installDir,now:time,...o});
+  const read=(o={})=>withCanonicalFixtureOrigin(()=>inspectRetirement({stateRoot,releaseRoot,candidate,installDir,now:time,...o}));
   const cleanup=()=>{const prefix=path.join(os.tmpdir(),'rc-r205-retire-');assert.ok(stateRoot.startsWith(prefix));fs.rmSync(stateRoot,{recursive:true,force:true});};
   return {stateRoot,releaseRoot,candidate,installDir,activeHead,candidateHead,routePath,route,approve,approvalPath,read,cleanup};
 }
