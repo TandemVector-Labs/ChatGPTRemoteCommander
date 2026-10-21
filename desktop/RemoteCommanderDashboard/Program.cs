@@ -144,6 +144,7 @@ internal sealed class DashboardForm : Form
         if (ToolInstalled("admin-runtime-windows.ps1"))
             actions.Controls.Add(Button("Admin Runtime", (_, _) => LaunchPowerShellTool("admin-runtime-windows.ps1", "Admin Runtime")));
         actions.Controls.Add(Button("Browser", (_, _) => LaunchBrowser()));
+        actions.Controls.Add(Button("Notion Connection", (_, _) => { using var wizard = new NotionSetupForm(); wizard.ShowDialog(this); }));
         actions.Controls.Add(Button("Copy Diagnostics", (_, _) => CopyDiagnostics()));
 
         chrome.Attach(cards);
@@ -436,9 +437,15 @@ internal sealed class DashboardForm : Form
 internal static class Program
 {
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
         ApplicationConfiguration.Initialize();
+        if (args.Length == 1 && args[0] == "--notion-connect")
+        {
+            using var notion = new NotionSetupForm();
+            Application.Run(notion);
+            return;
+        }
         Application.Run(new DashboardForm());
     }
 }

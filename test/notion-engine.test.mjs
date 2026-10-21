@@ -326,3 +326,19 @@ test('PAT CLI only accepts piped credentials, redacts failures and has a safe he
   assert.equal((invalid.stdout+invalid.stderr).includes('NOT_VALID_PAT_TEST'),false);
   assert.match(invalid.stderr,/NOTION_PAT_INVALID_FORMAT/);
 });
+
+test('safe PAT status CLI exposes only bounded state, accepts named profiles, and rejects mixed modes',async()=>{
+  const {spawnSync}=await import('node:child_process');
+  const {fileURLToPath}=await import('node:url');
+  const cli=fileURLToPath(new URL('../tools/notion-pat-import.mjs',import.meta.url));
+  const profile='rc_status_probe_'+process.pid;
+  const status=spawnSync(process.execPath,[cli,'--status','--profile',profile],{encoding:'utf8',timeout:10000});
+  assert.equal(status.status,0,status.stderr);
+  assert.match(status.stdout,/^NOTION_REST_STATUS (?:CONNECTED|DISCONNECTED) (?:PAT|OAUTH|NONE) VAULT_(?:READY|UNAVAILABLE)\n$/);
+  assert.doesNotMatch(status.stdout,/ntn_[A-Za-z0-9]/);
+  for(const args of [['--status','--token-stdin'],['--status','--replace-existing']]){
+    const bad=spawnSync(process.execPath,[cli,...args],{encoding:'utf8',timeout:8000});
+    assert.equal(bad.status,1);
+    assert.match(bad.stderr,/NOTION_PAT_CLI_ARGUMENT_INVALID/);
+  }
+});

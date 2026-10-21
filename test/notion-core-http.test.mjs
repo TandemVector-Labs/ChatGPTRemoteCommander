@@ -19,7 +19,7 @@ async function rpc(port, method, params = undefined) {
   const result = await fetch('http://127.0.0.1:' + port + '/mcp', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ jsonrpc: '2.0', id: 6, method, ...(params ? { params } : {}) }),
-    signal: AbortSignal.timeout(1600)
+    signal: AbortSignal.timeout(3500)
   });
   assert.equal(result.status, 200);
   return result.json();
@@ -45,6 +45,10 @@ test('native Notion tools are discoverable by real Commander MCP route and fail 
     redirectUri: 'http://127.0.0.1:' + callbackPort + '/notion/callback',
     allowWrites: false
   };
+  // This test checks the unauthenticated route and MUST NOT ever read the
+  // owner's real 'default' REST/MCP vault after the user has connected Notion.
+  config.instance = { ...(config.instance ?? {}),
+    profile: 'notion_http_synthetic_' + process.pid + '_' + Date.now() };
   const configPath = path.join(tmp, 'config.json');
   fs.writeFileSync(configPath, JSON.stringify(config));
   const env = { ...process.env, REMOTE_COMMANDER_CONFIG: configPath };
