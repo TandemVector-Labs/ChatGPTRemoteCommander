@@ -180,7 +180,8 @@ test('R470 sanitized diagnostic workflow persists no raw qualification log and k
   for(const marker of [
     'failureTests','sourceSha256','matchingLogCount','rawLogIncluded=$false',
     'secretsIncluded=$false','UNSAFE_RERUN_DIAGNOSTIC_ALREADY_EXISTS',
-    'LOG_TOO_LARGE','AMBIGUOUS_MULTIPLE_MATCHING_LOGS'
+    'LOG_TOO_LARGE','AMBIGUOUS_MULTIPLE_MATCHING_LOGS',
+    'lastKnownGate','CONCURRENCY_SMOKE_PASS','GUI_CONTROL_CHECK_PASS'
   ]) assert.ok(script.includes(marker),marker);
   for(const marker of [
     "if: ${{ failure() }}",
@@ -203,15 +204,20 @@ test('R470 Windows fixture extracts failing test and counters without persisting
   const script=path.join(root,'tools','diagnose-updater-gate-r470.ps1');
   const sha='604ed6a8a0e0f95197fabcc92d93537142017a0b';
   const secret='ghp_R470_TEST_SENTINEL_SUPER_SECRET_SHOULD_NOT_APPEAR';
-  function run(names) {
+  function run(names,reporter='tap') {
     const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'rc-r470-diagnostic-'));
     try {
       const folder=path.join(tmp,'STATE','ChatGPTRemoteCommander','update-logs');
       fs.mkdirSync(folder,{recursive:true});
-      for(const name of names)fs.writeFileSync(path.join(folder,name),
+      const lines=reporter==='spec' ?
+        ['✖ file fixture failed under concurrency (120ms)',
+         '✖ api token leaked fixture should redact (13ms)',
+         'ℹ tests 8','ℹ pass 6','ℹ fail 2','CONCURRENCY_SMOKE_PASS',
+         'GUI_CONTROL_CHECK_PASS scope=contract','Authorization: Bearer '+secret] :
         ['TAP version 13','not ok 245 - team reserves all calls before workers and executes only the coordinator proposal',
-        "failureType: 'testTimeoutFailure'",'code: ERR_TEST_FAILURE','# tests 521','# pass 520',
-        '# fail 1','# cancelled 0','# duration_ms 25000','Authorization: Bearer '+secret].join('\n'),'utf8');
+         "failureType: 'testTimeoutFailure'",'code: ERR_TEST_FAILURE','# tests 521','# pass 520',
+         '# fail 1','# cancelled 0','# duration_ms 25000','Authorization: Bearer '+secret];
+      for(const name of names)fs.writeFileSync(path.join(folder,name),lines.join('\n'),'utf8');
       const proc=spawnSync('pwsh.exe',['-NoProfile','-NonInteractive','-File',script,
         '-Root',tmp,'-ExpectedCommit',sha],{encoding:'utf8',timeout:15000});
       assert.equal(proc.status,0,proc.stderr || proc.stdout);
@@ -232,6 +238,16 @@ test('R470 Windows fixture extracts failing test and counters without persisting
   assert.ok(one.failureTypes.includes('testTimeoutFailure'));
   assert.equal(one.rawLogIncluded,false);
   assert.equal(one.secretsIncluded,false);
+  const spec=run([file],'spec');
+  assert.equal(spec.failureTests.length,2,'native Node spec failures must be diagnosed');
+  assert.ok(spec.failureTests[0].publicTestName.startsWith('file fixture failed'));
+  assert.equal(spec.failureTests[0].index,null);
+  assert.equal(spec.failureTests[1].publicTestName,'REDACTED_TEST_NAME');
+  assert.equal(spec.tapCounts.fail,'2');
+  assert.equal(spec.tapCounts.tests,'8');
+  assert.equal(spec.lastKnownGate,'GUI_CONTROL_CHECK_PASS');
+  assert.equal(spec.rawLogIncluded,false);
+  assert.equal(spec.secretsIncluded,false);
   const many=run([file,file.replace('fixture','duplicate')]);
   assert.equal(many.status,'AMBIGUOUS_MULTIPLE_MATCHING_LOGS');
   assert.equal(many.failureTests.length,0,'never guess newest');
