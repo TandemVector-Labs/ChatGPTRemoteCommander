@@ -135,11 +135,12 @@ export class NotionEngine {
   }
   async importPersonalAccessToken(token, { replaceExisting = false } = {}) {
     if (!this.config.enabled) throw fail('NOTION_DISABLED');
-    if (!this.vault.available) throw fail('NOTION_VAULT_UNAVAILABLE');
-    // PATs are never accepted from tool arguments. This method is called only by
-    // the local, stdin-only onboarding CLI; it never echoes or logs credentials.
+    // Reject malformed input before accessing OS keyring: this must work even
+    // on headless Linux CI without a local credential vault.
+    // PATs are only received by the stdin-only local onboarding CLI.
     if (typeof token !== 'string' || !/^[A-Za-z0-9._-]{24,512}$/.test(token))
       throw fail('NOTION_PAT_INVALID_FORMAT');
+    if (!this.vault.available) throw fail('NOTION_VAULT_UNAVAILABLE');
     const previous = await this.vault.load();
     if (previous?.access_token && replaceExisting !== true) throw fail('NOTION_ALREADY_CONNECTED');
     let response;

@@ -282,6 +282,7 @@ test('personal token import refuses missing vault, disabled state, invalid or un
   const token='ntn_'+'z'.repeat(48);
   const noVault=new NotionEngine({config:{enabled:true},vault:{available:false}});
   await assert.rejects(noVault.importPersonalAccessToken(token),/NOTION_VAULT_UNAVAILABLE/);
+  await assert.rejects(noVault.importPersonalAccessToken('invalid'),/NOTION_PAT_INVALID_FORMAT/);
   const disabled=new NotionEngine({config:{enabled:false},vault:fakeVault()});
   await assert.rejects(disabled.importPersonalAccessToken(token),/NOTION_DISABLED/);
   let requests=0;
