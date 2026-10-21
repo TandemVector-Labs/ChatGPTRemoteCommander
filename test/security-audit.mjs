@@ -18,6 +18,14 @@ const patterns = [
   ['GitHub token', new RegExp('gh' + '[pousr]_' + '[A-Za-z0-9]{20,}', 'i')],
   ['Developer Windows path', /C:\\Users\\[^\\\r\n]+\\source\\repos\\ChatGPTRemoteCommander/i]
 ];
+// The source commit below contains one demonstrably synthetic bearer header in a
+// Notion OAuth fixture. Preserve the committed evidence; do not rewrite published Git
+// history or silence the bearer rule globally. Scope the exception to one exact byte
+// sequence, one test path, and its introducing commit.
+const FIXTURE_PATH = 'test/notion-mcp-engine.test.mjs';
+const FIXTURE_ORIGIN = '7b28ae4ffbfc3094c70647fd1ad8c4c491ba7bf5';
+const FIXTURE_BEARER = 'Bearer ' + 'FIXTURE_PRIVATE_ACCESS';
+function scrubFixture(value) { return value.split(FIXTURE_BEARER).join('Bearer [KNOWN-SYNTHETIC-FIXTURE]'); }
 const tunnelPattern = patterns.find(([type]) => type === 'Tunnel identifier')[1];
 if (!tunnelPattern.test('tunnel' + '_' + '0123456789abcdef'.repeat(2)) || tunnelPattern.test('tunnel_control_plane_fresh') || tunnelPattern.test('TUNNEL_HEALTH_UNKNOWN_LISTENER')) {
   throw new Error('Tunnel identifier audit pattern regression');
@@ -26,10 +34,15 @@ if (!tunnelPattern.test('tunnel' + '_' + '0123456789abcdef'.repeat(2)) || tunnel
 // Lines are bounded; anything above the bound fails closed instead of being skipped.
 function makeHistoryScanner(rules) {
   const hits = new Set();
-  let pending = '', preceding = '';
+  let pending = '', preceding = '', commit = null, diffPath = null;
   const limit = 16 * 1024 * 1024;
   function scanLine(line) {
-    const sample = preceding + line;
+    const commitMatch = /^commit ([0-9a-f]{40})/.exec(line);
+    if (commitMatch) { commit = commitMatch[1]; diffPath = null; }
+    const diffMatch = /^diff --git a\/(.+) b\/(.+)\r?\n?$/.exec(line);
+    if (diffMatch) diffPath = diffMatch[2].trim();
+    const acceptedSynthetic = commit === FIXTURE_ORIGIN && diffPath === FIXTURE_PATH;
+    const sample = preceding + (acceptedSynthetic ? scrubFixture(line) : line);
     for (const [name, pattern] of rules) {
       pattern.lastIndex = 0;
       if (pattern.test(sample)) hits.add(name);
@@ -61,6 +74,18 @@ const probed = boundaryProbe.finish();
 if (!probed.has('Tunnel identifier') || !probed.has('Bearer token literal')) {
   throw new Error('SECURITY_AUDIT_STREAM_SCANNER_REGRESSION');
 }
+// Regression guard: one historical fixture is exempt, but an unrelated bearer
+// (even in the same file/commit) must always be detected.
+const syntheticProbe = makeHistoryScanner(patterns);
+syntheticProbe.write('commit ' + FIXTURE_ORIGIN + '\n');
+syntheticProbe.write('diff --git a/' + FIXTURE_PATH + ' b/' + FIXTURE_PATH + '\n');
+syntheticProbe.write('+Authorization: ' + FIXTURE_BEARER + '\n');
+if (syntheticProbe.finish().has('Bearer token literal')) throw new Error('SECURITY_AUDIT_SYNTHETIC_EXCEPTION_FAILED');
+const strictProbe = makeHistoryScanner(patterns);
+strictProbe.write('commit ' + FIXTURE_ORIGIN + '\n');
+strictProbe.write('diff --git a/' + FIXTURE_PATH + ' b/' + FIXTURE_PATH + '\n');
+strictProbe.write('+Authorization: Bearer ' + 'notasyntheticfixturelongtokenz12345' + '\n');
+if (!strictProbe.finish().has('Bearer token literal')) throw new Error('SECURITY_AUDIT_SYNTHETIC_EXCEPTION_OVERBROAD');
 async function scanCompleteHistory() {
   const args = ['log', '--all', '-p', '--no-color', '--no-ext-diff'];
   const child = spawn('git', args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -99,9 +124,10 @@ const tracked = git(['ls-files', '-z']).split('\0').filter(Boolean);
 for (const file of tracked) {
   let text;
   try { text = await readFile(file, 'utf8'); } catch { continue; }
+  const content = file === FIXTURE_PATH ? scrubFixture(text) : text;
   for (const [type, pattern] of patterns) {
     pattern.lastIndex = 0;
-    if (pattern.test(text)) findings.push({ scope: 'CURRENT', type, location: file });
+    if (pattern.test(content)) findings.push({ scope: 'CURRENT', type, location: file });
   }
 }
 
