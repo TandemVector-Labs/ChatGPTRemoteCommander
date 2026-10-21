@@ -19,6 +19,20 @@ const root=process.env.COMMANDER_TRANSFER_HOME || (process.platform==='win32'
 const output={schema:'ctmesh-doctor-v1',ok:false,alias:null,version:null,apiStatus:'unavailable',
  activePairCount:0,legacyBroadcastPaused:false,staleMisconfiguredActive:0,connectedPeers:0,transports:{},errors:[]};
 function err(e){output.errors.push(String(e?.message||e).slice(0,200).replace(/<apikey>.*?<\/apikey>/ig,'[REDACTED]'));}
+// On POSIX only, demand a private state root and private credential-bearing
+// files owned by the executing user. Windows requires separate ACL admission;
+// POSIX mode/uid fields do NOT authenticate NTFS ownership.
+function privateOwnerAndMode(st){
+ if(process.platform==='win32'||typeof process.getuid!=='function')return true;
+ return st.uid===process.getuid()&&(st.mode&0o077)===0;
+}
+function assertPrivateDoctorRoots(){
+ for(const dir of [root,path.join(root,'state')]){
+  const st=fs.lstatSync(dir);
+  if(!st.isDirectory()||st.isSymbolicLink()||!privateOwnerAndMode(st))
+   throw Error('Untrusted doctor state file');
+ }
+}
 // Read node identity/config via a bounded verified descriptor. Parent links,
 // final symlinks, devices, FIFOs and replacement attempts must fail closed,
 // before a configured Syncthing API key is used.
@@ -32,7 +46,7 @@ function readVerifiedStateFile(rel,maxBytes){
   if(st.isSymbolicLink()||!st.isDirectory())throw Error('Untrusted doctor state file');
  }
  const named=fs.lstatSync(filename);
- if(!named.isFile()||named.isSymbolicLink()||named.nlink!==1||
+ if(!named.isFile()||named.isSymbolicLink()||named.nlink!==1||!privateOwnerAndMode(named)||
     named.size<1||named.size>maxBytes)throw Error('Untrusted doctor state file');
  const flags=fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW??0)|(fs.constants.O_NONBLOCK??0);
  const fd=fs.openSync(filename,flags);
@@ -62,6 +76,7 @@ try {
  if(!path.isAbsolute(root)||
     (process.platform==='win32'&&!/^[A-Za-z]:[\\/]/.test(root)))
    throw Error('Untrusted operator state root namespace');
+ assertPrivateDoctorRoots();
  const node=JSON.parse(readVerifiedStateFile(['node.json'],16384));
  output.alias=node.alias;
  if(!Object.hasOwn(IDS,node.alias)||node.deviceID!==IDS[node.alias])throw new Error('Node identity mismatch');
