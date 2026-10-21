@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import {verifySyncthingDaemon,configuredLoopbackRest} from './doctor-rest-identity.mjs';
+import {verifySyncthingDaemon,configuredLoopbackRest,pinnedSyncthingJson} from './doctor-rest-identity.mjs';
 // Four-host pilot only: the PC launcher has a fixed --gui-address override.
 // This is an exact per-node destination, NOT a candidate port scan.
 const GUI_OVERRIDES={PC:'127.0.0.1:18384'};
@@ -25,12 +25,8 @@ try {
  if(!Object.hasOwn(IDS,node.alias)||node.deviceID!==IDS[node.alias])throw new Error('Node identity mismatch');
  const xml=fs.readFileSync(path.join(root,'state','config.xml'),'utf8');
  const {base,apiKey:key}=configuredLoopbackRest(xml,GUI_OVERRIDES[node.alias]);
- const fetchLocal=async(base,url,authenticated=true)=>{
-  const h=authenticated?{'X-API-Key':key}:{};
-  const r=await fetch(base+url,{headers:h,redirect:'error',signal:AbortSignal.timeout(2600)});
-  if(!r.ok)throw new Error('Local API HTTP '+r.status);
-  return await r.json();
- };
+ const fetchLocal=(base,url,authenticated=true)=>
+   pinnedSyncthingJson(root,base,key,url,authenticated);
  const health=await fetchLocal(base,'/rest/noauth/health',false);
  if(health.status!=='OK')throw new Error('Configured local Syncthing REST health unavailable');
  // Query the already-authenticated local daemon; never run a binary from a
