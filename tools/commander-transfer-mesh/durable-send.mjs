@@ -6,6 +6,22 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+// This worker is copied to COMMANDER_TRANSFER_HOME/durable-send.mjs on hosts.
+// Keep the minimal path-root guard self-contained so a copied worker can run
+// without relative source-tree dependencies.
+function assertUnredirectedDirectoryAncestors(input,code='MANAGED_PATH_UNSAFE'){
+ if(typeof input!=='string'||!path.isAbsolute(input))throw Error(code);
+ const normalized=path.normalize(input),anchor=path.parse(normalized).root;
+ let cur=anchor;
+ for(const part of path.relative(anchor,normalized).split(path.sep)){
+  if(!part||part==='.')continue;
+  cur=path.join(cur,part);
+  try{
+   const st=fs.lstatSync(cur);
+   if(st.isSymbolicLink()||!st.isDirectory())throw Error(code);
+  }catch(e){if(e.code==='ENOENT')continue;throw Error(code);}
+ }
+}
 process.umask(0o077);
 const root=path.resolve(process.env.COMMANDER_TRANSFER_HOME||(
  process.platform==='win32'?path.join(process.env.LOCALAPPDATA||path.join(os.homedir(),'AppData','Local'),'CommanderTransferPilot'):path.join(os.homedir(),'.local','share','commander-transfer-pilot')));
@@ -209,6 +225,7 @@ try{
   reply({schema:'ctmesh-durable-v1',contractVersion:2,admissionQuotas:true,
     supports:['enqueue','job-status','resume','cancel'],workerPersistence:true,hashVerification:'sha256'});
  }else{
+ assertUnredirectedDirectoryAncestors(root,'TRANSFER_MANAGED_PATH_UNSAFE');
  const peer=opt('peer'),id=opt('id'),p=safePaths(peer,id);
  if(command==='enqueue'){
   const source=opt('path'),sourceRoot=opt('source-root');
