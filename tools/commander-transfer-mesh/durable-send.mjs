@@ -166,13 +166,28 @@ function copyJob(p,j){
   }else{fs.writeFileSync(existingManifest,JSON.stringify(expected)+'\n',{flag:'wx',mode:0o600});}
   j.sha256=verified;j.copiedBytes=j.bytes;j.status='PUBLISHED';save(p,j);return;
  }
- if(fs.existsSync(p.part))assertion(fs.lstatSync(p.part).isFile()&&!fs.lstatSync(p.part).isSymbolicLink(),'BAD_PARTIAL_FILE');
- const input=fs.openSync(source,'r');
- const out=fs.openSync(p.part,fs.existsSync(p.part)?'r+':'wx+',0o600);
- let offset=fs.fstatSync(out).size;
- assertion(offset<=j.bytes,'PARTIAL_TOO_LARGE');
- const buf=Buffer.allocUnsafe(4*1024*1024);
+ // Pin the resumed part and the source to the files checked by preflight.
+ // An attacker must not be able to swap a named part for a symlink between
+ // lstat and open, causing writes outside the operator's private staging root.
+ const existingPart=fs.existsSync(p.part)?fs.lstatSync(p.part):null;
+ if(existingPart)assertion(existingPart.isFile()&&!existingPart.isSymbolicLink()&&existingPart.nlink===1,'BAD_PARTIAL_FILE');
+ const inputFlags=fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW??0)|(fs.constants.O_NONBLOCK??0);
+ const input=fs.openSync(source,inputFlags);
+ let out;
  try{
+  const sourceInfo=fs.fstatSync(input);
+  assertion(sourceInfo.isFile()&&sourceInfo.dev===j.dev&&sourceInfo.ino===j.ino&&
+    sourceInfo.size===j.bytes&&sourceInfo.mtimeMs===j.mtimeMs,'SOURCE_CHANGED');
+  const resumeFlags=fs.constants.O_RDWR|(fs.constants.O_NOFOLLOW??0)|(fs.constants.O_NONBLOCK??0);
+  out=fs.openSync(p.part,existingPart?resumeFlags:'wx+',0o600);
+  const opened=fs.fstatSync(out),named=fs.lstatSync(p.part);
+  assertion(opened.isFile()&&opened.nlink===1&&named.isFile()&&!named.isSymbolicLink()&&
+    named.nlink===1&&opened.dev===named.dev&&opened.ino===named.ino&&
+    (!existingPart||(opened.dev===existingPart.dev&&opened.ino===existingPart.ino&&
+      opened.size===existingPart.size)),'BAD_PARTIAL_FILE');
+  let offset=opened.size;
+  assertion(offset<=j.bytes,'PARTIAL_TOO_LARGE');
+  const buf=Buffer.allocUnsafe(4*1024*1024);
   j.status='COPYING';j.pid=process.pid;j.copiedBytes=offset;save(p,j);
   while(offset<j.bytes){
    // A cancellation is durable, not an OS-level termination of a shared process.
@@ -185,7 +200,7 @@ function copyJob(p,j){
    if(offset-j.copiedBytes>=16*1024*1024 || offset===j.bytes){fs.fsyncSync(out);j.copiedBytes=offset;save(p,j);}
   }
   fs.fsyncSync(out);
- }finally{fs.closeSync(input);fs.closeSync(out);}
+ }finally{if(out!==undefined)fs.closeSync(out);fs.closeSync(input);}
  checkInput(j);
  j.status='VERIFYING';j.copiedBytes=j.bytes;save(p,j);
  const sourceSha=hash(source),partSha=hash(p.part);
