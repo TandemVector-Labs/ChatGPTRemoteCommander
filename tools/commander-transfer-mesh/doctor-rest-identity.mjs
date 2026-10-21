@@ -82,11 +82,22 @@ export async function pinnedSyncthingJson(stateRoot,base,apiKey,endpoint,authent
       opened.size<100||opened.size>32768||
       opened.dev!==named.dev||opened.ino!==named.ino)
      throw Error('unsafe certificate identity');
-   cert=fs.readFileSync(descriptor);
+   // Use a fixed-size descriptor read: readFileSync(fd) can retain arbitrarily
+   // many bytes if the file grows after fstat but before the read completes.
+   // The size at this point was validated to be between 100 and 32768 bytes.
+   cert=Buffer.alloc(opened.size);
+   let offset=0;
+   while(offset<cert.length){
+    const count=fs.readSync(descriptor,cert,offset,cert.length-offset,offset);
+    if(count<=0)throw Error('certificate truncated during read');
+    offset+=count;
+   }
    const after=fs.fstatSync(descriptor),namedAfter=fs.lstatSync(certPath);
-   if(cert.length!==opened.size||after.dev!==opened.dev||after.ino!==opened.ino||
-      after.size!==opened.size||namedAfter.dev!==opened.dev||
-      namedAfter.ino!==opened.ino||namedAfter.isSymbolicLink())
+   if(after.dev!==opened.dev||after.ino!==opened.ino||
+      after.size!==opened.size||after.mtimeMs!==opened.mtimeMs||
+      after.ctimeMs!==opened.ctimeMs||namedAfter.dev!==opened.dev||
+      namedAfter.ino!==opened.ino||namedAfter.size!==opened.size||
+      namedAfter.isSymbolicLink())
      throw Error('certificate replaced during read');
   }finally{fs.closeSync(descriptor);}
  }catch{throw Error('Syncthing HTTPS identity certificate unavailable or unsafe');}
