@@ -17,7 +17,7 @@ test('agent extension tools are exposed read-only and return validated manifests
   let child;
   try {
     await fs.mkdir(path.join(root,'src'),{recursive:true});
-    for(const f of ['server-v0.3.mjs','transport-guard.mjs','gui-tools-windows.mjs','gui-incident-store.mjs','gui-contract.mjs','gui-process.mjs','browser-tools.mjs','browser-contract.mjs','browser-process.mjs','browser-owned-processes.mjs','browser-lease-store.mjs','browser-companion-monitor.mjs','schema-validator.mjs','async-operations.mjs','retry-guard.mjs','agent-extensions.mjs','coucou-bridge.mjs','no-codex-policy.mjs','conversation-store.mjs','conversation-continuation.mjs']) {
+    for(const f of ['server-v0.3.mjs','transport-guard.mjs','gui-tools-windows.mjs','gui-incident-store.mjs','managed-path-anchor.mjs','gui-contract.mjs','gui-process.mjs','browser-tools.mjs','browser-contract.mjs','browser-process.mjs','browser-owned-processes.mjs','browser-lease-store.mjs','browser-companion-monitor.mjs','schema-validator.mjs','async-operations.mjs','retry-guard.mjs','agent-extensions.mjs','coucou-bridge.mjs','no-codex-policy.mjs','conversation-store.mjs','conversation-continuation.mjs']) {
       await fs.copyFile(new URL('../src/'+f,import.meta.url),path.join(root,'src',f));
     }
     await fs.writeFile(path.join(root,'src','security-v0.3.mjs'),'export const canonicalizeRoots = async x=>x;');
