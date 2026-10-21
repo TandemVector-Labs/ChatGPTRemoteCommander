@@ -7,6 +7,48 @@ import net from 'node:net';
 import {spawn} from 'node:child_process';
 import {once} from 'node:events';
 const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+// A live Windows runner can take longer than 5s to initialize the isolated
+// server under concurrent test load. Use a monotonic 20s deadline, per-probe
+// timeout, and fail early if the child exits. No production health gate changes.
+async function waitForHealth(port,child,{now=()=>performance.now(),sleep=wait,request=fetch,timeoutMs=20_000,retryMs=50}={}){
+ const deadline=now()+timeoutMs;
+ let attempts=0;
+ while(now()<deadline){
+  if(child.exitCode!==null || child.signalCode!==null)
+   return {ready:false,reason:'CHILD_EXITED',attempts};
+  const remaining=deadline-now();
+  if(remaining<=0)break;
+  try{
+   const result=await request('http://127.0.0.1:'+port+'/health',
+    {signal:AbortSignal.timeout(Math.max(1,Math.min(1500,Math.ceil(remaining))))});
+   attempts++;
+   if(result.ok)return {ready:true,attempts};
+  }catch{attempts++;}
+  const next=deadline-now();
+  if(next<=0)break;
+  await sleep(Math.min(retryMs,next));
+ }
+ return {ready:false,reason:'STARTUP_DEADLINE_EXCEEDED',attempts};
+}
+test('bounded transfer HTTP readiness tolerates slow startup but stops on deadline or child exit',async()=>{
+ const child={exitCode:null,signalCode:null};
+ let probes=0, clock=0;
+ const ready=await waitForHealth(8080,child,{
+  now:()=>clock,sleep:async ms=>{clock+=ms;},
+  request:async()=>({ok:++probes===5}),timeoutMs:300,retryMs:50,
+ });
+ assert.deepEqual(ready,{ready:true,attempts:5});
+ assert.equal(clock,200);
+ const exhausted=await waitForHealth(8080,child,{
+  now:()=>clock,sleep:async ms=>{clock+=ms;},
+  request:async()=>{throw Error('connection refused');},timeoutMs:120,retryMs:50,
+ });
+ assert.deepEqual(exhausted,{ready:false,reason:'STARTUP_DEADLINE_EXCEEDED',attempts:3});
+ const dead={exitCode:1,signalCode:null};
+ const stopped=await waitForHealth(8080,dead,{request:()=>{throw Error('not allowed');}});
+ assert.deepEqual(stopped,{ready:false,reason:'CHILD_EXITED',attempts:0});
+});
+
 async function port(){const l=net.createServer();l.listen(0,'127.0.0.1');await once(l,'listening');const p=l.address().port;await new Promise(r=>l.close(r));return p;}
 async function req(p,name,args={},id=1){const res=await fetch('http://127.0.0.1:'+p+'/mcp',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id,method:name==='__list'?'tools/list':'tools/call',params:name==='__list'?{}:{name,arguments:args}})});const body=await res.json();assert.equal(res.status,200);return body.result;}
 test('MCP native transfer tools opt in, expose narrowly scoped schemas and execute authentic local send',async()=>{
@@ -29,9 +71,10 @@ test('MCP native transfer tools opt in, expose narrowly scoped schemas and execu
   await fs.writeFile(configPath,JSON.stringify(cfg));
   child=spawn(process.execPath,[path.join(server,'src/server-v0.3.mjs')],{cwd:server,env:{...process.env,REMOTE_COMMANDER_CONFIG:configPath},stdio:['ignore','pipe','pipe']});
   child.stderr.on('data',x=>stderr+=x);
-  let healthy=false;
-  for(let i=0;i<200;i++){try{const r=await fetch('http://127.0.0.1:'+serverPort+'/health');if(r.ok){healthy=true;break;}}catch{}await wait(25);}
-  assert.equal(healthy,true,stderr);
+  const startup=await waitForHealth(serverPort,child);
+  assert.equal(startup.ready,true,
+   'transfer mesh fixture '+(startup.reason??'not ready')+
+   ' after '+startup.attempts+' probes; stderr tail: '+stderr.slice(-1600));
   const list=await req(serverPort,'__list');const defs=list.tools.filter(x=>x.name.startsWith('transfer_mesh_'));
   assert.equal(defs.length,8);
   assert.equal(defs.find(x=>x.name==='transfer_mesh_send').annotations.readOnlyHint,false);
