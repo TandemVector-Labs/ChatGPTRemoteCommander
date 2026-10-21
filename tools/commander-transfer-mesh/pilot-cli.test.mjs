@@ -266,3 +266,44 @@ test('managed staging symlink rejects outgoing transfer before touching external
   }finally{fs.rmSync(outside,{recursive:true,force:true});}
  });
 });
+
+test('receive lock replacement between lstat and descriptor open fails closed',()=>{
+ withFixtures((src,dst)=>{
+  const data=crypto.randomBytes(8192),id='lock-race-open-001';
+  const {receipt}=send(src,id,data);mirror(src,dst,id);
+  const inbox=path.join(dst,'inbox');fs.mkdirSync(inbox);
+  const lock=path.join(inbox,'.ctmesh-'+id+'.lock');
+  const stale={schema:'ctmesh-receive-lock-v1',host:os.hostname(),peer:'PC',id,
+    sha256:receipt.sha256,pid:2147483647};
+  fs.writeFileSync(lock,JSON.stringify(stale)+'\n');
+  const external=path.join(src,'external-race-lock.json');
+  fs.writeFileSync(external,'{"noncredential":"adversarial test fixture"}\n');
+  const preload=path.join(src,'interpose-lock-open.cjs');
+  fs.writeFileSync(preload,[
+    "const fs=require('node:fs');",
+    "const realOpen=fs.openSync;",
+    "let once=false;",
+    "fs.openSync=function(name,flags,...rest){",
+    " if(!once && typeof name==='string' && name===process.env.CTMESH_QA_RACE_LOCK &&",
+    "    typeof flags==='number' && (flags&fs.constants.O_WRONLY)===0 && (flags&fs.constants.O_RDWR)===0){",
+    "  once=true; fs.renameSync(name,name+'.original-race');",
+    "  fs.copyFileSync(process.env.CTMESH_QA_RACE_TARGET,name);",
+    " }",
+    " return realOpen.call(this,name,flags,...rest);",
+    "};"
+  ].join('\n'));
+  const before=fs.readFileSync(external);
+  const result=spawnSync(process.execPath,['--require',preload,cli,'receive',
+    '--peer','PC','--id',id,'--dest',inbox],{
+    encoding:'utf8',timeout:15000,
+    env:{...process.env,COMMANDER_TRANSFER_HOME:dst,
+      CTMESH_QA_RACE_LOCK:lock,CTMESH_QA_RACE_TARGET:external}
+  });
+  assert.notEqual(result.status,0,result.stdout);
+  assert.match(result.stderr,/Untrusted receive lock/);
+  assert.deepEqual(fs.readFileSync(external),before);
+  assert.ok(fs.existsSync(lock+'.original-race'),'race injection must have run');
+  assert.deepEqual(fs.readFileSync(lock),before);
+  assert.equal(fs.existsSync(path.join(inbox,'sample.bin')),false);
+ });
+});
