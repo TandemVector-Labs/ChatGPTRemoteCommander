@@ -63,6 +63,9 @@ test('boot, handoff, and user-logon task launchers do not pin the versioned MSIX
   assert.match(launcher,/Sort-Object Version -Descending/u);
   assert.match(launcher,/BOOT_LAUNCHER_PWSH7_NOT_FOUND/u);
   assert.match(launcher,/USER_SUPERVISOR_DEFERRED_MACHINE_CREDENTIALS/u);
+  assert.match(launcher,/USER_SUPERVISOR_DEFERRED_INVALID_USER_CREDENTIAL/u);
+  assert.match(launcher,/ConvertTo-SecureString/u);
+  assert.match(install,/BOOT_RECOVERY_STABLE_LAUNCHER_UPDATE_REQUIRED/u);
   assert.match(install,/if\(Test-Path -LiteralPath \$target -PathType Leaf\)\{return \$target\}/u);
   assert.match(handoff,/HANDOFF_DEFERRED_MACHINE_ONLY_CREDENTIALS/u);
   assert.ok(handoff.indexOf('HANDOFF_DEFERRED_MACHINE_ONLY_CREDENTIALS') <
