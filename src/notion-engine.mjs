@@ -12,19 +12,29 @@ const timeout = ms => AbortSignal.timeout(ms);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const safeId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(value);
 function fail(code) { const error = new Error(code); error.code = code; return error; }
+function notionTitle(item) {
+  const property = Object.values(item?.properties ?? {}).find(value => value?.type === 'title' || Array.isArray(value?.title));
+  const fragments = property?.title ?? item?.title ?? [];
+  return Array.isArray(fragments) ? fragments.map(value => value.plain_text ?? value.text?.content ?? '').join('') : '';
+}
+function blockPreview(item) {
+  const content = item[item.type] ?? {};
+  const text = (content.rich_text ?? content.caption ?? []).map(value => value.plain_text ?? value.text?.content ?? '').join('');
+  return { object: 'block', id: item.id, type: item.type, has_children: item.has_children === true,
+    text: text.slice(0, 1000), textTruncated: text.length > 1000, textLength: text.length };
+}
 function publicSummary(object) {
   if (!object || typeof object !== 'object') return object;
   const { object: kind, id, url, workspace_id, workspace_name, bot_id, has_more, next_cursor } = object;
   if (Array.isArray(object.results)) {
-    return { results: object.results.map(item => ({
-      object: item.object, id: item.id, url: item.url,
-      title: item.properties?.title?.title?.map(t => t.plain_text).join('')
-        || item.title?.map?.(t => t.plain_text).join('') || ''
-    })), has_more, next_cursor };
+    return { results: object.results.map(item => item.object === 'block'
+      ? blockPreview(item)
+      : { object: item.object, id: item.id, url: item.url, title: notionTitle(item) }),
+      has_more, next_cursor };
   }
   return { object: kind, id, url, workspace_id, workspace_name, bot_id,
     parent: object.parent, last_edited_time: object.last_edited_time,
-    title: object.properties?.title?.title?.map(t => t.plain_text).join('') ?? null };
+    title: notionTitle(object) };
 }
 function bounded(data) {
   const value = publicSummary(data);
@@ -247,6 +257,14 @@ export class NotionEngine {
     if (!/^[a-f0-9-]{32,36}$/i.test(String(pageId))) throw fail('NOTION_PAGE_ID_INVALID');
     return this.invoke('GET', '/pages/' + pageId, undefined, { safe: true });
   }
+  listBlockChildren(blockId, pageSize = 10, startCursor = undefined) {
+    if (!/^[a-f0-9-]{32,36}$/i.test(String(blockId)) || !Number.isInteger(pageSize)
+      || pageSize < 1 || pageSize > 20
+      || (startCursor !== undefined && !/^[a-zA-Z0-9_-]{1,200}$/.test(startCursor))) throw fail('NOTION_BLOCK_QUERY_INVALID');
+    const query = new URLSearchParams({ page_size: String(pageSize) });
+    if (startCursor) query.set('start_cursor', startCursor);
+    return this.invoke('GET', '/blocks/' + blockId + '/children?' + query, undefined, { safe: true });
+  }
   createPage(parentPageId, title) {
     if (!this.config.allowWrites) throw fail('NOTION_WRITES_DISABLED');
     if (!/^[a-f0-9-]{32,36}$/i.test(String(parentPageId)) || typeof title !== 'string' || title.length < 1 || title.length > 160) throw fail('NOTION_CREATE_INVALID');
@@ -266,6 +284,7 @@ export function createNotionTools({ config = {}, profile = 'default', fetchImpl,
       { name: 'notion_verify', description: 'Verify the active Notion bearer credential against the real /users/me endpoint.', inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: readOnly },
       { name: 'notion_search', description: 'Search pages available to the authorized Notion account.', inputSchema: { type: 'object', properties: { query: { type: 'string', maxLength: 160 }, pageSize: { type: 'integer', minimum: 1, maximum: 50 } }, required: ['query'], additionalProperties: false }, annotations: readOnly },
       { name: 'notion_get_page', description: 'Read one authorized Notion page by ID.', inputSchema: { type: 'object', properties: { pageId: { type: 'string', pattern: '^[a-fA-F0-9-]{32,36}$' } }, required: ['pageId'], additionalProperties: false }, annotations: readOnly },
+      { name: 'notion_list_block_children', description: 'Read paginated block previews. Child blocks require additional calls.', inputSchema: { type: 'object', properties: { blockId: { type: 'string', pattern: '^[a-fA-F0-9-]{32,36}$' }, pageSize: { type: 'integer', minimum: 1, maximum: 20 }, startCursor: { type: 'string', pattern: '^[a-zA-Z0-9_-]{1,200}$' } }, required: ['blockId'], additionalProperties: false }, annotations: readOnly },
       { name: 'notion_create_page', description: 'Create a page under the explicitly selected parent. Disabled unless notion.allowWrites is true. No automatic retries.', inputSchema: { type: 'object', properties: { parentPageId: { type: 'string', pattern: '^[a-fA-F0-9-]{32,36}$' }, title: { type: 'string', minLength: 1, maxLength: 160 } }, required: ['parentPageId', 'title'], additionalProperties: false }, annotations: write }
     ],
     async execute(name, args = {}) {
@@ -275,6 +294,7 @@ export function createNotionTools({ config = {}, profile = 'default', fetchImpl,
         case 'notion_verify': return engine.verify();
         case 'notion_search': return engine.search(args.query, args.pageSize);
         case 'notion_get_page': return engine.getPage(args.pageId);
+        case 'notion_list_block_children': return engine.listBlockChildren(args.blockId, args.pageSize, args.startCursor);
         case 'notion_create_page': return engine.createPage(args.parentPageId, args.title);
         default: throw fail('NOTION_UNKNOWN_TOOL');
       }

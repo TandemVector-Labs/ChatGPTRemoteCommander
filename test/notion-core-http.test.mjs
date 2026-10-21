@@ -61,7 +61,7 @@ test('native Notion tools are discoverable by real Commander MCP route and fail 
     }
     assert.equal(ready, true, 'Commander did not start on isolated localhost port');
     const tools = listing.result.tools.map(item => item.name);
-    for (const name of ['notion_status', 'notion_connect_start', 'notion_verify', 'notion_search', 'notion_get_page', 'notion_create_page']) {
+    for (const name of ['notion_status', 'notion_connect_start', 'notion_verify', 'notion_search', 'notion_get_page', 'notion_list_block_children', 'notion_create_page']) {
       assert.ok(tools.includes(name), 'missing tool ' + name);
     }
     const response = await rpc(port, 'tools/call', { name: 'notion_status', arguments: {} });

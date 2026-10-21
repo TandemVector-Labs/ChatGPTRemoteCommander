@@ -51,6 +51,7 @@ test('login state protected, callback exchanges token, stores in vault and reads
     vault,
     fetchImpl: async (url, options) => {
       seen.push({ url, method: options.method });
+      assert.equal(options.redirect, 'error', 'credentialed Notion requests must not follow redirects');
       if (url.endsWith('/oauth/token')) {
         assert.equal(options.headers.Authorization.startsWith('Basic '), true);
         assert.equal(JSON.parse(options.body).grant_type, 'authorization_code');
@@ -133,7 +134,7 @@ test('mutation disabled by default and strict endpoint validation', async () => 
 test('MCP definitions do not expose secrets or general-purpose HTTP execution', () => {
   const notion = createNotionTools({ config:{ enabled:true }, vault:fakeVault() });
   assert.deepEqual(notion.definitions.map(x=>x.name), [
-    'notion_status', 'notion_connect_start', 'notion_verify', 'notion_search', 'notion_get_page', 'notion_create_page'
+    'notion_status', 'notion_connect_start', 'notion_verify', 'notion_search', 'notion_get_page', 'notion_list_block_children', 'notion_create_page'
   ]);
   const schema = JSON.stringify(notion.definitions);
   assert.equal(schema.includes('clientSecret'), false);
@@ -209,4 +210,46 @@ test('rate limit longer than maximum local wait never violates server Retry-Afte
     fetchImpl: async () => { attempts++; return mockResponse(429, {}, { 'retry-after': '45' }); } });
   await assert.rejects(engine.getPage(page), /NOTION_RATE_LIMIT_RETRY_LATER/);
   assert.equal(attempts, 1);
+});
+
+test('block children provide bounded text previews and cursor pagination', async () => {
+  const vault = fakeVault();
+  await vault.save({ access_token: 'fixture', workspace_id: workspace });
+  let requestUrl = '';
+  const engine = new NotionEngine({ config: { enabled:true }, vault,
+    fetchImpl: async url => {
+      requestUrl = url;
+      return mockResponse(200, { object:'list', has_more:true, next_cursor:'cursor_next_1',
+        results: [
+          { object:'block', id:page, type:'paragraph', has_children:true,
+            paragraph:{ rich_text:[{ plain_text:'a'.repeat(1200) }] } },
+          { object:'page', id:workspace, properties:{ Name:{ type:'title', title:[{ plain_text:'Project Page' }] } } }
+        ] });
+    } });
+  const result = await engine.listBlockChildren(page, 2, 'old_cursor-1');
+  assert.ok(requestUrl.includes('/blocks/' + page + '/children?'));
+  assert.ok(requestUrl.includes('page_size=2'));
+  assert.ok(requestUrl.includes('start_cursor=old_cursor-1'));
+  assert.equal(result.has_more, true);
+  assert.equal(result.next_cursor, 'cursor_next_1');
+  assert.equal(result.results[0].text.length, 1000);
+  assert.equal(result.results[0].textTruncated, true);
+  assert.equal(result.results[0].textLength, 1200);
+  assert.equal(result.results[0].has_children, true);
+  assert.equal(result.results[1].title, 'Project Page');
+  assert.throws(() => engine.listBlockChildren('../escape'), /NOTION_BLOCK_QUERY_INVALID/);
+  assert.throws(() => engine.listBlockChildren(page, 22), /NOTION_BLOCK_QUERY_INVALID/);
+  assert.throws(() => engine.listBlockChildren(page, 5, '../../secret'), /NOTION_BLOCK_QUERY_INVALID/);
+});
+
+test('529 service overload retries safely without duplicating writes', async () => {
+  const vault = fakeVault();
+  await vault.save({ access_token: 'local-fixture', workspace_id: workspace });
+  let attempts = 0;
+  const engine = new NotionEngine({ config: { enabled:true }, vault, fetchImpl: async () => {
+    attempts++;
+    return attempts === 1 ? mockResponse(529, {}) : mockResponse(200, { object:'page', id:page });
+  } });
+  assert.equal((await engine.getPage(page)).id, page);
+  assert.equal(attempts, 2);
 });
