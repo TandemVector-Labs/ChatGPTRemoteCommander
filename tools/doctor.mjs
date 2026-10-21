@@ -2,13 +2,14 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { readBoundedHardwareResponse, MAX_HARDWARE_SELFTEST_RESPONSE_BYTES } from './hardware-selftest-response.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const projectDir = path.resolve(here, '..');
 const packagePath = path.join(projectDir, 'package.json');
 const DEFAULT_ENDPOINT = 'http://127.0.0.1:47831/mcp';
 const DEFAULT_TIMEOUT_MS = 5000;
-const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_RESPONSE_BYTES = MAX_HARDWARE_SELFTEST_RESPONSE_BYTES;
 
 export function validateEndpoint(value) {
   if (typeof value !== 'string' || value.length > 256 || value.includes('\\')) {
@@ -61,12 +62,17 @@ export function parseArgs(argv) {
   return out;
 }
 
-async function readBounded(response) {
+// Bound the streaming body before accumulating bytes, including responses
+// lacking Content-Length. Reuse the already-qualified hardware gate reader.
+export async function readBounded(response) {
   const declared = Number(response.headers.get('content-length') || 0);
   if (declared > MAX_RESPONSE_BYTES) throw new Error('response too large');
-  const text = await response.text();
-  if (Buffer.byteLength(text, 'utf8') > MAX_RESPONSE_BYTES) throw new Error('response too large');
-  return text;
+  try {
+    return await readBoundedHardwareResponse(response);
+  } catch (error) {
+    if (error?.code === 'SELFTEST_RESPONSE_TOO_LARGE') throw new Error('response too large');
+    throw error;
+  }
 }
 
 async function requestJson(url, init, timeoutMs) {
