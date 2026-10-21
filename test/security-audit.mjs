@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
+import { hasUnexpectedHistoricalBearer } from './security-history-fixture.mjs';
 
 function git(args, options = {}) {
   const result = spawnSync('git', args, {
@@ -43,7 +44,13 @@ for (const expectedIgnored of ['config.local.json', '.env', 'connections.local.j
 const history = git(['log', '--all', '-p', '--no-color', '--no-ext-diff']);
 for (const [type, pattern] of patterns) {
   pattern.lastIndex = 0;
-  if (pattern.test(history)) findings.push({ scope: 'HISTORY', type, location: 'git log --all -p' });
+  // A single verified inert Notion test-fixture token in historical diff has an
+  // exact SHA-256 and file-scoped exception. All other values still fail.
+  if (type === 'Bearer token literal') {
+    if (hasUnexpectedHistoricalBearer(history, pattern)) findings.push({ scope: 'HISTORY', type, location: 'git log --all -p' });
+  } else if (pattern.test(history)) {
+    findings.push({ scope: 'HISTORY', type, location: 'git log --all -p' });
+  }
 }
 const emails = [...new Set(git(['log', '--all', '--format=%ae%n%ce']).split(/\r?\n/).filter(Boolean))].sort();
 if (emails.length) {
