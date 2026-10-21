@@ -110,3 +110,85 @@ test('refuses linked certificate and linked parent before contacting any API lis
   fs.rmSync(outside,{recursive:true,force:true});
  }
 });
+
+
+test('certificate growth cannot force unbounded descriptor read or credential delivery',async()=>{
+ const root=temp(),pem=path.join(root,'state','https-cert.pem');
+ const originalLstat=fs.lstatSync;
+ const originalRead=fs.readSync;
+ const originalReadFile=fs.readFileSync;
+ const originalRequest=https.request;
+ let mutated=false,readBytes=0,unboundedReads=0,networkCalls=0;
+ try {
+  fs.mkdirSync(path.dirname(pem),{mode:0o700});
+  fs.writeFileSync(pem,Buffer.alloc(180,0x41),{mode:0o600});
+  // Mutate the exact inode after the first file identity check, while the
+  // descriptor is open but before the certificate bytes are read.
+  fs.lstatSync=function(target,...args){
+   const st=originalLstat.call(fs,target,...args);
+   if(target===pem&&!mutated){
+    mutated=true;
+    fs.appendFileSync(pem,Buffer.alloc(1024*1024,0x42));
+   }
+   return st;
+  };
+  fs.readSync=function(fd,buffer,offset,length,position){
+   const n=originalRead.call(fs,fd,buffer,offset,length,position);
+   readBytes+=n;
+   return n;
+  };
+  fs.readFileSync=function(target,...args){
+   if(typeof target==='number')unboundedReads++;
+   return originalReadFile.call(fs,target,...args);
+  };
+  https.request=function(){
+   networkCalls++;
+   throw Error('UNEXPECTED_TLS_REQUEST');
+  };
+  await assert.rejects(
+   pinnedSyncthingJson(root,'http://127.0.0.1:8384',KEY,'/rest/system/status'),
+   /certificate unavailable or unsafe/
+  );
+  assert.equal(mutated,true);
+  assert.equal(unboundedReads,0,'never use readFileSync on mutable descriptor');
+  assert.ok(readBytes<=32768,'read must never exceed validated PEM cap');
+  assert.equal(readBytes,180,'exactly the initial trusted file length can be read');
+  assert.equal(networkCalls,0,'rejected certificate cannot emit an API request');
+ } finally {
+  fs.lstatSync=originalLstat;
+  fs.readSync=originalRead;
+  fs.readFileSync=originalReadFile;
+  https.request=originalRequest;
+  fs.rmSync(root,{recursive:true,force:true});
+ }
+});
+
+test('certificate shrink during descriptor read is denied without TLS',async()=>{
+ const root=temp(),pem=path.join(root,'state','https-cert.pem');
+ const originalLstat=fs.lstatSync;
+ const originalRequest=https.request;
+ let mutated=false,networkCalls=0;
+ try{
+  fs.mkdirSync(path.dirname(pem),{mode:0o700});
+  fs.writeFileSync(pem,Buffer.alloc(200,0x41),{mode:0o600});
+  fs.lstatSync=function(target,...args){
+   const st=originalLstat.call(fs,target,...args);
+   if(target===pem&&!mutated){
+    mutated=true;
+    fs.truncateSync(pem,120);
+   }
+   return st;
+  };
+  https.request=function(){networkCalls++;throw Error('UNEXPECTED_TLS_REQUEST');};
+  await assert.rejects(
+   pinnedSyncthingJson(root,'http://127.0.0.1:8384',KEY,'/rest/system/status'),
+   /certificate unavailable or unsafe/
+  );
+  assert.equal(mutated,true);
+  assert.equal(networkCalls,0);
+ }finally{
+  fs.lstatSync=originalLstat;
+  https.request=originalRequest;
+  fs.rmSync(root,{recursive:true,force:true});
+ }
+});

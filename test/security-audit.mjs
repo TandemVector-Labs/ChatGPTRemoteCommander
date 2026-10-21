@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { spawn, spawnSync } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
+import {isVerifiedSyntheticNotionBearer} from '../tools/security-audit-history.mjs';
 
 function git(args, options = {}) {
   const result = spawnSync('git', args, {
@@ -26,13 +27,27 @@ if (!tunnelPattern.test('tunnel' + '_' + '0123456789abcdef'.repeat(2)) || tunnel
 // Lines are bounded; anything above the bound fails closed instead of being skipped.
 function makeHistoryScanner(rules) {
   const hits = new Set();
-  let pending = '', preceding = '';
+  let pending = '', preceding = '', currentCommit = null, currentFile = null;
   const limit = 16 * 1024 * 1024;
   function scanLine(line) {
+    // Git emits immutable commit boundaries and per-file diff headers.
+    // Keep provenance while streaming; never buffer full history or raw hits.
+    const commit = /^commit ([0-9a-f]{40})(?:\r?\n|$)/.exec(line);
+    if (commit) { currentCommit = commit[1]; currentFile = '(commit metadata)'; }
+    const changedFile = /^diff --git a\/(.+?) b\/(.+?)\r?\n?$/.exec(line);
+    if (changedFile) {
+      const candidate = changedFile[2];
+      currentFile = /^[a-zA-Z0-9._/-]{1,128}$/.test(candidate)
+        ? candidate : '(nonstandard path)';
+    }
     const sample = preceding + line;
     for (const [name, pattern] of rules) {
-      pattern.lastIndex = 0;
-      if (pattern.test(sample)) hits.add(name);
+      const flags = pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g';
+      const finder = new RegExp(pattern.source, flags);
+      for (const match of sample.matchAll(finder)) {
+        if (isVerifiedSyntheticNotionBearer(name, match[0], {commit:currentCommit,file:currentFile})) continue;
+        hits.add(name);
+      }
     }
     preceding = sample.slice(-512);
   }

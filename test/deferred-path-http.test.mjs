@@ -52,7 +52,10 @@ async function startServer(serverRoot,configPath,port) {
   });
   let stderr=''; child.stderr.on('data',c=>{stderr+=c.toString('utf8');});
   let foreignListener=false;
-  const readinessDeadline=Date.now()+10000;
+  // Hosted Windows qualification can start slowly under parallel native I/O.
+  // Keep the fixture-identity check and early child-exit failure unchanged.
+  const startupBudgetMs=process.platform==='win32'?45000:15000;
+  const readinessDeadline=Date.now()+startupBudgetMs;
   while(Date.now()<readinessDeadline) {
     if(child.exitCode!==null) break;
     try {

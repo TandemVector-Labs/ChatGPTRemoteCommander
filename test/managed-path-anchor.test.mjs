@@ -7,8 +7,10 @@ import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {createGuiInputIncidentStore} from '../src/gui-incident-store.mjs';
 import {assertUnredirectedDirectoryAncestors} from '../src/managed-path-anchor.mjs';
+import {pinnedSyncthingJson} from '../tools/commander-transfer-mesh/doctor-rest-identity.mjs';
 const pilot=fileURLToPath(new URL('../tools/commander-transfer-mesh/pilot-cli.mjs',import.meta.url));
 const durable=fileURLToPath(new URL('../tools/commander-transfer-mesh/durable-send.mjs',import.meta.url));
+const doctor=fileURLToPath(new URL('../tools/commander-transfer-mesh/doctor.mjs',import.meta.url));
 const temp=()=>fs.mkdtempSync(path.join(os.tmpdir(),'root-ancestor-guard-'));
 const call=(cli,root,...args)=>spawnSync(process.execPath,[cli,...args],{env:{...process.env,COMMANDER_TRANSFER_HOME:root},encoding:'utf8',timeout:8000});
 test('nonlinked private roots remain usable',async()=>{
@@ -48,4 +50,51 @@ test('linked root and parent cannot access external identity, queue or GUI data'
   await assert.rejects(createGuiInputIncidentStore({file:f}).begin('gui_key_press'),/GUI_INCIDENT_STORAGE_UNAVAILABLE/);
   assert.equal(fs.existsSync(path.join(ext,'gui','inner','incident.json')),false);
  }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('Windows operator roots deny network and device namespace paths without I/O',
+ {skip:process.platform!=='win32'},async()=>{
+ const sep=String.fromCharCode(92);
+ const roots=[sep+sep+'unreachable.invalid'+sep+'untrusted'+sep+'operator',
+              sep+sep+'?'+sep+'C:'+sep+'untrusted'+sep+'operator'];
+ for(const root of roots){
+   assert.throws(()=>assertUnredirectedDirectoryAncestors(root),/MANAGED_PATH_UNSAFE/);
+   const p=call(pilot,root,'info');
+   assert.notEqual(p.status,0);assert.match(p.stderr,/CTMESH_MANAGED_PATH_UNSAFE/);
+   const d=call(durable,root,'job-status','--peer','Linux','--id','unc-probe');
+   assert.notEqual(d.status,0);assert.match(d.stderr,/TRANSFER_MANAGED_PATH_UNSAFE/);
+   const host=spawnSync(process.execPath,[doctor],{encoding:'utf8',timeout:5000,
+     env:{...process.env,COMMANDER_TRANSFER_HOME:root}});
+   assert.notEqual(host.status,0);
+   const receipt=JSON.parse(host.stdout);
+   assert.equal(receipt.ok,false);
+   assert.ok(receipt.errors.some(x=>x.includes('Untrusted operator state root namespace')));
+   await assert.rejects(pinnedSyncthingJson(root,'http://127.0.0.1:18384',
+     'test-only','/rest/system/status'),/Syncthing HTTPS identity certificate unavailable/);
+ }
+});
+
+test('standalone Pilot and Durable refuse explicit relative operator-state roots',()=>{
+ const selected=['relative-operator-root'];
+ if(process.platform==='win32')selected.push('C:drive-relative-root');
+ for(const root of selected){
+  const p=call(pilot,root,'info');
+  assert.notEqual(p.status,0);
+  assert.match(p.stderr,/CTMESH_MANAGED_PATH_UNSAFE/);
+  const d=call(durable,root,'job-status','--peer','Linux','--id','probe-rel');
+  assert.notEqual(d.status,0);
+  assert.match(d.stderr,/TRANSFER_MANAGED_PATH_UNSAFE/);
+  assert.ok(!d.stdout.includes('PUBLISHED'));
+ }
+});
+test('Doctor rejects relative operator root before touching files',async()=>{
+ const result=spawnSync(process.execPath,[doctor],{encoding:'utf8',timeout:5000,
+   env:{...process.env,COMMANDER_TRANSFER_HOME:'relative-operator-root'}});
+ assert.notEqual(result.status,0);
+ const report=JSON.parse(result.stdout);
+ assert.equal(report.ok,false);
+ assert.ok(report.errors.some(x=>x.includes('Untrusted operator state root namespace')));
+ await assert.rejects(pinnedSyncthingJson('relative-operator-root',
+   'http://127.0.0.1:18384','test-only','/rest/system/status'),
+   /Syncthing HTTPS identity certificate unavailable/);
 });

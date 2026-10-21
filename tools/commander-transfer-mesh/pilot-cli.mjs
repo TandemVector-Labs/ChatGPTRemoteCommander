@@ -8,7 +8,11 @@ import crypto from 'node:crypto';
 // src/ directory. Preserve the root ancestor preflight inside this CLI.
 function assertUnredirectedDirectoryAncestors(input,code='MANAGED_PATH_UNSAFE'){
  if(typeof input!=='string'||!path.isAbsolute(input))throw Error(code);
- const normalized=path.normalize(input),anchor=path.parse(normalized).root;
+ const normalized=path.normalize(input);
+ // An absolute Windows path may still refer to a network or device namespace.
+ // Operator state must be on a local drive, not a UNC/device namespace.
+ if(process.platform==='win32'&&!/^[A-Za-z]:[\\/]/.test(normalized))throw Error(code);
+ const anchor=path.parse(normalized).root;
  let cur=anchor;
  for(const part of path.relative(anchor,normalized).split(path.sep)){
   if(!part||part==='.')continue;
@@ -61,6 +65,8 @@ function transferPaths(peer,self,id){
 }
 
 const BLOCK_BYTES=1024*1024;
+// A stale lock may be replaced between lstat and read. Bind the JSON read to
+// the checked file descriptor, not to a second pathname lookup.
 function receiveLock(lockFile,{peer,id,sha256}){
  const signature={schema:'ctmesh-receive-lock-v1',host:os.hostname(),peer,id,sha256,pid:process.pid};
  const open=()=>fs.openSync(lockFile,'wx',0o600);
@@ -70,7 +76,37 @@ function receiveLock(lockFile,{peer,id,sha256}){
   if(error.code!=='EEXIST')throw error;
   const before=fs.lstatSync(lockFile);
   if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1||before.size>2048)fail('Untrusted receive lock; inspect before retry');
-  let old;try{old=JSON.parse(fs.readFileSync(lockFile,'utf8'));}catch{fail('Untrusted receive lock; inspect before retry');}
+  // Verify the stale lock through the descriptor in this ownership scope.
+  // Never re-open its JSON through a pathname after the initial lstat.
+  let old;
+ 
+  let readFd;
+  try{
+   const flags=fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW??0)|(fs.constants.O_NONBLOCK??0);
+   readFd=fs.openSync(lockFile,flags);
+   const opened=fs.fstatSync(readFd),named=fs.lstatSync(lockFile);
+   if(!opened.isFile()||opened.nlink!==1||opened.size<1||opened.size>2048||
+      opened.dev!==before.dev||opened.ino!==before.ino||opened.size!==before.size||
+      !named.isFile()||named.isSymbolicLink()||named.nlink!==1||
+      named.dev!==opened.dev||named.ino!==opened.ino||named.size!==opened.size)
+     fail('Untrusted receive lock; inspect before retry');
+   const bytes=Buffer.alloc(opened.size);
+   let at=0;
+   while(at<bytes.length){
+    const n=fs.readSync(readFd,bytes,at,bytes.length-at,at);
+    if(n<=0)fail('Untrusted receive lock; inspect before retry');
+    at+=n;
+   }
+   const after=fs.fstatSync(readFd),namedAfter=fs.lstatSync(lockFile);
+   if(after.dev!==opened.dev||after.ino!==opened.ino||after.size!==opened.size||
+      after.mtimeMs!==opened.mtimeMs||after.ctimeMs!==opened.ctimeMs||
+      !namedAfter.isFile()||namedAfter.isSymbolicLink()||
+      namedAfter.dev!==opened.dev||namedAfter.ino!==opened.ino||
+      namedAfter.size!==opened.size)
+     fail('Untrusted receive lock; inspect before retry');
+   old=JSON.parse(bytes.toString('utf8'));
+  }catch{fail('Untrusted receive lock; inspect before retry');}
+  finally{if(readFd!==undefined)fs.closeSync(readFd);}
   if(old?.schema!==signature.schema||old.host!==signature.host||old.peer!==peer||old.id!==id||
     old.sha256!==sha256||!Number.isSafeInteger(old.pid)||old.pid<=0)fail('Untrusted receive lock; inspect before retry');
   let alive=true;
@@ -150,6 +186,8 @@ function checkIncoming(peer,self,id){
  return {m,p};
 }
 try{
+ if(process.env.COMMANDER_TRANSFER_HOME && !path.isAbsolute(process.env.COMMANDER_TRANSFER_HOME))
+  throw Error('CTMESH_MANAGED_PATH_UNSAFE'); // Explicit relative roots must not be rebased onto an arbitrary cwd.
  assertUnredirectedDirectoryAncestors(root,'CTMESH_MANAGED_PATH_UNSAFE');
  assertManagedEntry(path.join(root,'node.json'),false);
  const self=JSON.parse(fs.readFileSync(path.join(root,'node.json'),'utf8')).alias;
