@@ -157,3 +157,35 @@ test('incident file mode is private on POSIX hosts',()=>ownFile(async file=>{
  if(process.platform!=='win32')assert.equal(mode&0o077,0);
  await s.resolve(receipt);
 }));
+
+
+test('pending record refuses symlinks and hardlinks instead of reading their targets',()=>ownFile(async file=>{
+ const externalRoot=await fs.mkdtemp(path.join(os.tmpdir(),'rc-gui-incident-external-'));
+ const external=path.join(externalRoot,'incident.json');
+ try{
+  await fs.writeFile(external,JSON.stringify({
+   schema:'rc-gui-pending-input-v1',status:'PENDING_NATIVE_EFFECT',tool:'gui_mouse_click',
+   id:'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',startedUtc:new Date().toISOString()
+  }));
+  await fs.link(external,file);
+  const store=createGuiInputIncidentStore({file});
+  await assert.rejects(store.pending(),/GUI_INCIDENT_STORAGE_UNAVAILABLE/);
+  await fs.unlink(file);
+  try{await fs.symlink(external,file,'file');}
+  catch(e){if(['EPERM','EACCES','ENOTSUP'].includes(e.code))return;throw e;}
+  await assert.rejects(store.pending(),/GUI_INCIDENT_STORAGE_UNAVAILABLE/);
+  await fs.unlink(file);
+  await fs.unlink(external);
+  await fs.symlink(external,file,'file');
+  await assert.rejects(store.pending(),/GUI_INCIDENT_STORAGE_UNAVAILABLE/,
+   'a dangling incident symlink is unsafe, never evidence of no pending effect');
+ }finally{await fs.rm(externalRoot,{recursive:true,force:true});}
+}));
+
+test('incident pending reads a verified file handle and refuses oversized records',()=>ownFile(async file=>{
+ const s=createGuiInputIncidentStore({file});
+ const h=await s.begin('gui_mouse_click');
+ assert.equal((await s.pending()).id,h.id);
+ await fs.appendFile(file,' '.repeat(2050));
+ await assert.rejects(s.pending(),/GUI_INCIDENT_STORAGE_UNAVAILABLE/);
+}));

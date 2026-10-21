@@ -15,11 +15,29 @@ const [command,...args]=process.argv.slice(2);
 const opt=k=>{const i=args.indexOf('--'+k);return i<0?undefined:args[i+1];};
 const assertion=(test,code)=>{if(!test)throw Error(code);};
 const within=(file,base)=>{const rel=path.relative(base,file);return rel===''||(rel!=='..'&&!rel.startsWith('..'+path.sep)&&!path.isAbsolute(rel));};
+// All managed paths are within the operator-selected private transfer root.
+// A symlink in an internal ancestor or journal can escape that root even if
+// peer/id pass allow-list validation. Reject it before reading or writing.
+function assertManagedEntry(file, directory){
+ let st;
+ try { st=fs.lstatSync(file); }
+ catch(e){ if(e.code==='ENOENT')return; throw e; }
+ assertion(!st.isSymbolicLink() && (directory ? st.isDirectory() : st.isFile() && st.nlink===1),
+   'TRANSFER_MANAGED_PATH_UNSAFE');
+}
 function safePaths(peer,id){
  assertion(peers.includes(peer)&&re.test(String(id||'')),'INVALID_TRANSFER_ID_OR_PEER');
  const jobDir=path.join(root,'jobs',peer);
  const stageDir=path.join(root,'staging',peer);
- return {jobDir,stageDir,record:path.join(jobDir,id+'.json'),lock:path.join(jobDir,id+'.lock'),part:path.join(stageDir,id+'.part'),destination:path.join(root,'pairs',peer,'transfers',id)};
+ const destination=path.join(root,'pairs',peer,'transfers',id);
+ const record=path.join(jobDir,id+'.json'),lock=path.join(jobDir,id+'.lock'),part=path.join(stageDir,id+'.part');
+ // The root itself is chosen by the owner; forbid redirection below it.
+ for(const dir of [path.join(root,'jobs'),jobDir,path.join(root,'staging'),stageDir,
+  path.join(root,'pairs'),path.join(root,'pairs',peer),path.dirname(destination),destination])
+  assertManagedEntry(dir,true);
+ for(const file of [record,lock,part,path.join(destination,'payload.bin'),path.join(destination,'manifest.json')])
+  assertManagedEntry(file,false);
+ return {jobDir,stageDir,record,lock,part,destination};
 }
 const recordRead=p=>JSON.parse(fs.readFileSync(p.record,'utf8'));
 function atomicRename(from,to){

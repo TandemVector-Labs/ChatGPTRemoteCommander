@@ -16,7 +16,9 @@ internal sealed record ProfileRow(
     int RouterPort,
     int RouterPid,
     DateTimeOffset? UpdatedAt,
-    string ProjectDir);
+    string ProjectDir,
+    string BackendConfigSha256,
+    string RouterSourceSha256);
 
 internal sealed class DashboardForm : Form
 {
@@ -258,12 +260,17 @@ internal sealed class DashboardForm : Form
                 var commit = active.TryGetProperty("commit", out var sha) ? sha.GetString() ?? "" : "";
                 var backendPort = active.TryGetProperty("port", out var bp) ? bp.GetInt32() : 0;
                 var projectDir = active.TryGetProperty("projectDir", out var pd) ? pd.GetString() ?? "" : "";
+                var backendConfigSha = active.TryGetProperty("configSha256", out var conf)
+                    ? conf.GetString() ?? "" : "";
+                var routerSourceSha = rr.TryGetProperty("sourceSha256", out var source)
+                    ? source.GetString() ?? "" : "";
                 DateTimeOffset? updated = root.TryGetProperty("updatedAt", out var ua) &&
                                       DateTimeOffset.TryParse(ua.GetString(), out var parsed) ? parsed : null;
                 var routerPort = rr.TryGetProperty("port", out var rp) ? rp.GetInt32() : 0;
                 var routerPid = rr.TryGetProperty("pid", out var pid) ? pid.GetInt32() : 0;
 
-                result.Add(new ProfileRow(name, generation, version, commit, backendPort, routerPort, routerPid, updated, projectDir));
+                result.Add(new ProfileRow(name, generation, version, commit, backendPort, routerPort, routerPid,
+                    updated, projectDir, backendConfigSha, routerSourceSha));
             }
             catch
             {
@@ -286,11 +293,11 @@ internal sealed class DashboardForm : Form
         };
 
         DashboardChrome.RoundCard(card, 16);
-        var online = await IsHealthyAsync(p.RouterPort, p.RouterPid);
+        var verified = await IsVerifiedAsync(p);
         var dot = new Label
         {
-            Text = online ? "● ROUTER RESPONDS / IDENTITY UNVERIFIED" : "● NOT RESPONDING / UNVERIFIED",
-            ForeColor = online ? Color.FromArgb(80, 220, 150) : Color.FromArgb(255, 164, 92),
+            Text = verified ? "● ROUTER + BACKEND IDENTITY VERIFIED" : "● ROUTER / BACKEND UNVERIFIED",
+            ForeColor = verified ? Color.FromArgb(80, 220, 150) : Color.FromArgb(255, 164, 92),
             AutoSize = true,
             Font = new Font("Segoe UI Semibold", 9.5f),
             Location = new Point(18, 18)
@@ -324,15 +331,21 @@ internal sealed class DashboardForm : Form
         return card;
     }
 
-    private async Task<bool> IsHealthyAsync(int routerPort, int pid)
+    private async Task<bool> IsVerifiedAsync(ProfileRow profile)
     {
-        if (routerPort <= 0 || pid <= 0) return false;
+        // A healthy response on a reused local port is not proof of this profile's identity.
+        if (!ProfileHealthEvidence.Plausible(profile)) return false;
         try
         {
-            using var process = Process.GetProcessById(pid);
+            using var process = Process.GetProcessById(profile.RouterPid);
             if (process.HasExited) return false;
-            using var response = await http.GetAsync($"http://127.0.0.1:{routerPort}/health");
-            return response.IsSuccessStatusCode;
+            using var router = await http.GetAsync($"http://127.0.0.1:{profile.RouterPort}/router/status");
+            if (!router.IsSuccessStatusCode) return false;
+            using var backend = await http.GetAsync($"http://127.0.0.1:{profile.BackendPort}/health");
+            if (!backend.IsSuccessStatusCode) return false;
+            var routeJson = await router.Content.ReadAsStringAsync();
+            var backendJson = await backend.Content.ReadAsStringAsync();
+            return ProfileHealthEvidence.Matches(profile, routeJson, backendJson);
         }
         catch { return false; }
     }
