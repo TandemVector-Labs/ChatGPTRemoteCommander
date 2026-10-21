@@ -24,18 +24,22 @@ $OwnerRoaming = Join-Path $OwnerUserProfile 'AppData\Roaming'
 $StableRoot = Join-Path $OwnerLocal 'ChatGPTRemoteCommander\app'
 $stableSupervisor = Join-Path $StableRoot 'autostart-windows.ps1'
 $stableHandoff = Join-Path $StableRoot 'handoff-user-session-windows.ps1'
-$Root = if((Test-Path -LiteralPath $stableSupervisor -PathType Leaf) -and (Test-Path -LiteralPath $stableHandoff -PathType Leaf)){$StableRoot}else{$SourceRoot}
+$stableLauncher = Join-Path $StableRoot 'windows-pwsh-task-launcher.ps1'
+$Root = if((Test-Path -LiteralPath $stableSupervisor -PathType Leaf) -and (Test-Path -LiteralPath $stableHandoff -PathType Leaf) -and (Test-Path -LiteralPath $stableLauncher -PathType Leaf)){$StableRoot}else{$SourceRoot}
 $CredDir = Join-Path $OwnerLocal 'ChatGPTRemoteCommander\credentials'
 $ProfileDir = Join-Path $OwnerRoaming 'tunnel-client'
 $VarDir = Join-Path $Root 'var'
 New-Item -ItemType Directory -Force -Path $VarDir | Out-Null
 $Supervisor = Join-Path $Root 'autostart-windows.ps1'
 $Handoff = Join-Path $Root 'handoff-user-session-windows.ps1'
-foreach($p in @($CredDir,$ProfileDir,$Supervisor,$Handoff)){
+$Launcher = Join-Path $Root 'windows-pwsh-task-launcher.ps1'
+foreach($p in @($CredDir,$ProfileDir,$Supervisor,$Handoff,$Launcher)){
   if(-not(Test-Path -LiteralPath $p)){throw "BOOT_RECOVERY_REQUIRED_PATH_MISSING $p"}
 }
 
 $pwsh = (Get-Command pwsh.exe -ErrorAction Stop).Source
+$bootstrap = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+if(-not(Test-Path -LiteralPath $bootstrap -PathType Leaf)){throw 'BOOT_RECOVERY_STABLE_BOOTSTRAP_MISSING'}
 $node = (Get-Command node.exe -ErrorAction Stop).Source
 $npm = (Get-Command npm.cmd -ErrorAction Stop).Source
 $ownerIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -60,8 +64,13 @@ function Convert-OneCredential([string]$Profile) {
     throw "BOOT_RECOVERY_INVALID_PROFILE $Profile"
   }
   $source=Join-Path $CredDir "$Profile.dpapi"
-  if(-not(Test-Path -LiteralPath $source -PathType Leaf)){throw "BOOT_RECOVERY_SOURCE_CREDENTIAL_MISSING $Profile"}
   $target=Join-Path $CredDir "$Profile.machine.dpapi"
+  if(-not(Test-Path -LiteralPath $source -PathType Leaf)){
+    # A previously enrolled SYSTEM-only profile is valid: the probe below verifies
+    # its protected machine DPAPI credential without granting owner read access.
+    if(Test-Path -LiteralPath $target -PathType Leaf){return $target}
+    throw "BOOT_RECOVERY_SOURCE_CREDENTIAL_MISSING $Profile"
+  }
   $secure=$null
   $plain=$null
   $bytes=$null
@@ -138,14 +147,14 @@ try {
   Unregister-ScheduledTask -TaskName $probeName -Confirm:$false -ErrorAction SilentlyContinue
 }
 
-$bootArgs='-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -CredentialScope LocalMachine -BootCore -OwnerUserProfile "{1}" -NodePath "{2}" -NpmPath "{3}"' -f $Supervisor,$OwnerUserProfile,$node,$npm
-$bootAction=New-ScheduledTaskAction -Execute $pwsh -Argument $bootArgs -WorkingDirectory $Root
+$bootArgs='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Mode Boot -OwnerUserProfile "{1}" -NodePath "{2}" -NpmPath "{3}"' -f $Launcher,$OwnerUserProfile,$node,$npm
+$bootAction=New-ScheduledTaskAction -Execute $bootstrap -Argument $bootArgs -WorkingDirectory $Root
 $bootTrigger=New-ScheduledTaskTrigger -AtStartup
 $bootSettings=New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 20 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName $BootTaskName -Action $bootAction -Trigger $bootTrigger -Principal $systemPrincipal -Settings $bootSettings -Force | Out-Null
 
-$handoffArgs='-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -OwnerUserProfile "{1}"' -f $Handoff,$OwnerUserProfile
-$handoffAction=New-ScheduledTaskAction -Execute $pwsh -Argument $handoffArgs -WorkingDirectory $Root
+$handoffArgs='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Mode Handoff -OwnerUserProfile "{1}"' -f $Launcher,$OwnerUserProfile
+$handoffAction=New-ScheduledTaskAction -Execute $bootstrap -Argument $handoffArgs -WorkingDirectory $Root
 $handoffTrigger=New-ScheduledTaskTrigger -AtLogOn -User $ownerName
 $handoffTrigger.Delay='PT30S'
 $handoffSettings=New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 12 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Minutes 12) -MultipleInstances IgnoreNew
@@ -154,11 +163,12 @@ Register-ScheduledTask -TaskName $HandoffTaskName -Action $handoffAction -Trigge
 $runKey='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 New-Item -Path $runKey -Force | Out-Null
 $launcher=Join-Path $Root 'launch-supervisor-hidden.vbs'
-$pwshVbs=$pwsh.Replace('"','""')
-$supervisorVbs=$Supervisor.Replace('"','""')
+$pwshVbs=$bootstrap.Replace('"','""')
+$supervisorVbs=$Launcher.Replace('"','""')
+$ownerVbs=$OwnerUserProfile.Replace('"','""')
 $vbs=@(
   'Set sh = CreateObject("WScript.Shell")',
-  ('cmd = Chr(34) & "{0}" & Chr(34) & " -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File " & Chr(34) & "{1}" & Chr(34)' -f $pwshVbs,$supervisorVbs),
+  ('cmd = Chr(34) & "{0}" & Chr(34) & " -NoProfile -NonInteractive -ExecutionPolicy Bypass -File " & Chr(34) & "{1}" & Chr(34) & " -Mode UserSupervisor -OwnerUserProfile " & Chr(34) & "{2}" & Chr(34)' -f $pwshVbs,$supervisorVbs,$ownerVbs),
   'Call sh.Run(cmd, 0, False)'
 )
 [IO.File]::WriteAllLines($launcher,$vbs,[Text.UTF8Encoding]::new($false))
