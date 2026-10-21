@@ -108,3 +108,60 @@ test('plaintext REST is refused if no verified HTTPS certificate exists',async(t
   assert.equal(fs.existsSync(marker),false);
  }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
+
+test('doctor refuses linked identity or configuration before REST key access',async t=>{
+ const os=await import('node:os');
+ const path=await import('node:path');
+ const {spawnSync}=await import('node:child_process');
+ const outer=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-doctor-state-guard-'));
+ const root=path.join(outer,'operator'),external=path.join(outer,'external');
+ const validNode=JSON.stringify({alias:'Linux',deviceID:'6YUIRAM-GDPWPT4-XXX2DD7-K2M7G23-F246XXK-ENQQ3G2-RHIQI2Y-TDRJGAB'});
+ const validXml='<configuration><gui enabled="true"><address>127.0.0.1:8384</address><apikey>synthetic-test-not-secret</apikey></gui></configuration>';
+ const doctor=new URL('./doctor.mjs',import.meta.url);
+ const run=()=>spawnSync(process.execPath,[doctor],{
+  encoding:'utf8',timeout:6000,env:{...process.env,COMMANDER_TRANSFER_HOME:root}
+ });
+ try{
+  fs.mkdirSync(path.join(root,'state'),{recursive:true});
+  fs.mkdirSync(external);
+  fs.writeFileSync(path.join(external,'node.json'),validNode);
+  fs.writeFileSync(path.join(external,'config.xml'),validXml);
+  fs.writeFileSync(path.join(root,'node.json'),validNode);
+  fs.writeFileSync(path.join(root,'state','config.xml'),validXml);
+  const check=()=>{
+   const result=run();
+   assert.equal(result.status,1,result.stderr+' '+result.stdout);
+   const report=JSON.parse(result.stdout);
+   assert.equal(report.ok,false);
+   assert.ok(report.errors.some(x=>x.includes('Untrusted doctor state file')),result.stdout);
+   assert.ok(!result.stdout.includes('synthetic-test-not-secret'));
+  };
+  for(const [target,link] of [
+   [path.join(external,'node.json'),path.join(root,'node.json')],
+   [path.join(external,'config.xml'),path.join(root,'state','config.xml')]
+  ]){
+   fs.rmSync(link);
+   try{fs.symlinkSync(target,link,'file');}
+   catch(e){
+    if(['EPERM','EACCES','ENOTSUP','EOPNOTSUPP'].includes(e.code)){
+     t.skip('Symlink creation unavailable in this host');return;
+    }
+    throw e;
+   }
+   check();
+   fs.rmSync(link);
+   fs.writeFileSync(link,link.endsWith('node.json')?validNode:validXml);
+  }
+  // Existing valid node and real file must not make linked state ancestry safe.
+  fs.rmSync(path.join(root,'state'),{recursive:true,force:true});
+  fs.mkdirSync(path.join(external,'state'));
+  fs.writeFileSync(path.join(external,'state','config.xml'),validXml);
+  try{fs.symlinkSync(path.join(external,'state'),path.join(root,'state'),process.platform==='win32'?'junction':'dir');}
+  catch(e){
+   if(['EPERM','EACCES','ENOTSUP','EOPNOTSUPP'].includes(e.code)){
+    t.skip('Linked directory creation unavailable in this host');return;
+   }throw e;
+  }
+  check();
+ }finally{fs.rmSync(outer,{recursive:true,force:true});}
+});
