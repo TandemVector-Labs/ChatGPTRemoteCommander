@@ -216,3 +216,59 @@ test('MCP read-only transport rejects oversized streamed replies before bufferin
   await assert.rejects(engine.mcpPost('fixture',{jsonrpc:'2.0',id:1,method:'initialize',params:{}}),
     /NOTION_MCP_RESPONSE_TOO_LARGE/);
 });
+
+test('hosted MCP large real-world tool schemas are bounded yet returned as names only', async () => {
+  const vault=fakeVault();
+  await vault.save({access_token:'fixture-existing',workspace_id:'fixture-space'});
+  const hugeSchema='Synthetic description for regression only. '.repeat(2300);
+  const engine=new NotionMcpEngine({config:{enabled:true},vault,fetchImpl:async(url,init)=>{
+    const rpc=JSON.parse(init.body);
+    if(rpc.method==='initialize')return respond(200,{jsonrpc:'2.0',id:1,result:{protocolVersion:'2025-06-18'}});
+    if(rpc.method==='notifications/initialized')return respond(202,{});
+    if(rpc.method==='tools/list')return respond(200,{jsonrpc:'2.0',id:2,result:{tools:[
+      {name:'notion-fetch',description:hugeSchema,inputSchema:{type:'object',properties:{}}},
+      {name:'notion-search',description:'Search'}]}});
+    throw Error('unexpected fixture call');
+  }});
+  const result=await engine.listTools();
+  assert.equal(result.count,2);
+  assert.deepEqual(result.names,['notion-fetch','notion-search']);
+  assert.equal(JSON.stringify(result).includes('Synthetic description'),false);
+});
+test('fixed Notion self fetch accepts bounded large identity response and strips extra data', async()=>{
+  const vault=fakeVault(); await vault.save({access_token:'fixture-existing'});
+  const engine=new NotionMcpEngine({config:{enabled:true},vault,fetchImpl:async(url,init)=>{
+    const rpc=JSON.parse(init.body);
+    if(rpc.method==='initialize')return respond(200,{jsonrpc:'2.0',id:1,result:{protocolVersion:'2025-06-18'}});
+    if(rpc.method==='notifications/initialized')return respond(202,{});
+    if(rpc.method==='tools/list')return respond(200,{jsonrpc:'2.0',id:2,result:{tools:[{name:'notion-fetch'}]}});
+    if(rpc.method==='tools/call')return respond(200,{jsonrpc:'2.0',id:3,result:{structuredContent:{
+      self:{workspace_id:'fixture-workspace',workspace_name:'Fixture Name',user_id:'fixture-user'},
+      unused_description:'Synthetic bulk data for read-only self fixture. '.repeat(2300)
+    }}});
+    throw Error('unexpected fixture call');
+  }});
+  const self=await engine.fetchSelf();
+  assert.equal(self.workspaceId,'fixture-workspace');
+  assert.equal(self.workspaceName,'Fixture Name');
+  assert.equal(self.userId,'fixture-user');
+  assert.equal(JSON.stringify(self).includes('Synthetic bulk'),false);
+});
+test('large payload exception is method-scoped; other methods keep 32KB response limit',async()=>{
+  const hugeDescription='Synthetic oversized transport fixture. '.repeat(2500);
+  const engine=new NotionMcpEngine({config:{enabled:true},vault:fakeVault(),
+    fetchImpl:async()=>respond(200,{jsonrpc:'2.0',id:2,result:{value:hugeDescription}})});
+  const valid=await engine.mcpPost('fixture',{jsonrpc:'2.0',id:2,method:'tools/list'});
+  assert.equal(valid.httpStatus,200);
+  await assert.rejects(engine.mcpPost('fixture',{jsonrpc:'2.0',id:2,method:'other'}),
+    /NOTION_MCP_RESPONSE_TOO_LARGE/);
+});
+test('even official tools/list rejects streams beyond its 512KiB bound',async()=>{
+  const engine=new NotionMcpEngine({config:{enabled:true},vault:fakeVault(),
+    fetchImpl:async()=>({
+      ok:true,status:200,headers:{get(k){return k==='content-type'?'application/json':null;}},
+      body:new ReadableStream({start(controller){controller.enqueue(new Uint8Array(300000));controller.enqueue(new Uint8Array(300000));controller.close();}})
+    })});
+  await assert.rejects(engine.mcpPost('fixture',{jsonrpc:'2.0',id:2,method:'tools/list'}),
+    /NOTION_MCP_RESPONSE_TOO_LARGE/);
+});

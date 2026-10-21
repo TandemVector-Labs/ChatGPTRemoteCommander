@@ -22,8 +22,8 @@ function callbackTarget(value) {
       u.pathname !== '/notion/mcp/callback' || u.search || u.hash) throw codeError('NOTION_MCP_CALLBACK_INVALID');
   return u;
 }
-function safeOutput(json) {
-  if (Buffer.byteLength(JSON.stringify(json)) > 32000) throw codeError('NOTION_MCP_RESPONSE_TOO_LARGE');
+function safeOutput(json, maximum = 32000) {
+  if (Buffer.byteLength(JSON.stringify(json)) > maximum) throw codeError('NOTION_MCP_RESPONSE_TOO_LARGE');
   return json;
 }
 async function fetchJson(fetchImpl, url, init = {}) {
@@ -261,6 +261,13 @@ export class NotionMcpEngine {
         ? access : 'unknown' };
   }
   async mcpPost(token, rpc, { sessionId = null, protocolVersion = '2025-06-18' } = {}) {
+    // The official Notion MCP tools/list payload contains large JSON schemas.
+    // Raise the in-memory bound ONLY for read-only discovery and fixed self fetch.
+    // Public tool results remain sanitized and small.
+    const responseLimit = rpc.method === 'tools/list' ? 512 * 1024
+      : rpc.method === 'tools/call' && rpc.params?.name === 'notion-fetch'
+        && rpc.params?.arguments?.id === 'self' ? 256 * 1024
+        : 32768;
     if (sessionId && !/^[\x21-\x7e]{1,256}$/.test(sessionId)) throw codeError('NOTION_MCP_SESSION_INVALID');
     const headers = { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json',
       Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': protocolVersion };
@@ -284,13 +291,13 @@ export class NotionMcpEngine {
     const contentType = String(res.headers?.get?.('content-type') ?? '').toLowerCase();
     let payload;
     if (contentType.includes('application/json')) {
-      try { payload = JSON.parse(await readBoundedBody(res)); }
+      try { payload = JSON.parse(await readBoundedBody(res, responseLimit)); }
       catch (error) {
         if (error.code === 'NOTION_MCP_RESPONSE_TOO_LARGE') throw error;
         throw codeError('NOTION_MCP_INVALID_RESPONSE');
       }
     } else if (contentType.includes('text/event-stream')) {
-      const raw = await readBoundedBody(res);
+      const raw = await readBoundedBody(res, responseLimit);
       const events = raw.split(/\r?\n\r?\n/);
       const data = events.flatMap(event => event.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trim()));
       const entry = data.find(text => { try { const parsed = JSON.parse(text); return parsed.id === rpc.id; } catch { return false; } });
@@ -298,7 +305,7 @@ export class NotionMcpEngine {
       payload = JSON.parse(entry);
     } else throw codeError('NOTION_MCP_UNSUPPORTED_RESPONSE');
     if (payload?.id !== rpc.id || (!payload.result && !payload.error)) throw codeError('NOTION_MCP_INVALID_RESPONSE');
-    return { httpStatus:res.status, payload:safeOutput(payload), sessionId: receivedSessionId };
+    return { httpStatus:res.status, payload:safeOutput(payload, responseLimit), sessionId: receivedSessionId };
   }
 }
 export function createNotionMcpTools(args = {}) {
