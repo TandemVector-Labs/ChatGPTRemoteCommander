@@ -35,6 +35,33 @@ async function fetchJson(fetchImpl, url, init = {}) {
   if (!data || typeof data !== 'object' || Array.isArray(data)) throw codeError('NOTION_MCP_INVALID_RESPONSE');
   return data;
 }
+// Bound transport responses while reading, rather than only after a potentially
+// unbounded HTTP body has already been buffered in memory.
+async function readBoundedBody(res, maximum = 32768) {
+  if (!res.body?.getReader) {
+    const text = await res.text();
+    if (Buffer.byteLength(text) > maximum) throw codeError('NOTION_MCP_RESPONSE_TOO_LARGE');
+    return text;
+  }
+  const reader = res.body.getReader();
+  const parts = [];
+  let bytes = 0;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > maximum) {
+        await reader.cancel().catch(() => {});
+        throw codeError('NOTION_MCP_RESPONSE_TOO_LARGE');
+      }
+      parts.push(value);
+    }
+    return Buffer.concat(parts).toString('utf8');
+  } finally {
+    reader.releaseLock();
+  }
+}
 export function generatePKCE() {
   const verifier = randomBytes(32).toString('base64url');
   return { verifier, challenge: createHash('sha256').update(verifier).digest('base64url') };
@@ -49,6 +76,7 @@ export class NotionMcpEngine {
     this.pending = null;
     this.server = null;
     this.verifiedAt = null;
+    this.session = null;
   }
   async status() {
     if (this.config.enabled !== true) return { enabled: false, connected: false };
@@ -186,29 +214,83 @@ export class NotionMcpEngine {
     }
     if (response.httpStatus !== 200 || response.payload?.error || !response.payload?.result?.protocolVersion)
       throw codeError('NOTION_MCP_INITIALIZE_FAILED');
+    const negotiated = response.payload.result.protocolVersion;
+    if (negotiated !== '2025-06-18') throw codeError('NOTION_MCP_VERSION_UNSUPPORTED');
+    this.session = { token: creds.access_token, id: response.sessionId ?? null, version: negotiated };
+    try {
+      await this.mcpPost(creds.access_token,
+        { jsonrpc: '2.0', method: 'notifications/initialized' },
+        { sessionId: this.session.id, protocolVersion: negotiated });
+    } catch (error) { this.session = null; throw error; }
     this.verifiedAt = new Date().toISOString();
     return { connected: true, protocolVersion: response.payload.result.protocolVersion,
       serverName: String(response.payload.result.serverInfo?.name ?? '').slice(0,120),
       workspaceId: creds.workspace_id ?? null, verifiedAt: this.verifiedAt };
   }
-  async mcpPost(token, rpc) {
+  async listTools() {
+    if (!this.session) await this.verify();
+    const answer = await this.mcpPost(this.session.token,
+      { jsonrpc: '2.0', id: 2, method: 'tools/list' },
+      { sessionId: this.session.id, protocolVersion: this.session.version });
+    const items = answer.payload?.result?.tools;
+    if (!Array.isArray(items) || items.length > 200 || answer.payload?.error) throw codeError('NOTION_MCP_TOOLS_INVALID');
+    return { count: items.length, names: items.map(item => item.name)
+      .filter(name => typeof name === 'string' && /^notion-[a-z0-9-]{1,70}$/.test(name)) };
+  }
+  async fetchSelf() {
+    const listing = await this.listTools();
+    if (!listing.names.includes('notion-fetch')) throw codeError('NOTION_MCP_FETCH_UNAVAILABLE');
+    const answer = await this.mcpPost(this.session.token, { jsonrpc: '2.0', id: 3,
+      method: 'tools/call', params: { name: 'notion-fetch', arguments: { id: 'self' } } },
+      { sessionId: this.session.id, protocolVersion: this.session.version });
+    if (answer.payload?.error || answer.payload?.result?.isError) throw codeError('NOTION_MCP_FETCH_FAILED');
+    const result = answer.payload?.result;
+    let content = result?.structuredContent;
+    if (!content) {
+      const text = result?.content?.find(item => item.type === 'text')?.text;
+      if (!text || Buffer.byteLength(text) > 16000) throw codeError('NOTION_MCP_SELF_INVALID');
+      try { content = JSON.parse(text); } catch { throw codeError('NOTION_MCP_SELF_INVALID'); }
+    }
+    const self = content?.self ?? content;
+    if (!self || typeof self !== 'object') throw codeError('NOTION_MCP_SELF_INVALID');
+    const access = self.current_tool_access?.ai_search?.status;
+    return { workspaceId: String(self.workspace_id ?? self.workspace?.id ?? '').slice(0,100) || null,
+      workspaceName: String(self.workspace_name ?? self.workspace?.name ?? '').slice(0,150) || null,
+      userId: String(self.user_id ?? self.user?.id ?? '').slice(0,100) || null,
+      aiSearchStatus: ['available','available_with_limit','upgrade_required','plan_required','not_enabled'].includes(access)
+        ? access : 'unknown' };
+  }
+  async mcpPost(token, rpc, { sessionId = null, protocolVersion = '2025-06-18' } = {}) {
+    if (sessionId && !/^[\x21-\x7e]{1,256}$/.test(sessionId)) throw codeError('NOTION_MCP_SESSION_INVALID');
+    const headers = { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json',
+      Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': protocolVersion };
+    if (sessionId) headers['Mcp-Session-Id'] = sessionId;
     let res;
     try {
       res = await this.fetch(RESOURCE, {
         method: 'POST', redirect: 'error', signal: AbortSignal.timeout(12000),
-        headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json',
-          Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': '2025-06-18' },
-        body: JSON.stringify(rpc)
+        headers, body: JSON.stringify(rpc)
       });
     } catch { throw codeError('NOTION_MCP_NETWORK_FAILURE'); }
     if (res.status === 401) return { httpStatus:401 };
     if (!res.ok) throw codeError('NOTION_MCP_HTTP_' + res.status);
+    if (!Object.hasOwn(rpc, 'id')) {
+      if (res.status !== 202 && res.status !== 204) throw codeError('NOTION_MCP_NOTIFICATION_FAILED');
+      return { httpStatus: res.status, payload: null };
+    }
+    const receivedSessionId = res.headers?.get?.('mcp-session-id') ?? null;
+    if (receivedSessionId && !/^[\x21-\x7e]{1,256}$/.test(receivedSessionId))
+      throw codeError('NOTION_MCP_SESSION_INVALID');
     const contentType = String(res.headers?.get?.('content-type') ?? '').toLowerCase();
     let payload;
-    if (contentType.includes('application/json')) payload = await res.json();
-    else if (contentType.includes('text/event-stream')) {
-      const raw = await res.text();
-      if (Buffer.byteLength(raw) > 32000) throw codeError('NOTION_MCP_RESPONSE_TOO_LARGE');
+    if (contentType.includes('application/json')) {
+      try { payload = JSON.parse(await readBoundedBody(res)); }
+      catch (error) {
+        if (error.code === 'NOTION_MCP_RESPONSE_TOO_LARGE') throw error;
+        throw codeError('NOTION_MCP_INVALID_RESPONSE');
+      }
+    } else if (contentType.includes('text/event-stream')) {
+      const raw = await readBoundedBody(res);
       const events = raw.split(/\r?\n\r?\n/);
       const data = events.flatMap(event => event.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trim()));
       const entry = data.find(text => { try { const parsed = JSON.parse(text); return parsed.id === rpc.id; } catch { return false; } });
@@ -216,7 +298,7 @@ export class NotionMcpEngine {
       payload = JSON.parse(entry);
     } else throw codeError('NOTION_MCP_UNSUPPORTED_RESPONSE');
     if (payload?.id !== rpc.id || (!payload.result && !payload.error)) throw codeError('NOTION_MCP_INVALID_RESPONSE');
-    return { httpStatus:res.status, payload:safeOutput(payload) };
+    return { httpStatus:res.status, payload:safeOutput(payload), sessionId: receivedSessionId };
   }
 }
 export function createNotionMcpTools(args = {}) {
@@ -227,12 +309,16 @@ export function createNotionMcpTools(args = {}) {
   return { engine, definitions:[
     { name:'notion_mcp_status', description:'Check independent Notion MCP account connection status without secrets.', inputSchema:schema, annotations:readOnly },
     { name:'notion_mcp_connect_start', description:'Start independent official Notion MCP OAuth/PKCE authorization; returns URL for owner consent.', inputSchema:schema, annotations:action },
-    { name:'notion_mcp_verify', description:'Verify Notion hosted MCP connection with initialize handshake; never reveals tokens.', inputSchema:schema, annotations:readOnly }
+    { name:'notion_mcp_verify', description:'Verify hosted MCP initialize and initialized lifecycle; never reveals credentials.', inputSchema:schema, annotations:readOnly },
+    { name:'notion_mcp_list_tools', description:'Read bounded list of hosted Notion MCP tool names after authorization.', inputSchema:schema, annotations:readOnly },
+    { name:'notion_mcp_fetch_self', description:'Read sanitized connected Notion workspace identity and AI-search availability.', inputSchema:schema, annotations:readOnly }
   ], execute: async name => {
     switch (name) {
       case 'notion_mcp_status': return engine.status();
       case 'notion_mcp_connect_start': return engine.connectStart();
       case 'notion_mcp_verify': return engine.verify();
+      case 'notion_mcp_list_tools': return engine.listTools();
+      case 'notion_mcp_fetch_self': return engine.fetchSelf();
       default: throw codeError('NOTION_MCP_UNKNOWN_TOOL');
     }
   } };

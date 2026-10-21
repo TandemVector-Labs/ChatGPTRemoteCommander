@@ -33,7 +33,7 @@ test('PKCE verifier is random and challenge is SHA-256 base64url', () => {
 test('Notion MCP is opt-in and never exposes arbitrary HTTP execution', async () => {
   const t=createNotionMcpTools({ config:{} });
   assert.deepEqual(await t.execute('notion_mcp_status'),{enabled:false,connected:false});
-  assert.deepEqual(t.definitions.map(x=>x.name),['notion_mcp_status','notion_mcp_connect_start','notion_mcp_verify']);
+  assert.deepEqual(t.definitions.map(x=>x.name),['notion_mcp_status','notion_mcp_connect_start','notion_mcp_verify','notion_mcp_list_tools','notion_mcp_fetch_self']);
   assert.equal(JSON.stringify(t.definitions).includes('access_token'),false);
   await assert.rejects(t.execute('notion_mcp_connect_start'),/NOTION_MCP_DISABLED/);
 });
@@ -65,6 +65,17 @@ test('official discovery, DCR, OAuth PKCE, callback and MCP handshake without se
       if(url==='https://mcp.notion.com/mcp'){
         assert.equal(options.headers.Authorization,'Bearer FIXTURE_PRIVATE_ACCESS');
         const body=JSON.parse(options.body);
+        if(body.method==='notifications/initialized')return respond(202,{});
+        if(body.method==='tools/list')return respond(200,{jsonrpc:'2.0',id:2,result:{tools:[
+          {name:'notion-fetch',inputSchema:{type:'object',properties:{id:{type:'string'}}}},
+          {name:'notion-search',inputSchema:{type:'object',properties:{query:{type:'string'}}}}]}});
+        if(body.method==='tools/call') {
+          assert.equal(body.params.name,'notion-fetch');
+          assert.equal(body.params.arguments.id,'self');
+          return respond(200,{jsonrpc:'2.0',id:3,result:{structuredContent:{self:{
+            workspace_id:'fixture-workspace',workspace_name:'Fixture Notion',user_id:'fixture-user',
+            current_tool_access:{ai_search:{status:'not_enabled'}} }}}});
+        }
         assert.equal(body.method,'initialize');
         return respond(200,{jsonrpc:'2.0',id:1,result:{protocolVersion:'2025-06-18',serverInfo:{name:'Notion MCP'}}});
       }
@@ -88,6 +99,11 @@ test('official discovery, DCR, OAuth PKCE, callback and MCP handshake without se
     assert.equal((await engine.status()).workspaceId,'fixture-workspace');
     assert.equal((await engine.verify()).connected,true);
     assert.equal((await engine.verify()).serverName,'Notion MCP');
+    assert.deepEqual((await engine.listTools()).names,['notion-fetch','notion-search']);
+    const self = await engine.fetchSelf();
+    assert.equal(self.workspaceId,'fixture-workspace');
+    assert.equal(self.workspaceName,'Fixture Notion');
+    assert.equal(self.aiSearchStatus,'not_enabled');
     assert.equal(JSON.stringify(await engine.status()).includes('FIXTURE_PRIVATE'),false);
     assert.equal(JSON.stringify(await vault.load()).includes('FIXTURE_PRIVATE_ACCESS'),true);
     assert.equal(requests.filter(x=>x.url.endsWith('/mcp/register')).length,1);
@@ -125,8 +141,10 @@ test('MCP verify rotates tokens and keeps errors bounded',async()=>{
   let handshakes=0;
   const engine=new NotionMcpEngine({config:{enabled:true},vault,fetchImpl:async(url,init)=>{
     if(url==='https://mcp.notion.com/mcp'){
-      handshakes++;
       assert.equal(init.redirect,'error');
+      const body=JSON.parse(init.body);
+      if(body.method==='notifications/initialized')return respond(202,{});
+      handshakes++;
       if(init.headers.Authorization==='Bearer expired')return respond(401,{});
       return respond(200,{jsonrpc:'2.0',id:1,result:{protocolVersion:'2025-06-18'}});
     }
@@ -151,4 +169,50 @@ test('MCP client parses bounded SSE reply without forwarding tool requests', asy
       'text/event-stream')});
   const r=await engine.mcpPost('synthetic-fixture',{jsonrpc:'2.0',id:1,method:'initialize',params:{}});
   assert.equal(r.payload.result.protocolVersion,'2025-06-18');
+});
+
+test('MCP session identifier is propagated to initialized and read-only calls', async () => {
+  const vault=fakeVault();
+  await vault.save({access_token:'fixture',workspace_id:'test-space'});
+  const observed=[];
+  const engine=new NotionMcpEngine({config:{enabled:true},vault,fetchImpl:async(url,init)=>{
+    const rpc=JSON.parse(init.body);
+    observed.push({method:rpc.method,session:init.headers['Mcp-Session-Id'] ?? null});
+    if(rpc.method==='initialize')return {
+      ...respond(200,{jsonrpc:'2.0',id:1,result:{protocolVersion:'2025-06-18'}}),
+      headers:{get(key){return key==='mcp-session-id'?'opaque-fixture-session':
+        key==='content-type'?'application/json':null;}}
+    };
+    if(rpc.method==='notifications/initialized') return respond(202,{});
+    if(rpc.method==='tools/list') return respond(200,{jsonrpc:'2.0',id:2,result:{tools:[
+      {name:'notion-fetch'},{name:'notion-search'},{name:'other-mutating-tool'}]}});
+    if(rpc.method==='tools/call'){
+      assert.deepEqual(rpc.params,{name:'notion-fetch',arguments:{id:'self'}});
+      return respond(200,{jsonrpc:'2.0',id:3,result:{content:[{type:'text',text:JSON.stringify({
+        self:{workspace_id:'space-a',workspace_name:'Fixture',user_id:'u-1',
+          current_tool_access:{ai_search:{status:'available'}}}})}]}});
+    }
+    throw Error('unexpected request');
+  }});
+  assert.equal((await engine.listTools()).count,3);
+  const identity=await engine.fetchSelf();
+  assert.equal(identity.workspaceId,'space-a');
+  assert.equal(identity.aiSearchStatus,'available');
+  assert.deepEqual(observed.map(x=>x.method),[
+    'initialize','notifications/initialized','tools/list','tools/list','tools/call']);
+  assert.deepEqual(observed.map(x=>x.session),[null,'opaque-fixture-session',
+    'opaque-fixture-session','opaque-fixture-session','opaque-fixture-session']);
+});
+test('MCP read-only transport rejects oversized streamed replies before buffering them', async () => {
+  const vault=fakeVault();
+  const engine=new NotionMcpEngine({config:{enabled:true},vault,fetchImpl:async()=>{
+    const body=new ReadableStream({start(controller){
+      controller.enqueue(new Uint8Array(22000));
+      controller.enqueue(new Uint8Array(22000));
+      controller.close();
+    }});
+    return {ok:true,status:200,headers:{get(k){return k==='content-type'?'application/json':null;}},body};
+  }});
+  await assert.rejects(engine.mcpPost('fixture',{jsonrpc:'2.0',id:1,method:'initialize',params:{}}),
+    /NOTION_MCP_RESPONSE_TOO_LARGE/);
 });
