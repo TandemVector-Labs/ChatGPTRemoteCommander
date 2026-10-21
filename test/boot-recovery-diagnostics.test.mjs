@@ -82,6 +82,36 @@ test('Windows stable PowerShell bootstrap resolves PowerShell 7 without operatin
   assert.match(result.stdout,/BOOT_LAUNCHER_SELFTEST_PASS mode=Boot/u);
 });
 
+test('R470 sanitizer classifies TAP and redacts secret-looking test names without leaking raw output', {skip:process.platform!=='win32'}, () => {
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'rc-r470-safe-'));
+  const sha='a'.repeat(40);
+  const logDir=path.join(root,'STATE','ChatGPTRemoteCommander','update-logs');
+  try {
+    fs.mkdirSync(logDir,{recursive:true});
+    const source=path.join(logDir,'qualification-output-qualification-test-'+sha.slice(0,12)+'-fixture.stdout.log');
+    const synthetic='Bearer '+'fixture_public_dummy_token_123456789';
+    fs.writeFileSync(source,['# not ok 17 - harmless fixture','# fail 1','server did not become healthy','not ok 18 - '+synthetic].join('\n'));
+    const r=spawnSync('pwsh.exe',['-NoProfile','-NonInteractive','-File',
+      path.join(repo,'tools','diagnose-updater-gate-r470.ps1'),
+      '-Root',root,'-ExpectedCommit',sha],
+      {encoding:'utf8',timeout:15000,windowsHide:true});
+    assert.equal(r.status,0,r.stderr||r.stdout);
+    const reportText=fs.readFileSync(path.join(root,'DIAGNOSTIC_R470.json'),'utf8');
+    const j=JSON.parse(reportText);
+    assert.equal(j.status,'TAP_SUMMARY_EXTRACTED');
+    assert.equal(j.matchingLogCount,1);
+    assert.equal(j.failureTests.length,2);
+    assert.equal(j.failureTests[0].index,17);
+    assert.equal(j.failureTests[0].publicTestName,'harmless fixture');
+    assert.equal(j.failureTests[1].publicTestName,'REDACTED_TEST_NAME');
+    assert.equal(j.tapCounts.fail,'1');
+    assert.deepEqual(j.classifiedSignals,['SERVER_READINESS_TIMEOUT']);
+    assert.equal(j.rawLogIncluded,false);
+    assert.equal(j.stablePromoted,false);
+    assert.equal(reportText.includes(synthetic),false);
+    assert.equal(reportText.includes(root),false);
+  } finally { fs.rmSync(root,{recursive:true,force:true}); }
+});
 
 test('non-elevated user supervisor resolves signed Store pwsh without privileged AllUsers', {skip:process.platform!=='win32'}, () => {
   const temp=fs.mkdtempSync(path.join(os.tmpdir(),'rc-pr55-store-user-'));

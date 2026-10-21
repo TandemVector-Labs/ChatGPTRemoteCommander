@@ -19,6 +19,7 @@ test('audit permits only the exact known historical fake-vault OAuth assertion',
   assert.equal(isVerifiedSyntheticNotionBearer('Bearer token literal',synthetic,{commit:earlierFixtureCommit,file}),true);
   assert.equal(isVerifiedSyntheticNotionBearer('Bearer token literal',synthetic,{commit:earlierFixtureCommit,file:'src/notion-mcp-engine.mjs'}),false);
   assert.equal(isVerifiedSyntheticNotionBearer('Bearer token literal','Bearer '+'OTHER_UNKNOWN_CREDENTIAL_0987654321',{commit:earlierFixtureCommit,file}),false);
+  assert.equal(isVerifiedSyntheticNotionBearer('Bearer token literal','Bearer '+'REAL_TOKEN_1234567890123456',{commit:'7602330376070ca3681838e49bf7f932179a04d9',file}),false);
   assert.equal(isVerifiedSyntheticNotionBearer('Bearer token literal',synthetic,{commit,file:'src/notion-mcp-engine.mjs'}),false);
   assert.equal(isVerifiedSyntheticNotionBearer('Bearer token literal',synthetic,{commit:'0'.repeat(40),file}),false);
   assert.equal(isVerifiedSyntheticNotionBearer('Bearer token literal','Bearer '+'REAL_TOKEN_1234567890123456',provenance),false);
