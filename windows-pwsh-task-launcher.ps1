@@ -23,7 +23,13 @@ function Resolve-InstalledPowerShell7 {
   }
   # The Microsoft Store changes its versioned WindowsApps directory on update.
   # Resolve the installed package identity at EACH task invocation, not at setup.
-  $packages = @(Get-AppxPackage -AllUsers -Name 'Microsoft.PowerShell' -ErrorAction Stop |
+  # Current-user package enumeration is permitted in a non-elevated logon task.
+  # SYSTEM may need AllUsers when it has no package registered in its profile.
+  $packages = @(Get-AppxPackage -Name 'Microsoft.PowerShell' -ErrorAction Stop)
+  if ($packages.Count -eq 0) {
+    $packages = @(Get-AppxPackage -AllUsers -Name 'Microsoft.PowerShell' -ErrorAction Stop)
+  }
+  $packages = @($packages |
     Where-Object { $_.Name -eq 'Microsoft.PowerShell' -and $_.Publisher -match 'Microsoft Corporation' } |
     Sort-Object Version -Descending)
   foreach ($package in $packages) {
