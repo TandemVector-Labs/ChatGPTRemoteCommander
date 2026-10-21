@@ -22,7 +22,19 @@ function assertUnredirectedDirectoryAncestors(input,code='MANAGED_PATH_UNSAFE'){
    if(st.isSymbolicLink()||!st.isDirectory())throw Error(code);
   }catch(e){if(e.code==='ENOENT')continue;throw Error(code);}
  }
+ // Require the owner-selected POSIX transfer root to be private before
+ // any peer identity, journal or payload access. Windows ACL validation is
+ // separate and cannot be inferred from POSIX uid/mode fields.
+ if(process.platform!=='win32'&&typeof process.getuid==='function'){
+  let owner;
+  try{owner=fs.lstatSync(normalized);}catch{throw Error(code);}
+  if(!owner.isDirectory()||owner.isSymbolicLink()||
+     owner.uid!==process.getuid()||(owner.mode&0o077)!==0)
+   throw Error(code);
+ }
 }
+// Protect new staged directories independent of the invoking shell umask.
+process.umask(0o077);
 const root=path.resolve(process.env.COMMANDER_TRANSFER_HOME || (process.platform==='win32'
  ?path.join(process.env.LOCALAPPDATA||path.join(os.homedir(),'AppData','Local'),'CommanderTransferPilot')
  :path.join(os.homedir(),'.local','share','commander-transfer-pilot')));
