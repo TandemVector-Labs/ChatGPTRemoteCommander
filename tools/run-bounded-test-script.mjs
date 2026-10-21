@@ -251,10 +251,12 @@ function run(){
   if(args.script==='test'&&process.platform==='win32'){
     // Compose from broad groups to single-fixture priority: the last prefix
     // executes first. Scheduler cold-start must precede resource-heavy suites.
-    command=isolateWindowsTimingSensitiveRegressions(command);
+    // Keep WorkflowPlan first, then start adaptive before the other loaded
+    // crash/HTTP fixtures; retain every original test and strict deadlines.
     command=isolateWindowsProcessTreeRegression(command);
     command=isolateWindowsTransferMeshHttpRegression(command);
     command=isolateWindowsLeaseRegression(command);
+    command=isolateWindowsTimingSensitiveRegressions(command);
     command=isolateWindowsWorkflowPlanRegression(command);
   }
   if(process.platform==='win32'&&args.script==='test'&&process.env.RC_QUALIFICATION_RUN_ID)

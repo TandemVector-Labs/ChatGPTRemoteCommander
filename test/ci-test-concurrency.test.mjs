@@ -502,3 +502,23 @@ test('shell-free qualification planning preserves the actual Windows scheduling 
     }
   }
 });
+
+test('Windows cold-start scheduler keeps WorkflowPlan first and adaptive immediately after',()=>{
+  const code=read('tools/run-bounded-test-script.mjs');
+  const start=code.indexOf("if(args.script==='test'&&process.platform==='win32'){");
+  const end=code.indexOf('\n  }\n',start);
+  assert.ok(start>=0&&end>start);
+  const section=code.slice(start,end);
+  const order=[
+    'isolateWindowsProcessTreeRegression',
+    'isolateWindowsTransferMeshHttpRegression',
+    'isolateWindowsLeaseRegression',
+    'isolateWindowsTimingSensitiveRegressions',
+    'isolateWindowsWorkflowPlanRegression'
+  ];
+  const locations=order.map(name=>section.indexOf('command='+name+'(command);'));
+  assert.ok(locations.every(i=>i>=0)&&locations.every((i,j)=>j===0||i>locations[j-1]));
+  // Last prepended isolation executes first; WorkflowPlan then Adaptive are
+  // therefore first. Both run exactly once, preserving all other coverage.
+  assert.match(read('test/project-adaptive.test.mjs'),/\{ timeout: 6000 \}/);
+});
