@@ -6,6 +6,7 @@ The only credential storage is the Node engine's per-profile OS vault.
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import threading
 from pathlib import Path
@@ -15,7 +16,25 @@ _PAT = re.compile(r"^[A-Za-z0-9._-]{24,512}$")
 _EXPECTED_STATUS = re.compile(
     r"^NOTION_REST_STATUS (CONNECTED|DISCONNECTED) (PAT|OAUTH|NONE) VAULT_(READY|UNAVAILABLE)$"
 )
-_IMPORTER = (Path(__file__).resolve().parents[2] / "tools" / "notion-pat-import.mjs").resolve()
+# Production desktop entry runs from the standalone installed GUI directory,
+# not the Core repository. Prefer the local Commander Core installation.
+_CORE_ROOT = Path.home() / ".local/share/ChatGPTRemoteCommander"
+_DEV_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _local_importer() -> Path:
+    for base in (_CORE_ROOT, _DEV_ROOT):
+        candidate = base / "tools/notion-pat-import.mjs"
+        if candidate.is_file() and not candidate.is_symlink():
+            return candidate
+    raise RuntimeError("NOTION_IMPORTER_UNAVAILABLE")
+
+
+def _node_executable() -> str:
+    managed = _CORE_ROOT / ".runtime/node-current/bin/node"
+    if managed.is_file():
+        return str(managed)
+    return shutil.which("node") or "node"
 
 
 def notion_command(action: str, profile: str) -> list[str]:
@@ -29,9 +48,7 @@ def notion_command(action: str, profile: str) -> list[str]:
     }
     if action not in actions:
         raise ValueError("NOTION_ACTION_INVALID")
-    if not _IMPORTER.is_file() or _IMPORTER.is_symlink():
-        raise RuntimeError("NOTION_IMPORTER_UNAVAILABLE")
-    return ["node", str(_IMPORTER), *actions[action], "--profile", profile]
+    return [_node_executable(), str(_local_importer()), *actions[action], "--profile", profile]
 
 
 def notion_action(action: str, profile: str, token: str | None = None) -> str:
