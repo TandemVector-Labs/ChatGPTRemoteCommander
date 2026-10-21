@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import {execFileSync} from 'node:child_process';
+import {execFileSync,spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 const cli=fileURLToPath(new URL('./durable-send.mjs',import.meta.url));
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
@@ -68,5 +68,38 @@ test('durable enqueue refuses source outside allowlisted root',()=>{
   const outside=path.join(root,'outside.txt');fs.writeFileSync(outside,'secret');
   assert.throws(()=>call(root,'enqueue','--peer','Linux','--path',outside,'--source-root',allow,'--id','durable-unsafe-001'));
   assert.equal(fs.existsSync(path.join(root,'jobs','Linux','durable-unsafe-001.json')),false);
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('durable job-status rejects symlinks escaping its private managed tree',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-symlink-reject-'));
+ try{
+  const home=path.join(root,'home'),outside=path.join(root,'out');
+  fs.mkdirSync(home);fs.mkdirSync(outside);fs.mkdirSync(path.join(home,'jobs'));
+  fs.writeFileSync(path.join(home,'node.json'),JSON.stringify({alias:'PC'}));
+  const id='audit-safe-id',external=path.join(outside,id+'.json');
+  const marker={schema:'ctmesh-durable-v1',id,peer:'Linux',status:'PUBLISHED',bytes:11,copiedBytes:11,sha256:'a'.repeat(64)};
+  fs.writeFileSync(external,JSON.stringify(marker));
+  try{fs.symlinkSync(outside,path.join(home,'jobs','Linux'),'dir');}
+  catch(e){if(['EPERM','EACCES','ENOTSUP'].includes(e.code)){t.skip('Symlink creation not permitted');return;}throw e;}
+  const result=spawnSync(process.execPath,[cli,'job-status','--peer','Linux','--id',id],{encoding:'utf8',timeout:4000,env:{...process.env,COMMANDER_TRANSFER_HOME:home}});
+  assert.equal(result.status,1);
+  assert.match(result.stderr,/TRANSFER_MANAGED_PATH_UNSAFE/);
+  assert.equal(result.stdout,'');
+  assert.equal(fs.readFileSync(external,'utf8'),JSON.stringify(marker));
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+test('durable job-status rejects a symlinked record even under a normal directory',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-symlink-record-'));
+ try{
+  const home=path.join(root,'home'),outside=path.join(root,'outside.json');
+  fs.mkdirSync(home);fs.mkdirSync(path.join(home,'jobs'));fs.mkdirSync(path.join(home,'jobs','Linux'));
+  fs.writeFileSync(outside,JSON.stringify({id:'audit-record',status:'PUBLISHED'}));
+  try{fs.symlinkSync(outside,path.join(home,'jobs','Linux','audit-record.json'),'file');}
+  catch(e){if(['EPERM','EACCES','ENOTSUP'].includes(e.code)){t.skip('Symlink creation not permitted');return;}throw e;}
+  const result=spawnSync(process.execPath,[cli,'job-status','--peer','Linux','--id','audit-record'],{encoding:'utf8',timeout:4000,env:{...process.env,COMMANDER_TRANSFER_HOME:home}});
+  assert.equal(result.status,1);
+  assert.match(result.stderr,/TRANSFER_MANAGED_PATH_UNSAFE/);
+  assert.equal(fs.readFileSync(outside,'utf8'),JSON.stringify({id:'audit-record',status:'PUBLISHED'}));
  }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
