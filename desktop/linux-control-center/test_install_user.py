@@ -1,6 +1,8 @@
 """Linux user-local GUI installation, rollback and no-live-effects tests."""
 import importlib.util
+import io
 import os
+from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 import tempfile
 import unittest
@@ -62,17 +64,40 @@ class LocalControlCenterPackageTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "UNSUPPORTED_XDG_DATA_HOME"):
                     installer._validated_xdg_data_home()
 
-    def test_stage_path_rejects_escaping_or_symlinked_parents(self):
-        target = self.root / "stage1"
-        self.assertEqual(installer._bounded_stage_target(target), target)
-        with self.assertRaisesRegex(RuntimeError, "UNTRUSTED_DESTINATION"):
-            installer._bounded_stage_target(Path("/etc/rc-notion-invalid"))
-        nested = self.root / "owned"
-        nested.mkdir(mode=0o700)
-        symlink = self.root / "alias"
-        symlink.symlink_to(nested, target_is_directory=True)
-        with self.assertRaisesRegex(RuntimeError, "STAGE_PATH_SYMLINK_ANCESTOR"):
-            installer._bounded_stage_target(symlink / "stage2")
+    def test_fixed_default_xdg_ancestors_must_not_be_symlinks(self):
+        dotlocal = self.root / ".local"
+        dotlocal.mkdir(mode=0o700)
+        (dotlocal / "share").mkdir(mode=0o700)
+        with patch.object(installer, "_system_owner_home", return_value=self.root):
+            with patch.dict(os.environ, {"XDG_DATA_HOME": ""}):
+                self.assertEqual(installer._validated_xdg_data_home(), dotlocal / "share")
+                safe = self.root / "safe"
+                dotlocal.rename(safe)
+                dotlocal.symlink_to(safe, target_is_directory=True)
+                with self.assertRaisesRegex(RuntimeError, "UNTRUSTED_XDG_ANCESTOR"):
+                    installer._validated_xdg_data_home()
+
+    def test_owner_generated_stage_has_no_user_path_source(self):
+        stdout = io.StringIO()
+        with patch.object(installer, "_validated_xdg_data_home", return_value=self.home):
+            with patch("sys.argv", ["install_user.py", "--stage"]):
+                with redirect_stdout(stdout):
+                    installer.main()
+        result = stdout.getvalue().strip()
+        self.assertTrue(result.startswith("LINUX_CONTROL_CENTER_STAGE_PASS "))
+        target = Path(result.split(" ", 1)[1])
+        self.assertEqual(target.parent, self.home)
+        self.assertTrue(target.name.startswith(".rc-cc-review-"))
+        self.assertEqual(sorted(x.name for x in target.iterdir()),
+                         sorted([*installer.FILES, installer.DESKTOP_NAME]))
+        self.assertFalse(self.target.exists())
+        self.assertFalse(self.launcher.exists())
+        # A legacy external --stage-dir path is rejected, not silently used.
+        with patch("sys.argv", ["install_user.py", "--stage-dir", "/etc/unsafe"]):
+            with redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as stopped:
+                    installer.main()
+        self.assertEqual(stopped.exception.code, 2)
 
     def test_install_then_retry_is_idempotent(self):
         self.assertEqual(installer.install(source=self.source, data_home=self.home),

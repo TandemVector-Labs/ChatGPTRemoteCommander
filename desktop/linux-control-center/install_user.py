@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """User-local, transactional Linux Control Center packaging (no Core/service changes).
 
---stage-dir produces an inert package for admission tests.
+--stage produces an inert package under an auto-generated, owner-private directory.
 --install upgrades this user's existing Control Center, or installs one when
 explicitly invoked. Caller must never treat packaging as release approval.
 """
@@ -54,6 +54,15 @@ def _validated_xdg_data_home() -> Path:
     # identity of the production application, inviting unreviewed path writes.
     # Fail closed rather than silently installing into a different location.
     fixed = owner / ".local" / "share"
+    # Reject symlinks and writable ancestors even when XDG_DATA_HOME is unset.
+    # Only the OS uid may mutate the existing install tree.
+    for component in (owner / ".local", fixed):
+        if component.is_symlink():
+            raise RuntimeError("UNTRUSTED_XDG_ANCESTOR")
+        if component.exists():
+            info = component.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+                raise RuntimeError("UNTRUSTED_XDG_ANCESTOR")
     if not override:
         return fixed
     if not os.path.isabs(override):
@@ -63,18 +72,6 @@ def _validated_xdg_data_home() -> Path:
     if requested != real or real != fixed:
         raise RuntimeError("UNSUPPORTED_XDG_DATA_HOME")
     return fixed
-
-
-def _bounded_stage_target(requested: Path) -> Path:
-    """Stage only into an already private, owner-controlled parent directory."""
-    if not requested.is_absolute() or requested.name in ("", ".", ".."):
-        raise RuntimeError("STAGE_PATH_INVALID")
-    absolute = Path(os.path.abspath(requested))
-    canonical = Path(os.path.realpath(requested))
-    if absolute != canonical:
-        raise RuntimeError("STAGE_PATH_SYMLINK_ANCESTOR")
-    _private_dir(canonical.parent)
-    return canonical
 
 
 def desktop_entry(target: Path) -> str:
@@ -94,14 +91,21 @@ def desktop_entry(target: Path) -> str:
     )
 
 
-def stage(source: Path, destination: Path, final_target: Path) -> None:
-    if destination.exists() or destination.is_symlink():
+def stage(source: Path, destination: Path, final_target: Path, *, reserved: bool = False) -> None:
+    # A private tempfile.mkdtemp reservation cannot be stolen between
+    # allocation and staging. Public/normal callers still require absence.
+    if reserved:
+        _private_dir(destination)
+        if any(destination.iterdir()):
+            raise RuntimeError("STAGING_DESTINATION_NOT_EMPTY")
+    elif destination.exists() or destination.is_symlink():
         raise RuntimeError("STAGING_DESTINATION_EXISTS")
     _private_dir(destination.parent)
     for name in FILES:
         if not _regular_owned(source / name):
             raise RuntimeError("SOURCE_NOT_TRUSTED")
-    destination.mkdir(mode=0o700)
+    if not reserved:
+        destination.mkdir(mode=0o700)
     try:
         for name in FILES:
             content = (source / name).read_bytes()
@@ -189,7 +193,7 @@ def install(*, source: Path, data_home: Path) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Owner-local Control Center package")
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--stage-dir", type=Path)
+    group.add_argument("--stage", action="store_true")
     group.add_argument("--install", action="store_true")
     args = parser.parse_args()
     source = Path(__file__).resolve().parent
@@ -197,9 +201,10 @@ def main() -> None:
     if args.install:
         print(install(source=source, data_home=data_home))
     else:
-        dest = _bounded_stage_target(args.stage_dir)
-        stage(source, dest, data_home / "remote-commander-control-center")
-        print("LINUX_CONTROL_CENTER_STAGE_PASS")
+        _private_dir(data_home)
+        dest = Path(tempfile.mkdtemp(prefix=".rc-cc-review-", dir=data_home))
+        stage(source, dest, data_home / "remote-commander-control-center", reserved=True)
+        print("LINUX_CONTROL_CENTER_STAGE_PASS " + str(dest))
 
 
 if __name__ == "__main__":
