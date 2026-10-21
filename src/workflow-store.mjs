@@ -175,9 +175,13 @@ export class WorkflowStore {
     this.#dbPath = path.join(dir, 'workflows.sqlite');
     for (const suffix of ['', '-journal', '-wal', '-shm']) {
       noLinks(this.#dbPath + suffix, false);
-      if (fs.existsSync(this.#dbPath + suffix)) {
+      try {
+        // SQLite creates/removes rollback journals in other processes. A missing
+        // file is normal; never treat a present alias as acceptable.
         const s = fs.lstatSync(this.#dbPath + suffix);
         if (!s.isFile() || s.nlink > 1) fail('WORKFLOW_DATABASE_ALIAS');
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error;
       }
     }
     this.#device = safeText(device, 128);
@@ -196,9 +200,11 @@ export class WorkflowStore {
     this.#leaseDbPath = path.join(leaseDir, 'root-leases.sqlite');
     for (const suffix of ['', '-journal', '-wal', '-shm']) {
       noLinks(this.#leaseDbPath + suffix, false);
-      if (fs.existsSync(this.#leaseDbPath + suffix)) {
+      try {
         const stat = fs.lstatSync(this.#leaseDbPath + suffix);
         if (!stat.isFile() || stat.nlink > 1) fail('WORKFLOW_ROOT_LEASE_DATABASE_ALIAS');
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error;
       }
     }
     this.#leaseDb = new DatabaseSync(this.#leaseDbPath, { allowExtension: false });
