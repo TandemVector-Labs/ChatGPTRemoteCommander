@@ -78,3 +78,36 @@ test('Windows stable PowerShell bootstrap resolves PowerShell 7 without operatin
   assert.equal(result.status,0,result.stderr||result.stdout);
   assert.match(result.stdout,/BOOT_LAUNCHER_SELFTEST_PASS mode=Boot/u);
 });
+
+
+test('non-elevated user supervisor resolves signed Store pwsh without privileged AllUsers', {skip:process.platform!=='win32'}, () => {
+  const temp=fs.mkdtempSync(path.join(os.tmpdir(),'rc-pr55-store-user-'));
+  try {
+    const runner=path.join(temp,'store-user-fixture.ps1');
+    const ps=[
+      'param([string]$SourcePath)',
+      'function global:Get-AppxPackage {',
+      '  param([string]$Name,[switch]$AllUsers)',
+      "  if ($AllUsers) { throw 'TEST_PRIVILEGED_ALLUSERS_DENIED' }",
+      "  if ($Name -ne 'Microsoft.PowerShell') { throw 'TEST_UNEXPECTED_PACKAGE_NAME' }",
+      "  [pscustomobject]@{Name='Microsoft.PowerShell';Publisher='CN=Microsoft Corporation';Version=[version]'7.6.7.0';InstallLocation=(Join-Path $env:ProgramFiles 'WindowsApps\\Microsoft.PowerShell_7.6.7.0_x64__8wekyb3d8bbwe')}",
+      '}',
+      'function global:Test-Path {',
+      "  param([string]$LiteralPath,[string]$Path,[string]$PathType='Any')",
+      '  $candidate=if($LiteralPath){$LiteralPath}else{$Path}',
+      "  if ($candidate -match '[\\\\/]PowerShell[\\\\/]7[\\\\/]pwsh\\.exe$') { return $false }",
+      "  if ($candidate -match '[\\\\/]WindowsApps[\\\\/]Microsoft\\.PowerShell_7\\.6\\.7\\.0_x64__8wekyb3d8bbwe[\\\\/]pwsh\\.exe$') { return $true }",
+      '  Microsoft.PowerShell.Management\\Test-Path -LiteralPath $candidate -PathType $PathType',
+      '}',
+      '& $SourcePath -Mode UserSupervisor -SelfTest',
+      'exit $LASTEXITCODE'
+    ].join('\n');
+    fs.writeFileSync(runner,ps,'utf8');
+    const result=spawnSync('powershell.exe',[
+      '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',runner,
+      '-SourcePath',path.join(repo,'windows-pwsh-task-launcher.ps1')
+    ],{encoding:'utf8',timeout:15000,windowsHide:true});
+    assert.equal(result.status,0,result.stderr||result.stdout);
+    assert.match(result.stdout,/BOOT_LAUNCHER_SELFTEST_PASS mode=UserSupervisor/u);
+  } finally { fs.rmSync(temp,{recursive:true,force:true}); }
+});
