@@ -38,8 +38,17 @@ if (ownScript) {
     const signed=process.env.SETUP_SIGNED??'';
     // Reject untrusted release names before filesystem reads.
     assertExactReleaseVersionTag(version,tag);
-    const policy=JSON.parse(readFileSync(new URL('../docs/UNSIGNED_WINDOWS_RELEASE_POLICY.json',import.meta.url),'utf8'));
-    const releaseNotes=readFileSync(new URL('../docs/RELEASE_'+version+'.md',import.meta.url),'utf8');
+    // The exception for unsigned installers is version-scoped. The reviewed
+    // policy already admits only 0.10.24; use a literal file URL rather than
+    // constructing an OS path from untrusted release metadata.
+    let policy;
+    let releaseNotes='';
+    if (signed === 'false') {
+      if (version !== '0.10.24' || tag !== 'v0.10.24')
+        throw new Error('WINDOWS_UNSIGNED_RELEASE_NOT_AUTHORIZED');
+      policy=JSON.parse(readFileSync(new URL('../docs/UNSIGNED_WINDOWS_RELEASE_POLICY.json',import.meta.url),'utf8'));
+      releaseNotes=readFileSync(new URL('../docs/RELEASE_0.10.24.md',import.meta.url),'utf8');
+    }
     const decision=evaluateWindowsRelease({signed,version,tag,policy,releaseNotes});
     console.log('WINDOWS_RELEASE_DISTRIBUTION_POLICY_PASS mode='+decision.mode+' tag='+tag);
   } catch (e) {
