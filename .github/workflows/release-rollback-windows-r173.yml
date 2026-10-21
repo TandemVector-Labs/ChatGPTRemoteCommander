@@ -5,6 +5,7 @@ on:
     paths:
       - '.github/workflows/release-rollback-windows-r173.yml'
       - 'test/release-rollback-windows-r173.ps1'
+      - 'test/conversation-http.test.mjs'
       - 'test/router-ports-windows-r189.ps1'
       - 'auto-update-windows.ps1'
       - 'tools/router-switch.mjs'

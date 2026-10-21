@@ -54,13 +54,19 @@ test('HTTP conversation continuation binds without opening a tab and queues term
       cwd:serverRoot,env:{...process.env,REMOTE_COMMANDER_CONFIG:configPath},stdio:['ignore','pipe','pipe']
     });
     let stderr='';child.stderr.on('data',d=>{stderr+=d.toString('utf8');});
+    // Busy Windows qualification runners can delay the copied test server.
+    // Bound only fixture readiness; preserve the real health/exit check.
+    const readinessDeadline=performance.now()+(process.platform==='win32'?45000:15000);
     let healthy=false;
-    for(let i=0;i<400;i++){
+    while(performance.now()<readinessDeadline){
       if(child.exitCode!==null)break;
-      try{const r=await fetch(`http://127.0.0.1:${port}/health`);if(r.ok){healthy=true;break;}}catch{}
+      try{
+        const r=await fetch('http://127.0.0.1:'+port+'/health',{signal:AbortSignal.timeout(1500)});
+        if(r.ok){healthy=true;break;}
+      }catch{}
       await wait(25);
     }
-    assert.equal(healthy,true,stderr||`server exit=${child.exitCode}`);
+    assert.equal(healthy,true,stderr||('server exit='+child.exitCode));
 
     const listed=await rpc(port,1,'tools/list',{});
     const names=listed.tools.map(x=>x.name);
