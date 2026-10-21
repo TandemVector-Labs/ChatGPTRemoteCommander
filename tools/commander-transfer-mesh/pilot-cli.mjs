@@ -65,6 +65,37 @@ function transferPaths(peer,self,id){
 }
 
 const BLOCK_BYTES=1024*1024;
+// A stale lock may be replaced between lstat and read. Bind the JSON read to
+// the checked file descriptor, not to a second pathname lookup.
+function readVerifiedReceiveLock(lockFile,before){
+ let fd;
+ try{
+  const flags=fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW??0)|(fs.constants.O_NONBLOCK??0);
+  fd=fs.openSync(lockFile,flags);
+  const opened=fs.fstatSync(fd),named=fs.lstatSync(lockFile);
+  if(!opened.isFile()||opened.nlink!==1||opened.size<1||opened.size>2048||
+     opened.dev!==before.dev||opened.ino!==before.ino||opened.size!==before.size||
+     !named.isFile()||named.isSymbolicLink()||named.nlink!==1||
+     named.dev!==opened.dev||named.ino!==opened.ino||named.size!==opened.size)
+    fail('Untrusted receive lock; inspect before retry');
+  const bytes=Buffer.alloc(opened.size);
+  let at=0;
+  while(at<bytes.length){
+   const n=fs.readSync(fd,bytes,at,bytes.length-at,at);
+   if(n<=0)fail('Untrusted receive lock; inspect before retry');
+   at+=n;
+  }
+  const after=fs.fstatSync(fd),namedAfter=fs.lstatSync(lockFile);
+  if(after.dev!==opened.dev||after.ino!==opened.ino||after.size!==opened.size||
+     after.mtimeMs!==opened.mtimeMs||after.ctimeMs!==opened.ctimeMs||
+     !namedAfter.isFile()||namedAfter.isSymbolicLink()||
+     namedAfter.dev!==opened.dev||namedAfter.ino!==opened.ino||
+     namedAfter.size!==opened.size)
+    fail('Untrusted receive lock; inspect before retry');
+  return JSON.parse(bytes.toString('utf8'));
+ }catch{fail('Untrusted receive lock; inspect before retry');}
+ finally{if(fd!==undefined)fs.closeSync(fd);}
+}
 function receiveLock(lockFile,{peer,id,sha256}){
  const signature={schema:'ctmesh-receive-lock-v1',host:os.hostname(),peer,id,sha256,pid:process.pid};
  const open=()=>fs.openSync(lockFile,'wx',0o600);
@@ -74,7 +105,7 @@ function receiveLock(lockFile,{peer,id,sha256}){
   if(error.code!=='EEXIST')throw error;
   const before=fs.lstatSync(lockFile);
   if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1||before.size>2048)fail('Untrusted receive lock; inspect before retry');
-  let old;try{old=JSON.parse(fs.readFileSync(lockFile,'utf8'));}catch{fail('Untrusted receive lock; inspect before retry');}
+  const old=readVerifiedReceiveLock(lockFile,before);
   if(old?.schema!==signature.schema||old.host!==signature.host||old.peer!==peer||old.id!==id||
     old.sha256!==sha256||!Number.isSafeInteger(old.pid)||old.pid<=0)fail('Untrusted receive lock; inspect before retry');
   let alive=true;
