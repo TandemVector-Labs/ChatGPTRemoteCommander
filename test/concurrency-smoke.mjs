@@ -50,12 +50,19 @@ server.stderr.on('data', (chunk) => { serverOutput += chunk.toString('utf8'); })
 process.once('exit', () => { try { server.kill('SIGTERM'); } catch {} });
 
 async function waitForHealth() {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  // Hosted Windows runners can be contended after the native suite; startup
+  // delay is not a concurrency correctness failure. Fail immediately on exit.
+  const startupBudgetMs = process.platform === 'win32' ? 45000 : 15000;
+  const deadline = Date.now() + startupBudgetMs;
+  for (let attempt = 0; Date.now() < deadline; attempt += 1) {
+    if (server.exitCode !== null || server.signalCode !== null) {
+      throw new Error('server exited before healthy: ' + serverOutput);
+    }
     try {
       const response = await fetch(`http://127.0.0.1:${port}/health`);
       if (response.ok) return;
     } catch { /* startup */ }
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, 150));
   }
   throw new Error(`server did not become healthy: ${serverOutput}`);
 }
