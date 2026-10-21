@@ -120,3 +120,15 @@ test('CLI rejects hostile version before any release-policy file access',async()
   assert.match(valid.stdout,/UNSIGNED_WITH_REQUIRED_SIGSTORE_PROVENANCE/);
  }finally{rmSync(cwd,{recursive:true,force:true});}
 });
+
+test('signed future builds need no dynamically selected release-notes file, unsigned future fails closed',async()=>{
+ const cli=(await import('node:url')).fileURLToPath(new URL('../tools/verify-windows-release-policy.mjs',import.meta.url));
+ const future={...process.env,RELEASE_VERSION:'99.99.99',RELEASE_TAG:'v99.99.99'};
+ const signed=spawnSync(process.execPath,[cli],{encoding:'utf8',env:{...future,SETUP_SIGNED:'true'}});
+ assert.equal(signed.status,0,signed.stderr);
+ assert.match(signed.stdout,/AUTHENTICODE_SIGNED/);
+ const unsigned=spawnSync(process.execPath,[cli],{encoding:'utf8',env:{...future,SETUP_SIGNED:'false'}});
+ assert.notEqual(unsigned.status,0);
+ assert.match(unsigned.stderr,/WINDOWS_UNSIGNED_RELEASE_NOT_AUTHORIZED/);
+ assert.doesNotMatch(unsigned.stderr,/ENOENT|EACCES/);
+});
