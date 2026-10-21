@@ -89,7 +89,7 @@ test('R470 sanitizer classifies TAP and redacts secret-looking test names withou
     fs.mkdirSync(logDir,{recursive:true});
     const source=path.join(logDir,'qualification-output-qualification-test-'+sha.slice(0,12)+'-fixture.stdout.log');
     const synthetic='Bearer '+'fixture_public_dummy_token_123456789';
-    fs.writeFileSync(source,['# not ok 17 - harmless fixture','# fail 1','server did not become healthy','not ok 18 - '+synthetic].join('\\n'));
+    fs.writeFileSync(source,['# not ok 17 - harmless fixture','# fail 1','server did not become healthy','not ok 18 - '+synthetic].join('\n'));
     const r=spawnSync('pwsh.exe',['-NoProfile','-NonInteractive','-File',
       path.join(repo,'tools','diagnose-updater-gate-r470.ps1'),
       '-Root',root,'-ExpectedCommit',sha],
