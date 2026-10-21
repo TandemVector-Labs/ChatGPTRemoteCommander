@@ -23,14 +23,42 @@ export function createGuiInputIncidentStore({file=defaultFile(),now=()=>new Date
   if(!path.isAbsolute(file))throw fail('GUI_INCIDENT_PATH_INVALID');
   const folder=path.dirname(file);
   async function pending(){
-    let st;
-    try{st=await fs.lstat(file);}
-    catch(e){if(e.code==='ENOENT')return null;throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');}
-    if(!st.isFile()||st.isSymbolicLink()||st.nlink!==1||st.size<1||st.size>2048)
+    // Open once and read through that same handle. A separate lstat/readFile
+    // sequence could read an attacker-swapped path after the identity check.
+    let handle;
+    try{handle=await fs.open(file,'r');}
+    catch(e){
+      if(e.code==='ENOENT'){
+        // A dangling symlink also reports ENOENT from open(). Treat it as
+        // unsafe, not as absence of a prior native-effect incident.
+        try{await fs.lstat(file);}
+        catch(check){if(check.code==='ENOENT')return null;}
+      }
       throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');
-    let raw,record;
-    try{raw=await fs.readFile(file,'utf8');record=JSON.parse(raw);}
-    catch{throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');}
+    }
+    let record;
+    try{
+      const [st,named]=await Promise.all([handle.stat(),fs.lstat(file)]);
+      if(!st.isFile()||!named.isFile()||named.isSymbolicLink()||
+        st.nlink!==1||named.nlink!==1||st.dev!==named.dev||st.ino!==named.ino||
+        st.size<1||st.size>2048)
+        throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');
+      // Read only through the verified descriptor, with a hard 2 KiB cap
+      // even if another process grows the file after fstat.
+      const buffer=Buffer.alloc(2049);
+      let used=0;
+      while(used<buffer.length){
+        const {bytesRead}=await handle.read(buffer,used,buffer.length-used,used);
+        if(bytesRead===0)break;
+        used+=bytesRead;
+      }
+      if(used!==st.size||used<1||used>2048)throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');
+      record=JSON.parse(buffer.subarray(0,used).toString('utf8'));
+    }catch{throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');}
+    finally{
+      try{await handle.close();}
+      catch{throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');}
+    }
     if(record?.schema!==SCHEMA||record.status!=='PENDING_NATIVE_EFFECT'||
       !INPUT_TOOLS.has(record.tool)||typeof record.id!=='string'||
       !/^[a-zA-Z0-9-]{8,128}$/.test(record.id)||
