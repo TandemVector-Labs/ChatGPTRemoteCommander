@@ -8,9 +8,13 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>remote-commander.ico</ApplicationIcon>
     <AssemblyName>RemoteCommander</AssemblyName>
+    <Company>TandemVector Labs</Company>
+    <Authors>Aliakbar Emadoddin;MMZ</Authors>
+    <Product>Remote Commander by TandemVector Labs</Product>
+    <Description>Unsigned Windows preview distributed by the Remote Commander project. Publisher identity not Authenticode verified.</Description>
     <RootNamespace>RemoteCommander</RootNamespace>
-    <Version>0.10.23</Version>
-    <FileVersion>0.10.23.0</FileVersion>
-    <AssemblyVersion>0.10.23.0</AssemblyVersion>
+    <Version>0.10.25</Version>
+    <FileVersion>0.10.25.0</FileVersion>
+    <AssemblyVersion>0.10.25.0</AssemblyVersion>
   </PropertyGroup>
 </Project>

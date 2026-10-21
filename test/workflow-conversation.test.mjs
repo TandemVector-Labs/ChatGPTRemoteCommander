@@ -54,10 +54,11 @@ test('workflow NEEDS_CHAT atomically pauses, records evidence/Brain, queues once
     assert.equal(fs.existsSync(brain),true);
     assert.match(fs.readFileSync(brain,'utf8'),/Solver completed; validate convergence/i);
 
-    const deferred=await waitFor(async()=>{
-      const status=await controller.status('proj');
-      return status.pending.find(x=>x.eventKey==='wf:proj:solve:needs-chat'&&x.state==='DEFERRED');
-    });
+    // handoff() already scheduled this attempt; wait for its completion,
+    // not for a host-load-sensitive wall-clock polling window.
+    await controller.drain();
+    const deferred=(await controller.status('proj')).pending.find(
+      x=>x.eventKey==='wf:proj:solve:needs-chat'&&x.state==='DEFERRED');
     assert.ok(deferred);
     assert.equal(deferred.lastCode,'WAITING_FOR_CHAT_TAB');
 

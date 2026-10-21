@@ -13,7 +13,9 @@ test('UI-only module has no shell, backend network or arbitrary file authority',
  assert.match(core,/http\.GetAsync\(\$"http:\/\/127\.0\.0\.1:/);
 });
 test('routing UI remains version pinned to main baseline and does not invent identity',()=>{
- assert.match(core,/ROUTER RESPONDS \/ IDENTITY UNVERIFIED/);
+ assert.match(core,/ROUTER \+ BACKEND IDENTITY VERIFIED/);
+ assert.match(core,/ProfileHealthEvidence\.Matches/);
+ assert.match(core,/\/router\/status/);
  assert.doesNotMatch(core,/● ONLINE/);
  assert.match(core,/stateFile\.GetString/);
  assert.match(core,/generation/);

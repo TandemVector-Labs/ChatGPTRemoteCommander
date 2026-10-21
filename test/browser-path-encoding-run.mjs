@@ -12,6 +12,7 @@ try{
  const helperSource=new URL('tools/browser-control.mjs',srcRoot);
  const helperDest=path.join(toolsDir,'browser-control.mjs');
  await copyFile(helperSource,helperDest);
+ await copyFile(new URL('tools/browser-chromium-executable-policy.mjs',srcRoot),path.join(toolsDir,'browser-chromium-executable-policy.mjs'));
  await copyFile(new URL('src/browser-owned-processes.mjs',srcRoot),path.join(srcDir,'browser-owned-processes.mjs'));
 
  for(const rel of ['test/browser-helper-init-failure-run.mjs','test/browser-helper-lifecycle-run.mjs']){

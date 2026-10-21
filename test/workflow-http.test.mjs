@@ -56,3 +56,73 @@ test('disabled mode exposes no workflow tools and creates no memory database',as
   const r=await f.rpc('workflow_list');assert.equal(r.error.code,-32602);assert.equal(fs.existsSync(path.join(f.root,'memory')),false);
  }finally{await f.dispose();}
 });
+
+test('native MCP roadmap, owner placement, priority, pause, and restart preserve exact DAG',async()=>{
+ const f=await fixture(true);
+ try{
+  await f.start();
+  const created=await f.invoke('workflow_create',{id:'owner_roadmap',root:f.project,
+    goal:'Finish the accepted scoped project',
+    acceptance:['Evidence is verified'],
+    steps:[
+      {id:'a',title:'User route A',dependsOn:[]},
+      {id:'b',title:'User route B',dependsOn:[]},
+      {id:'finish',title:'Verify deliverable',dependsOn:['a','b']}
+    ]});
+  const map=await f.invoke('workflow_roadmap',{id:'owner_roadmap'});
+  assert.equal(map.revision,created.state.revision);
+  assert.deepEqual(map.steps.map(s=>s.id),['a','b','finish']);
+  assert.deepEqual(map.steps.at(-1).waitingFor,['a','b']);
+  assert.equal(map.nextStep,'a');
+  assert.equal(map.autorunEnabled,false);
+  const prioritized=await f.invoke('workflow_plan_prioritize',{
+    id:'owner_roadmap',expectedRevision:map.revision,
+    operationId:'owner-choice-b-a',orderedStepIds:['b','a','finish'],
+    reason:'Owner explicitly selects route B before independent route A'});
+  assert.equal(prioritized.action,'PRIORITIZED');
+  assert.equal(prioritized.state.steps[0].id,'b');
+  const current=await f.invoke('workflow_roadmap',{id:'owner_roadmap'});
+  assert.equal(current.nextStep,'b');
+  assert.equal(current.recordedPriorityChanges,1);
+  const proposal=await f.invoke('workflow_plan_insert',{
+    id:'owner_roadmap',expectedRevision:current.revision,
+    operationId:'owner-new-validation',targetStepId:'finish',
+    steps:[{id:'qa',title:'Verify new explicit user requirement'}],
+    reason:'Owner chose a new check before final evidence acceptance'});
+  assert.equal(proposal.cachedReceipt,false);
+  assert.deepEqual(proposal.state.steps.map(s=>s.id),['b','a','qa','finish']);
+  assert.deepEqual(proposal.state.steps.at(-1).dependsOn,['a','b','qa']);
+  await f.stop();await f.start();
+  const recovered=await f.invoke('workflow_roadmap',{id:'owner_roadmap'});
+  assert.equal(recovered.recordedPriorityChanges,1);
+  assert.equal(recovered.recordedPlanExtensions,1);
+  assert.deepEqual(recovered.steps.map(s=>s.id),['b','a','qa','finish']);
+  assert.equal(recovered.nextStep,'b');
+  const duplicate=await f.invoke('workflow_plan_insert',{
+    id:'owner_roadmap',expectedRevision:current.revision,
+    operationId:'owner-new-validation',targetStepId:'finish',
+    steps:[{id:'qa',title:'Verify new explicit user requirement'}],
+    reason:'Owner chose a new check before final evidence acceptance'});
+  assert.equal(duplicate.cachedReceipt,true);
+  const after=await f.invoke('workflow_roadmap',{id:'owner_roadmap'});
+  assert.equal(after.revision,recovered.revision);
+  const edit=await f.invoke('workflow_plan_edit',{
+    id:'owner_roadmap',expectedRevision:after.revision,
+    operationId:'owner-reword-qa-step',
+    stepId:'qa',title:'Owner-approved clarified QA criterion',
+    reason:'Owner changed a pending step description'});
+  assert.equal(edit.action,'EDITED');
+  const withEditedTitle=await f.invoke('workflow_roadmap',{id:'owner_roadmap'});
+  assert.equal(withEditedTitle.recordedPendingEdits,1);
+  assert.equal(withEditedTitle.steps.find(s=>s.id==='qa').title,'Owner-approved clarified QA criterion');
+  const control=await f.invoke('workflow_control',{
+    id:'owner_roadmap',expectedRevision:withEditedTitle.revision,
+    action:'pause',reason:'Owner wants to review the map before any action'});
+  const paused=await f.invoke('workflow_roadmap',{id:'owner_roadmap'});
+  assert.equal(paused.roadmapEditable,false);
+  assert.equal(paused.readyForNextStep,false);
+  assert.equal(control.state.control.intent,'PAUSED');
+  // Read-only calls never execute any approved or new step.
+  assert.ok(paused.steps.every(s=>s.status==='pending'));
+ }finally{await f.dispose();}
+});
