@@ -23,8 +23,19 @@ const defaultFile=()=>{
 export function createGuiInputIncidentStore({file=defaultFile(),now=()=>new Date().toISOString(),id=()=>randomUUID()}={}){
   if(!path.isAbsolute(file))throw fail('GUI_INCIDENT_PATH_INVALID');
   const folder=path.dirname(file);
+  // The incident directory is sensitive GUI state, not a shared scratch area.
+  // POSIX callers must not be able to supply a foreign or group-accessible
+  // directory as a writable/readable evidence store.
+  function assertPrivateFolder(info){
+    if(!info.isDirectory()||info.isSymbolicLink())throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');
+    if(process.platform!=='win32'&&typeof process.getuid==='function'&&
+       (info.uid!==process.getuid()||(info.mode&0o077)!==0))
+      throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');
+  }
   async function pending(){
     assertUnredirectedDirectoryAncestors(folder,'GUI_INCIDENT_STORAGE_UNAVAILABLE');
+    try{assertPrivateFolder(await fs.lstat(folder));}
+    catch(e){if(e.code==='ENOENT')return null;throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');}
     // A symlink to a FIFO could block a read-only open before file identity
     // is checked. Preflight the named entry; re-validate after open as well.
     let before;
@@ -80,7 +91,7 @@ export function createGuiInputIncidentStore({file=defaultFile(),now=()=>new Date
     try{
       await fs.mkdir(folder,{recursive:true,mode:0o700});
       const dir=await fs.lstat(folder);
-      if(!dir.isDirectory()||dir.isSymbolicLink())throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');
+      assertPrivateFolder(dir);
       const record={schema:SCHEMA,status:'PENDING_NATIVE_EFFECT',tool,id:id(),startedUtc:now()};
       const fd=await fs.open(file,'wx',0o600); // Exclusive across processes; never truncate an unresolved incident.
       try{
