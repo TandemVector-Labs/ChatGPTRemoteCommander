@@ -82,3 +82,31 @@ test('pinned HTTPS sends dummy key only to trusted certificate, rejects imperson
   fs.rmSync(other,{recursive:true,force:true});
  }
 });
+
+test('refuses linked certificate and linked parent before contacting any API listener',async t=>{
+ const root=temp(),outside=temp();
+ try{
+  fs.mkdirSync(path.join(root,'state'));
+  // A symlink to a valid PEM is not a trusted certificate from the configured
+  // operator state, even if the content parses as X.509.
+  const dummyPath=path.join(outside,'pem');
+  fs.writeFileSync(dummyPath,'X'.repeat(128));
+  const certPath=path.join(root,'state','https-cert.pem');
+  try{fs.symlinkSync(dummyPath,certPath,'file');}
+  catch(e){if(['EPERM','EACCES','ENOTSUP'].includes(e.code)){
+   t.skip('No permission to create a test symbolic link');return;
+  }throw e;}
+  await assert.rejects(pinnedSyncthingJson(root,'http://127.0.0.1:18384',KEY,
+   '/rest/system/status'),/certificate unavailable or unsafe/);
+  fs.unlinkSync(certPath);
+  fs.rmdirSync(path.join(root,'state'));
+  fs.mkdirSync(path.join(outside,'state'));
+  fs.symlinkSync(path.join(outside,'state'),path.join(root,'state'),
+   process.platform==='win32'?'junction':'dir');
+  await assert.rejects(pinnedSyncthingJson(root,'http://127.0.0.1:18384',KEY,
+   '/rest/system/status'),/certificate unavailable or unsafe/);
+ }finally{
+  fs.rmSync(root,{recursive:true,force:true});
+  fs.rmSync(outside,{recursive:true,force:true});
+ }
+});

@@ -50,13 +50,41 @@ export async function pinnedSyncthingJson(stateRoot,base,apiKey,endpoint,authent
  if(authenticated&&endpoint==='/rest/noauth/health')throw Error('Health must omit API key');
  const match=/^http:\/\/(127\.0\.0\.1|\[::1\]):([1-9][0-9]{0,4})$/.exec(base);
  if(!match||Number(match[2])>65535)throw Error('Syncthing REST endpoint not explicit loopback');
+ // Deny symlinks/junctions in all parent components, not only the PEM itself.
+ // This uses the same operator-selected stateRoot but does not trust linked
+ // ancestors or a final-file symlink as certificate provenance.
  const certPath=path.join(stateRoot,'state','https-cert.pem');
- let cert,st;
+ let cert;
  try{
-  st=fs.lstatSync(certPath);
-  if(!st.isFile()||st.isSymbolicLink()||st.nlink!==1||st.size<100||st.size>32768)
-    throw Error('unsafe certificate entry');
-  cert=fs.readFileSync(certPath);
+  if(typeof stateRoot!=='string'||!path.isAbsolute(stateRoot))
+    throw Error('certificate root must be absolute');
+  const dir=path.dirname(certPath),anchor=path.parse(dir).root;
+  let parent=anchor;
+  for(const component of path.relative(anchor,dir).split(path.sep)){
+   if(!component||component==='.')continue;
+   parent=path.join(parent,component);
+   const info=fs.lstatSync(parent);
+   if(info.isSymbolicLink()||!info.isDirectory())throw Error('unsafe certificate parent');
+  }
+  // O_NOFOLLOW protects the final component on systems that support it.
+  // O_NONBLOCK prevents a substituted pipe from indefinitely blocking open.
+  const flags=fs.constants.O_RDONLY|
+   (fs.constants.O_NOFOLLOW??0)|(fs.constants.O_NONBLOCK??0);
+  const descriptor=fs.openSync(certPath,flags);
+  try{
+   const opened=fs.fstatSync(descriptor),named=fs.lstatSync(certPath);
+   if(!opened.isFile()||!named.isFile()||named.isSymbolicLink()||
+      opened.nlink!==1||named.nlink!==1||
+      opened.size<100||opened.size>32768||
+      opened.dev!==named.dev||opened.ino!==named.ino)
+     throw Error('unsafe certificate identity');
+   cert=fs.readFileSync(descriptor);
+   const after=fs.fstatSync(descriptor),namedAfter=fs.lstatSync(certPath);
+   if(cert.length!==opened.size||after.dev!==opened.dev||after.ino!==opened.ino||
+      after.size!==opened.size||namedAfter.dev!==opened.dev||
+      namedAfter.ino!==opened.ino||namedAfter.isSymbolicLink())
+     throw Error('certificate replaced during read');
+  }finally{fs.closeSync(descriptor);}
  }catch{throw Error('Syncthing HTTPS identity certificate unavailable or unsafe');}
  let fingerprint;
  try{fingerprint=new X509Certificate(cert).fingerprint256;}
