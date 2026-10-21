@@ -57,7 +57,7 @@ test('MCP native transfer tools opt in, expose narrowly scoped schemas and execu
  const serverPort=await port();
  let child,stderr='';
  try{
-  await fs.mkdir(server);await fs.mkdir(input);await fs.mkdir(received);await fs.mkdir(pilot);
+  await fs.mkdir(server);await fs.mkdir(input);await fs.mkdir(received);await fs.mkdir(pilot,{mode:0o700});
   await fs.cp(new URL('../src/',import.meta.url),path.join(server,'src'),{recursive:true});
   await fs.copyFile(new URL('../tools/commander-transfer-mesh/pilot-cli.mjs',import.meta.url),path.join(pilot,'transfer.mjs'));
   await fs.copyFile(new URL('../tools/commander-transfer-mesh/durable-send.mjs',import.meta.url),path.join(pilot,'durable-send.mjs'));
