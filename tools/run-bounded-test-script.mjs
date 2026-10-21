@@ -188,6 +188,27 @@ export function isolateWindowsWorkflowPlanRegression(command) {
   return 'node --test --test-concurrency=1 '+file+' && '+parts.join(' && ');
 }
 
+/**
+ * Windows R157: preserve the strict async-operation HTTP latency and file-backed
+ * output assertions while giving the owned loopback test a clean process BEFORE
+ * the broad, stateful fixture batch. The previous exact-head hosted run recorded
+ * 476 PASS, 1 FAIL (async-http), 14 SKIP. No test is skipped, duplicated, or
+ * granted extra timeout; the scheduling change remains fail-closed.
+ */
+export function isolateWindowsAsyncHttpRegression(command){
+  if(typeof command!=='string'||!command)throw new Error('CI_ASYNC_HTTP_COMMAND_INVALID');
+  const file='test/async-http.test.mjs';
+  if(command.split(file).length-1!==1)throw new Error('CI_ASYNC_HTTP_CARDINALITY');
+  const parts=command.split(' && ');
+  const index=parts.findIndex(part=>part.startsWith('node --test --test-concurrency=1 ')&&part.includes(' '+file));
+  if(index<0)throw new Error('CI_ASYNC_HTTP_BATCH_NOT_FOUND');
+  const before=parts[index],after=before.replace(' '+file,'');
+  if(after===before||after.includes(file)||!after.startsWith('node --test --test-concurrency=1 test/'))
+    throw new Error('CI_ASYNC_HTTP_ISOLATION_INVALID');
+  parts[index]=after;
+  return 'node --test --test-concurrency=1 '+file+' && '+parts.join(' && ');
+}
+
 export function parseQualificationArgs(argv){
   const out={script:null,concurrency:null,prioritizeSensitive:false};
   for(let i=0;i<argv.length;i++){
@@ -220,6 +241,7 @@ function run(){
     command=isolateWindowsTransferMeshHttpRegression(command);
     command=isolateWindowsLeaseRegression(command);
     command=isolateWindowsWorkflowPlanRegression(command);
+    command=isolateWindowsAsyncHttpRegression(command);
   }
   if(process.platform==='win32'&&args.script==='test'&&process.env.RC_QUALIFICATION_RUN_ID)
     command=markIsolatedQualificationPhases(command);

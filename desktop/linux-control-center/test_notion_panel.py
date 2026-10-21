@@ -2,6 +2,7 @@
 import importlib.util
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -17,7 +18,7 @@ class NotionPanelTests(unittest.TestCase):
     def test_profile_argv_is_validated_and_credentials_are_never_arguments(self):
         for action in ("status", "verify", "connect", "disconnect"):
             args = panel.notion_command(action, "mmz-notion")
-            self.assertEqual(args[0], "node")
+            self.assertEqual(Path(args[0]).name, "node")
             self.assertEqual(args[-2:], ["--profile", "mmz-notion"])
             self.assertNotIn("ntn_", " ".join(args))
         self.assertIn("--confirm-disconnect", panel.notion_command("disconnect", "default"))
@@ -26,6 +27,21 @@ class NotionPanelTests(unittest.TestCase):
                 panel.notion_command("status", profile)
         with self.assertRaises(ValueError):
             panel.notion_command("raw-http", "default")
+
+    def test_standalone_gui_resolves_local_core_importer_and_managed_node(self):
+        with tempfile.TemporaryDirectory(prefix="rc-npanel-install-") as temp:
+            core = Path(temp) / "installed-core"
+            importer = core / "tools/notion-pat-import.mjs"
+            importer.parent.mkdir(parents=True)
+            importer.write_text("fixture")
+            runtime = core / ".runtime/node-current/bin/node"
+            runtime.parent.mkdir(parents=True)
+            runtime.write_text("fixture")
+            with patch.object(panel, "_CORE_ROOT", core):
+                args = panel.notion_command("status", "default")
+                self.assertEqual(Path(args[0]), runtime)
+                self.assertEqual(Path(args[1]), importer)
+                self.assertEqual(args[-3:], ["--status", "--profile", "default"])
 
     def test_safe_state_output_is_bounded_and_exact(self):
         class Result:
