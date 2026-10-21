@@ -47,6 +47,10 @@ Tests use a synthetic memory vault and mocked Notion API; they do **not** establ
 
 ## Verification evidence — 2026-10-21
 
+- Windows full check: operation 63debde8-b1ed-4727-909b-170deb6435e8 TIMED_OUT after 120 seconds while running the qualification wrapper (no failure shown in captured test segment). This is NOT a full-suite PASS; the hosted CI rerun remains the acceptance gate.
+- GitHub Draft PR #54 first CI attempt exposed a pre-existing HTTP fixture isolation constraint: server-v0.3.mjs had eagerly imported the new Notion module even when Notion was disabled, while test/agent-extensions-http.test.mjs copied a deliberately minimal server fixture without that optional module. The root fix switches Notion to config-gated dynamic import in the server, without changing those fixtures. Windows regression on agent-extensions-http, http-admission, Notion unit and Notion HTTP: 15/15 PASS. Full CI must be re-run on a new commit before integration.
+
+
 - Latest Windows selective qualification: 62/62 targeted tests PASS (Notion OAuth, authenticated call mocks, page-block pagination, native MCP exposure, legacy MCP contract, schema continuity, extension routing, and workflow roadmap). Exact command: `node --test test/notion-engine.test.mjs test/notion-core-http.test.mjs test/mcp-conformance.test.mjs test/schema-continuity-gate.test.mjs test/agent-extensions.test.mjs test/workflow-owner-roadmap.test.mjs`. `node --check` and `git diff --check` PASS on the same checkout.
 - Linux aliemad-Labtop (Node 22) executed the updated Notion unit suite from an isolated private `/tmp` staging directory. The Windows-to-Linux code and test SHA-256 matched: 11 passed, 1 Windows-only DPAPI test skipped, 0 failed. This is a portable unit test, **not** real Linux keyring login or integrated MCP server testing.
 - Tested OAuth state matching, one-live-session reentrancy, denied-consent listener teardown, token refresh/rotation, HTTPS redirect refusal, controlled 429/529 retries, no premature Retry-After override, disabled mutations, Windows DPAPI synthetic-token round trip, block cursor validation and truncation signals.

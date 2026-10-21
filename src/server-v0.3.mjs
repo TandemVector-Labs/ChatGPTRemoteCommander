@@ -20,7 +20,6 @@ import { createDeliveryTools } from './delivery-tools.mjs';
 import { compactToolSuccessPayload, serializeBoundedJsonResponse, synchronousCommandInput } from './retry-guard.mjs';
 import { MutationIdempotencyStore } from './mutation-idempotency.mjs';
 import { createAgentExtensionRegistry } from './agent-extensions.mjs';
-import { createNotionTools } from './notion-engine.mjs';
 import { createCoucouBridge } from './coucou-bridge.mjs';
 import { startBrowserCompanionMonitor } from './browser-companion-monitor.mjs';
 import {
@@ -75,7 +74,9 @@ const agentExtensionDirectories = configuredAgentExtensionDirectories.map(value 
   return path.isAbsolute(expanded) ? path.resolve(expanded) : path.resolve(projectDir, expanded);
 });
 const agentExtensions = createAgentExtensionRegistry({ directories: agentExtensionDirectories });
-const notionTools = createNotionTools({ config: config.notion ?? {}, profile: config.instance?.profile ?? 'default' });
+const notionTools = config.notion?.enabled === true
+  ? (await import('./notion-engine.mjs')).createNotionTools({ config: config.notion, profile: config.instance?.profile ?? 'default' })
+  : { definitions: [], execute: async () => { throw new Error('NOTION_DISABLED'); } };
 const transferMesh = config.transferMesh?.enabled === true && config.powerMode?.enabled === true
   ? (await import('./transfer-tools.mjs')).createTransferMeshTools({config})
   : { enabled: false, definitions: [], execute: async () => { throw new Error('TRANSFER_MESH_DISABLED'); } };
