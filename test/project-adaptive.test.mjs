@@ -162,7 +162,17 @@ if (['--crash-extension', '--crash-before-extension', '--crash-extension-extra']
     let pending;
     try {
       await f.create(); await f.start({ maxPlannerCalls: 3 });
-      pending = f.tick(); await entered.promise;
+      pending = f.tick();
+      // A premature terminal tick must fail with its status, not wait forever
+      // for a coordinator callback that can no longer be entered.
+      const first = await Promise.race([
+        entered.promise.then(() => ({ phase: 'coordinator-entered' })),
+        pending.then(
+          state => ({ phase: 'tick-ended-before-coordinator', status: state.status, code: state.lastCode }),
+          error => ({ phase: 'tick-error-before-coordinator', code: error?.code || error?.message || 'unknown' })
+        )
+      ]);
+      assert.equal(first.phase, 'coordinator-entered', JSON.stringify(first));
       assert.equal(f.plans, 3);
       assert.deepEqual(reservations, [3, 3]);
       assert.equal((await f.status()).plannerCalls, 3);
