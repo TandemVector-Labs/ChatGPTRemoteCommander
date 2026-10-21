@@ -49,3 +49,31 @@ test('BootRecovery installer surfaces structured probe failure and task last-res
     "$probe.PSObject.Properties.Name -contains 'error'"
   ]) assert.equal(t.includes(required),true,'missing '+required);
 });
+
+test('boot, handoff, and user-logon task launchers do not pin the versioned MSIX pwsh executable', () => {
+  const install=fs.readFileSync(path.join(repo,'enable-boot-recovery.ps1'),'utf8');
+  const launcher=fs.readFileSync(path.join(repo,'windows-pwsh-task-launcher.ps1'),'utf8');
+  const handoff=fs.readFileSync(path.join(repo,'handoff-user-session-windows.ps1'),'utf8');
+  assert.match(install,/BOOT_RECOVERY_STABLE_BOOTSTRAP_MISSING/u);
+  assert.match(install,/New-ScheduledTaskAction -Execute \$bootstrap -Argument \$bootArgs/u);
+  assert.match(install,/New-ScheduledTaskAction -Execute \$bootstrap -Argument \$handoffArgs/u);
+  assert.match(install,/-Mode UserSupervisor/u);
+  assert.match(launcher,/Get-AppxPackage -AllUsers -Name 'Microsoft.PowerShell'/u);
+  assert.match(launcher,/Sort-Object Version -Descending/u);
+  assert.match(launcher,/BOOT_LAUNCHER_PWSH7_NOT_FOUND/u);
+  assert.match(launcher,/USER_SUPERVISOR_DEFERRED_MACHINE_CREDENTIALS/u);
+  assert.match(install,/if\(Test-Path -LiteralPath \$target -PathType Leaf\)\{return \$target\}/u);
+  assert.match(handoff,/HANDOFF_DEFERRED_MACHINE_ONLY_CREDENTIALS/u);
+  assert.ok(handoff.indexOf('HANDOFF_DEFERRED_MACHINE_ONLY_CREDENTIALS') <
+            handoff.indexOf('Stop-ExactProcess $p'), 'machine-only credentials must stop handoff BEFORE any SYSTEM process termination');
+});
+
+test('Windows stable PowerShell bootstrap resolves PowerShell 7 without operating on live tasks', {skip:process.platform!=='win32'}, () => {
+  const script=path.join(repo,'windows-pwsh-task-launcher.ps1');
+  const result=spawnSync('powershell.exe',[
+    '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',script,
+    '-Mode','Boot','-SelfTest'
+  ],{encoding:'utf8',timeout:15000,windowsHide:true});
+  assert.equal(result.status,0,result.stderr||result.stdout);
+  assert.match(result.stdout,/BOOT_LAUNCHER_SELFTEST_PASS mode=Boot/u);
+});
