@@ -150,6 +150,22 @@ test('read-only status and screenshot do not create a phantom incident',()=>ownF
  assert.equal(await store.pending(),null);
  await assert.rejects(fs.lstat(file),{code:'ENOENT'});
 }));
+test('POSIX evidence refuses a group-readable or foreign incident directory',t=>ownFile(async file=>{
+  if(process.platform==='win32'||typeof process.getuid!=='function'){
+    t.skip('POSIX private directory ownership contract');return;
+  }
+  const folder=path.dirname(file),store=createGuiInputIncidentStore({file});
+  await fs.chmod(folder,0o755);
+  try{
+    await assert.rejects(store.pending(),/GUI_INCIDENT_STORAGE_UNAVAILABLE/);
+    await assert.rejects(store.begin('gui_mouse_click'),/GUI_INCIDENT_STORAGE_UNAVAILABLE/);
+    await assert.rejects(fs.access(file),{code:'ENOENT'});
+  }finally{await fs.chmod(folder,0o700);}
+  const token=await store.begin('gui_mouse_click');
+  assert.equal((await store.pending()).id,token.id);
+  await store.resolve(token);
+}));
+
 test('incident file mode is private on POSIX hosts',()=>ownFile(async file=>{
  const s=createGuiInputIncidentStore({file});
  const receipt=await s.begin('gui_key_press');
