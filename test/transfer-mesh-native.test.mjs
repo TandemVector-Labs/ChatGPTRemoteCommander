@@ -74,7 +74,7 @@ test('linked lock fails closed and verified stale receive lock is safely reclaim
   fs.writeFileSync(lock,JSON.stringify({
    schema:'ctmesh-receive-lock-v1',host:os.hostname(),peer:'PC',
    id,sha256:manifest.sha256,pid:2147483647
-  })+'\\n');
+  })+'\n');
   const completed=await b.tools.execute('transfer_mesh_receive',{peer:'PC',id,dest:b.dest});
   assert.equal(completed.status,'DELIVERED_HASH_VERIFIED');
   assert.equal(fs.readFileSync(path.join(b.dest,'stale-lock-source.dat'),'utf8'),'safe-stale-recovery-fixture');
