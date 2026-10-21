@@ -154,6 +154,8 @@ function checkIncoming(peer,self,id){
  return {m,p};
 }
 try{
+ if(process.env.COMMANDER_TRANSFER_HOME && !path.isAbsolute(process.env.COMMANDER_TRANSFER_HOME))
+  throw Error('CTMESH_MANAGED_PATH_UNSAFE'); // Explicit relative roots must not be rebased onto an arbitrary cwd.
  assertUnredirectedDirectoryAncestors(root,'CTMESH_MANAGED_PATH_UNSAFE');
  assertManagedEntry(path.join(root,'node.json'),false);
  const self=JSON.parse(fs.readFileSync(path.join(root,'node.json'),'utf8')).alias;

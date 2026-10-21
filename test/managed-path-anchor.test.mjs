@@ -74,6 +74,19 @@ test('Windows operator roots deny network and device namespace paths without I/O
  }
 });
 
+test('standalone Pilot and Durable refuse explicit relative operator-state roots',()=>{
+ const selected=['relative-operator-root'];
+ if(process.platform==='win32')selected.push('C:drive-relative-root');
+ for(const root of selected){
+  const p=call(pilot,root,'info');
+  assert.notEqual(p.status,0);
+  assert.match(p.stderr,/CTMESH_MANAGED_PATH_UNSAFE/);
+  const d=call(durable,root,'job-status','--peer','Linux','--id','probe-rel');
+  assert.notEqual(d.status,0);
+  assert.match(d.stderr,/TRANSFER_MANAGED_PATH_UNSAFE/);
+  assert.ok(!d.stdout.includes('PUBLISHED'));
+ }
+});
 test('Doctor rejects relative operator root before touching files',async()=>{
  const result=spawnSync(process.execPath,[doctor],{encoding:'utf8',timeout:5000,
    env:{...process.env,COMMANDER_TRANSFER_HOME:'relative-operator-root'}});
