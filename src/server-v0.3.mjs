@@ -77,6 +77,9 @@ const agentExtensions = createAgentExtensionRegistry({ directories: agentExtensi
 const notionTools = config.notion?.enabled === true
   ? (await import('./notion-engine.mjs')).createNotionTools({ config: config.notion, profile: config.instance?.profile ?? 'default' })
   : { definitions: [], execute: async () => { throw new Error('NOTION_DISABLED'); } };
+const notionMcpTools = config.notionMcp?.enabled === true
+  ? (await import('./notion-mcp-engine.mjs')).createNotionMcpTools({ config: config.notionMcp, profile: config.instance?.profile ?? 'default' })
+  : { definitions: [], execute: async () => { throw new Error('NOTION_MCP_DISABLED'); } };
 const transferMesh = config.transferMesh?.enabled === true && config.powerMode?.enabled === true
   ? (await import('./transfer-tools.mjs')).createTransferMeshTools({config})
   : { enabled: false, definitions: [], execute: async () => { throw new Error('TRANSFER_MESH_DISABLED'); } };
@@ -215,6 +218,7 @@ const TOOLS = [
   ...deliveryTools.definitions,
   ...agentExtensions.definitions,
   ...(config.notion?.enabled === true ? notionTools.definitions : []),
+  ...notionMcpTools.definitions,
   ...transferMesh.definitions,
   ...powerToolDefinitions,
   ...(BROWSER_ENABLED ? browserToolDefinitions : []),
@@ -357,7 +361,7 @@ async function executeTool(name, args, executionContext = {}) {
   if (!toolDefinition(name)) throw protocolFailure(200, -32602, 'Unknown tool');
   // OAuth state is a short-lived process lease, not a durable mutation receipt: replaying a
   // persisted authorization URL after restart would point to a nonexistent callback server.
-  if (name === 'notion_connect_start') return executeToolEffect(name, args);
+  if (name === 'notion_connect_start' || name === 'notion_mcp_connect_start') return executeToolEffect(name, args);
   if (AUTO_DEFERRED_MUTATIONS.has(name)) {
     const { requestId, continuation, ...effectArgs } = args ?? {};
     return asyncOperationTools.execute('operation_start', {
@@ -446,6 +450,7 @@ async function executeToolEffect(name, args) {
   if (name.startsWith('operation_')) return asyncOperationTools.execute(name, args);
   if (name.startsWith('delivery_')) return deliveryTools.execute(name, args);
   if (name.startsWith('agent_extension_')) return agentExtensions.execute(name, args);
+  if (name.startsWith('notion_mcp_')) return notionMcpTools.execute(name, args);
   if (name.startsWith('notion_')) return notionTools.execute(name, args);
   if (name.startsWith('transfer_mesh_')) return transferMesh.execute(name, args);
   if (name.startsWith('workflow_')) return workflowTools.execute(name, args);

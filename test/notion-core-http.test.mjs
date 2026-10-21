@@ -38,6 +38,7 @@ test('native Notion tools are discoverable by real Commander MCP route and fail 
   config.asyncOperations = { enabled: false };
   config.powerMode = { enabled: false, fullFilesystem: false };
   config.durableWorkflows = { enabled: false };
+  config.notionMcp = { enabled: true, redirectUri: 'http://127.0.0.1:' + callbackPort + '/notion/mcp/callback' };
   config.notion = {
     enabled: true,
     clientId: '123e4567-e89b-42d3-a456-426614174000',
@@ -61,7 +62,7 @@ test('native Notion tools are discoverable by real Commander MCP route and fail 
     }
     assert.equal(ready, true, 'Commander did not start on isolated localhost port');
     const tools = listing.result.tools.map(item => item.name);
-    for (const name of ['notion_status', 'notion_connect_start', 'notion_verify', 'notion_search', 'notion_get_page', 'notion_list_block_children', 'notion_create_page']) {
+    for (const name of ['notion_status', 'notion_connect_start', 'notion_verify', 'notion_search', 'notion_get_page', 'notion_list_block_children', 'notion_create_page', 'notion_mcp_status', 'notion_mcp_connect_start', 'notion_mcp_verify']) {
       assert.ok(tools.includes(name), 'missing tool ' + name);
     }
     const response = await rpc(port, 'tools/call', { name: 'notion_status', arguments: {} });
@@ -72,6 +73,11 @@ test('native Notion tools are discoverable by real Commander MCP route and fail 
     assert.equal(state.connected, false);
     assert.equal(state.oauthConfigured, false);
     assert.equal(JSON.stringify(state).includes('access_token'), false);
+    const mcpStatus = await rpc(port, 'tools/call', { name: 'notion_mcp_status', arguments: {} });
+    assert.equal(mcpStatus.result.isError ?? false, false);
+    const mcpState = JSON.parse(mcpStatus.result.content.find(item => item.type === 'text').text);
+    assert.equal(mcpState.enabled, true);
+    assert.equal(JSON.stringify(mcpState).includes('access_token'), false);
     const failedMutation = await rpc(port, 'tools/call', { name: 'notion_create_page',
       arguments: { parentPageId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', title: 'Forbidden' } });
     assert.equal(failedMutation.result.isError, true);
