@@ -39,21 +39,27 @@ class LocalControlCenterPackageTests(unittest.TestCase):
             installer.stage(self.source, dest, self.target)
 
     def test_owner_home_environment_cannot_escape_or_follow_symlinks(self):
-        private = self.root / "safe-xdg"
-        private.mkdir(mode=0o700)
+        fixed = self.root / ".local" / "share"
+        fixed.parent.mkdir(mode=0o700)
+        fixed.mkdir(mode=0o700)
+        custom = self.root / "safe-xdg"
+        custom.mkdir(mode=0o700)
         with patch.object(installer, "_system_owner_home", return_value=self.root):
-            with patch.dict(os.environ, {"XDG_DATA_HOME": str(private)}):
-                self.assertEqual(installer._validated_xdg_data_home(), private)
+            with patch.dict(os.environ, {"XDG_DATA_HOME": str(fixed)}):
+                self.assertEqual(installer._validated_xdg_data_home(), fixed)
+            with patch.dict(os.environ, {"XDG_DATA_HOME": str(custom)}):
+                with self.assertRaisesRegex(RuntimeError, "UNSUPPORTED_XDG_DATA_HOME"):
+                    installer._validated_xdg_data_home()
             with patch.dict(os.environ, {"XDG_DATA_HOME": "/etc"}):
-                with self.assertRaisesRegex(RuntimeError, "UNSAFE_XDG_DATA_HOME"):
+                with self.assertRaisesRegex(RuntimeError, "UNSUPPORTED_XDG_DATA_HOME"):
                     installer._validated_xdg_data_home()
             with patch.dict(os.environ, {"XDG_DATA_HOME": "relative/hijack"}):
                 with self.assertRaisesRegex(RuntimeError, "XDG_DATA_HOME_MUST_BE_ABSOLUTE"):
                     installer._validated_xdg_data_home()
             link = self.root / "link"
-            link.symlink_to(private, target_is_directory=True)
+            link.symlink_to(fixed, target_is_directory=True)
             with patch.dict(os.environ, {"XDG_DATA_HOME": str(link)}):
-                with self.assertRaisesRegex(RuntimeError, "UNSAFE_XDG_DATA_HOME"):
+                with self.assertRaisesRegex(RuntimeError, "UNSUPPORTED_XDG_DATA_HOME"):
                     installer._validated_xdg_data_home()
 
     def test_stage_path_rejects_escaping_or_symlinked_parents(self):

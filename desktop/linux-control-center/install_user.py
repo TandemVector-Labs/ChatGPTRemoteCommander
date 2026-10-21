@@ -49,15 +49,20 @@ def _validated_xdg_data_home() -> Path:
     """
     owner = _system_owner_home()
     override = os.environ.get("XDG_DATA_HOME")
+    # Stable updater packages target the fixed account-owned installation root.
+    # An arbitrary XDG_DATA_HOME (even beneath the home directory) changes the
+    # identity of the production application, inviting unreviewed path writes.
+    # Fail closed rather than silently installing into a different location.
+    fixed = owner / ".local" / "share"
     if not override:
-        return owner / ".local" / "share"
+        return fixed
     if not os.path.isabs(override):
         raise RuntimeError("XDG_DATA_HOME_MUST_BE_ABSOLUTE")
     requested = Path(os.path.abspath(override))
     real = Path(os.path.realpath(override))
-    if requested != real or not real.is_relative_to(owner) or real == owner:
-        raise RuntimeError("UNSAFE_XDG_DATA_HOME")
-    return real
+    if requested != real or real != fixed:
+        raise RuntimeError("UNSUPPORTED_XDG_DATA_HOME")
+    return fixed
 
 
 def _bounded_stage_target(requested: Path) -> Path:
