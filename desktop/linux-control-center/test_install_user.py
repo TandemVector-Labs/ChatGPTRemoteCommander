@@ -109,6 +109,22 @@ class LocalControlCenterPackageTests(unittest.TestCase):
         self.assertEqual(len(list(self.home.glob(".rc-cc-backup-*"))), 0)
         self.assertEqual(len(list(self.home.glob(".rc-cc-stage-*"))), 0)
 
+    def test_reserved_stage_and_random_launcher_ignore_predictable_stale_symlink(self):
+        # Earlier release candidates used a public predictable ".staged" path.
+        # It must no longer act as a launcher write target or a blocker.
+        self.launcher.parent.mkdir(mode=0o700)
+        stale = self.launcher.parent / (installer.DESKTOP_NAME + ".staged")
+        unrelated = self.root / "unrelated-private-file"
+        unrelated.write_text("retain")
+        stale.symlink_to(unrelated)
+        with patch.object(Path, "rmdir", side_effect=AssertionError("reservation was released")):
+            receipt = installer.install(source=self.source, data_home=self.home)
+        self.assertEqual(receipt, "LINUX_CONTROL_CENTER_INSTALL_PASS")
+        self.assertEqual(unrelated.read_text(), "retain")
+        self.assertTrue(stale.is_symlink())
+        self.assertEqual(len(list(self.launcher.parent.glob(".rc-cc-launcher-*"))), 0)
+        self.assertEqual(len(list(self.home.glob(".rc-cc-stage-*"))), 0)
+
     def test_existing_user_data_kept_as_backup(self):
         self.target.mkdir(mode=0o700)
         (self.target / "install-receipt.json").write_text('{"user":"historical"}')

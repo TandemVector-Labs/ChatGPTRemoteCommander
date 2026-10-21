@@ -152,36 +152,39 @@ def install(*, source: Path, data_home: Path) -> str:
         for name in FILES
     ) and launcher.read_text(encoding="utf-8") == desktop_entry(target):
         return "LINUX_CONTROL_CENTER_ALREADY_CURRENT"
+    # Keep the randomly allocated directory reserved while populating it.
+    # A rmdir + recreate sequence offers a name-replacement race.
     stage_path = Path(tempfile.mkdtemp(prefix=".rc-cc-stage-", dir=data_home))
-    stage_path.rmdir()
-    stage(source, stage_path, target)
+    stage(source, stage_path, target, reserved=True)
     backup = None
-    launcher_temp = launcher_dir / (DESKTOP_NAME + ".staged")
-    if launcher_temp.exists() or launcher_temp.is_symlink():
-        shutil.rmtree(stage_path)
-        raise RuntimeError("DESKTOP_ENTRY_STAGING_CONFLICT")
+    launcher_temp = None
     try:
-        launcher_temp.write_text((stage_path / DESKTOP_NAME).read_text(encoding="utf-8"), encoding="utf-8")
+        # Create exclusively with an unguessable name; no predictable ".staged"
+        # file that another process can replace with a symlink.
+        fd, tmpname = tempfile.mkstemp(prefix=".rc-cc-launcher-", dir=launcher_dir)
+        launcher_temp = Path(tmpname)
+        with os.fdopen(fd, "w", encoding="utf-8") as outf:
+            outf.write((stage_path / DESKTOP_NAME).read_text(encoding="utf-8"))
         launcher_temp.chmod(0o600)
         if target.exists():
+            # Linux atomically renames a directory over an existing empty
+            # directory. Keep the destination reserved instead of rmdir.
             backup = Path(tempfile.mkdtemp(prefix=".rc-cc-backup-", dir=data_home))
-            backup.rmdir()
             target.rename(backup)
         stage_path.rename(target)
         os.replace(launcher_temp, launcher)
     except BaseException:
-        launcher_temp.unlink(missing_ok=True)
+        if launcher_temp is not None:
+            launcher_temp.unlink(missing_ok=True)
         if backup is not None and backup.exists():
             if target.exists():
                 # Restore previous GUI when entry replacement failed.
                 failed = Path(tempfile.mkdtemp(prefix=".rc-cc-failed-", dir=data_home))
-                failed.rmdir()
                 target.rename(failed)
             backup.rename(target)
         elif target.exists():
             # A new installation failed before its launcher could be installed.
             failed = Path(tempfile.mkdtemp(prefix=".rc-cc-failed-", dir=data_home))
-            failed.rmdir()
             target.rename(failed)
         if stage_path.exists():
             shutil.rmtree(stage_path)
