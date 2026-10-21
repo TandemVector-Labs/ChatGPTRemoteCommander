@@ -48,6 +48,40 @@ test('native adapter sends, reads status and receives safely without overwrite',
   await assert.rejects(b.tools.execute('transfer_mesh_receive',{peer:'PC',id:'native-001',dest:b.dest}),/Destination exists/);
  });
 });
+test('linked lock fails closed and verified stale receive lock is safely reclaimed',async()=>{
+ await fixture(async(a,b)=>{
+  const id='native-stale-001',source=path.join(a.src,'stale-lock-source.dat');
+  fs.writeFileSync(source,'safe-stale-recovery-fixture');
+  const sent=await a.tools.execute('transfer_mesh_send',{peer:'Linux',path:source,id});
+  assert.equal(sent.status,'QUEUED');
+  const incoming=path.join(b.root,'pairs','PC','transfers',id);
+  fs.mkdirSync(path.dirname(incoming),{recursive:true});
+  fs.cpSync(path.join(a.root,'pairs','Linux','transfers',id),incoming,{recursive:true});
+  const manifest=JSON.parse(fs.readFileSync(path.join(incoming,'manifest.json'),'utf8'));
+  const lock=path.join(b.dest,'.ctmesh-'+id+'.lock');
+  const unrelated=path.join(b.root,'unrelated-lock.json');
+  fs.writeFileSync(unrelated,'untrusted and must not be read');
+  fs.linkSync(unrelated,lock);
+  await assert.rejects(
+   b.tools.execute('transfer_mesh_receive',{peer:'PC',id,dest:b.dest}),
+   /Untrusted receive lock/
+  );
+  assert.equal(fs.readFileSync(unrelated,'utf8'),'untrusted and must not be read');
+  assert.equal(fs.existsSync(path.join(b.dest,'stale-lock-source.dat')),false);
+  fs.unlinkSync(lock);
+  // The lock belongs to this exact received item, but the recorded owner PID
+  // is absent. A verified regular file may be reclaimed without overwriting.
+  fs.writeFileSync(lock,JSON.stringify({
+   schema:'ctmesh-receive-lock-v1',host:os.hostname(),peer:'PC',
+   id,sha256:manifest.sha256,pid:2147483647
+  })+'\\n');
+  const completed=await b.tools.execute('transfer_mesh_receive',{peer:'PC',id,dest:b.dest});
+  assert.equal(completed.status,'DELIVERED_HASH_VERIFIED');
+  assert.equal(fs.readFileSync(path.join(b.dest,'stale-lock-source.dat'),'utf8'),'safe-stale-recovery-fixture');
+  assert.equal(fs.existsSync(lock),false);
+ });
+});
+
 test('root allowlists deny unauthorized paths and other peers',async()=>{
  await fixture(async(a)=>{
   const file=path.join(a.root,'other.dat');
