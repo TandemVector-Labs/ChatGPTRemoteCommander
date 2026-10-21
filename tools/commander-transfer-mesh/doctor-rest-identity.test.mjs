@@ -117,7 +117,8 @@ test('doctor refuses linked identity or configuration before REST key access',as
  const root=path.join(outer,'operator'),external=path.join(outer,'external');
  const validNode=JSON.stringify({alias:'Linux',deviceID:'6YUIRAM-GDPWPT4-XXX2DD7-K2M7G23-F246XXK-ENQQ3G2-RHIQI2Y-TDRJGAB'});
  const validXml='<configuration><gui enabled="true"><address>127.0.0.1:8384</address><apikey>synthetic-test-not-secret</apikey></gui></configuration>';
- const doctor=new URL('./doctor.mjs',import.meta.url);
+ const {fileURLToPath}=await import('node:url');
+ const doctor=fileURLToPath(new URL('./doctor.mjs',import.meta.url));
  const run=()=>spawnSync(process.execPath,[doctor],{
   encoding:'utf8',timeout:6000,env:{...process.env,COMMANDER_TRANSFER_HOME:root}
  });
