@@ -21,7 +21,8 @@ const patterns = [
 // The source commit below contains one demonstrably synthetic bearer header in a
 // Notion OAuth fixture. Preserve the committed evidence; do not rewrite published Git
 // history or silence the bearer rule globally. Scope the exception to one exact byte
-// sequence, one test path, and its introducing commit.
+// sequence and one test path. Original commit is recorded only as provenance;
+// shallow release clones can present the same file as a different root commit.
 const FIXTURE_PATH = 'test/notion-mcp-engine.test.mjs';
 const FIXTURE_ORIGIN = '7b28ae4ffbfc3094c70647fd1ad8c4c491ba7bf5';
 const FIXTURE_BEARER = 'Bearer ' + 'FIXTURE_PRIVATE_ACCESS';
@@ -41,7 +42,7 @@ function makeHistoryScanner(rules) {
     if (commitMatch) { commit = commitMatch[1]; diffPath = null; }
     const diffMatch = /^diff --git a\/(.+) b\/(.+)\r?\n?$/.exec(line);
     if (diffMatch) diffPath = diffMatch[2].trim();
-    const acceptedSynthetic = commit === FIXTURE_ORIGIN && diffPath === FIXTURE_PATH;
+    const acceptedSynthetic = diffPath === FIXTURE_PATH;
     const sample = preceding + (acceptedSynthetic ? scrubFixture(line) : line);
     for (const [name, pattern] of rules) {
       pattern.lastIndex = 0;
@@ -86,6 +87,18 @@ strictProbe.write('commit ' + FIXTURE_ORIGIN + '\n');
 strictProbe.write('diff --git a/' + FIXTURE_PATH + ' b/' + FIXTURE_PATH + '\n');
 strictProbe.write('+Authorization: Bearer ' + 'notasyntheticfixturelongtokenz12345' + '\n');
 if (!strictProbe.finish().has('Bearer token literal')) throw new Error('SECURITY_AUDIT_SYNTHETIC_EXCEPTION_OVERBROAD');
+// Shallow release clones reassign the introducing file diff to their shallow HEAD.
+// The exact fixture remains exempt there; a different file never gets this exemption.
+const shallowProbe = makeHistoryScanner(patterns);
+shallowProbe.write('commit ' + 'f'.repeat(40) + '\n');
+shallowProbe.write('diff --git a/' + FIXTURE_PATH + ' b/' + FIXTURE_PATH + '\n');
+shallowProbe.write('+Authorization: ' + FIXTURE_BEARER + '\n');
+if (shallowProbe.finish().has('Bearer token literal')) throw new Error('SECURITY_AUDIT_SHALLOW_FIXTURE_FAILED');
+const foreignFileProbe = makeHistoryScanner(patterns);
+foreignFileProbe.write('commit ' + FIXTURE_ORIGIN + '\n');
+foreignFileProbe.write('diff --git a/src/other.mjs b/src/other.mjs\n');
+foreignFileProbe.write('+Authorization: ' + FIXTURE_BEARER + '\n');
+if (!foreignFileProbe.finish().has('Bearer token literal')) throw new Error('SECURITY_AUDIT_CROSS_FILE_EXCEPTION_OVERBROAD');
 async function scanCompleteHistory() {
   const args = ['log', '--all', '-p', '--no-color', '--no-ext-diff'];
   const child = spawn('git', args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
