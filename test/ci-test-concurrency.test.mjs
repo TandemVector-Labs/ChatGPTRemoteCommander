@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { boundNodeTestConcurrency, parseQualificationArgs, prioritizeSensitiveQualificationCommands, isolateWindowsLeaseRegression, isolateWindowsTimingSensitiveRegressions, isolateWindowsProcessTreeRegression, isolateWindowsAgentHttpRegression, isolateWindowsTransferMeshHttpRegression, isolateWindowsWorkflowPlanRegression, markIsolatedQualificationPhases } from '../tools/run-bounded-test-script.mjs';
+import { boundNodeTestConcurrency, parseQualificationArgs, prioritizeSensitiveQualificationCommands, isolateWindowsLeaseRegression, isolateWindowsTimingSensitiveRegressions, isolateWindowsProcessTreeRegression, isolateWindowsAgentHttpRegression, isolateWindowsTransferMeshHttpRegression, isolateWindowsWorkflowPlanRegression, isolateWindowsAsyncHttpRegression, markIsolatedQualificationPhases } from '../tools/run-bounded-test-script.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const read=rel=>fs.readFileSync(path.join(root,rel),'utf8');
@@ -369,6 +369,30 @@ test('R173 V025W diagnostic uses distinct scope, hashed synthetic spec and artif
         'only sanitized diagnostic receipt may be uploaded: '+wf);
     }
   }finally{fs.rmSync(tmp,{recursive:true,force:true});}
+});
+
+test('Windows R157 isolates exact async HTTP operation fixture without widening its strict response budget',()=>{
+  const pkg=JSON.parse(read('package.json'));
+  const initial=prioritizeSensitiveQualificationCommands(boundNodeTestConcurrency(pkg.scripts.test,1).command);
+  const staged=isolateWindowsWorkflowPlanRegression(
+    isolateWindowsLeaseRegression(
+      isolateWindowsTransferMeshHttpRegression(
+        isolateWindowsProcessTreeRegression(
+          isolateWindowsTimingSensitiveRegressions(
+            isolateWindowsAgentHttpRegression(initial))))));
+  const file='test/async-http.test.mjs';
+  const leader='node --test --test-concurrency=1 '+file+' && ';
+  const command=isolateWindowsAsyncHttpRegression(staged);
+  assert.equal(command,leader+staged.replace(' '+file,''),'only split the existing test file from its original batch');
+  assert.equal(command.split(file).length-1,1,'the async fixture runs exactly once');
+  assert.throws(()=>isolateWindowsAsyncHttpRegression(staged.replace(' '+file,'')),/CI_ASYNC_HTTP_CARDINALITY/);
+  assert.throws(()=>isolateWindowsAsyncHttpRegression(leader+staged),/CI_ASYNC_HTTP_CARDINALITY/);
+  assert.ok(markIsolatedQualificationPhases(command).length < 7500,'R157 command remains within Windows shell limit');
+  assert.ok(read('tools/run-bounded-test-script.mjs').includes('command=isolateWindowsAsyncHttpRegression(command);'));
+  const asyncTest=read(file);
+  assert.ok(asyncTest.includes('assert.ok(elapsed < 1000'),'keep strict HTTP response budget');
+  assert.ok(asyncTest.includes("assert.equal(final.status, 'SUCCEEDED')"),'preserve durable lifecycle acceptance');
+  assert.ok(asyncTest.includes('assert.equal(largeResult.result.stdout.truncated, true)'),'preserve file-backed output proof');
 });
 
 test('Windows runs exact workflow-plan races before loaded CI; strict adaptive team deadline unchanged',()=>{
