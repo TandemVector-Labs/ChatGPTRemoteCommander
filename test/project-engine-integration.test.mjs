@@ -159,12 +159,19 @@ if (process.argv[2] === '--claim-worker') {
   });
 
   test('cancel during an effect preserves its root lease and cancellation after the receipt', { timeout: 6000 }, async () => {
-    const entered = deferred(), release = deferred();
-    const fixture = makeFixture({ planner: async () => proposal('write_text', { path: 'result.txt', content: 'verified output' }), afterDispatch: async () => { entered.resolve(); await release.promise; } });
-    let pending;
+    const release = deferred();
+    let effectEntered = false;
+    const fixture = makeFixture({ planner: async () => proposal('write_text', { path: 'result.txt', content: 'verified output' }), afterDispatch: async () => { effectEntered = true; await release.promise; } });
+    let pending, tickSettled = false;
     try {
       await fixture.create(); await fixture.create('other'); await fixture.start();
-      pending = fixture.tick(); await entered.promise;
+      pending = fixture.tick();
+      // Never await an unsignalled effect gate without a bounded failure.
+      void pending.finally(() => { tickSettled = true; }).catch(() => {});
+      await until(() => {
+        if (tickSettled && !effectEntered) assert.fail('PROJECT_EFFECT_NOT_DISPATCHED');
+        return effectEntered;
+      }, 3500);
       const running = await fixture.state();
       await fixture.api.execute('workflow_control', { id: 'project', expectedRevision: running.revision, action: 'cancel', reason: 'User cancelled during the pending effect receipt' });
       const other = await fixture.state('other');
@@ -183,7 +190,11 @@ if (process.argv[2] === '--claim-worker') {
       assert.equal(operations.length, 1);
       assert.equal(operations[0].status, 'EXECUTED');
       assert.equal((await fixture.tick()).skipped, true);
-    } finally { release.resolve(); await pending; await fixture.dispose(); }
+    } finally {
+      release.resolve();
+      try { if (pending) await pending; }
+      finally { await fixture.dispose(); }
+    }
   });
 
   test('nested evidence paths finalize with platform separators and independently verified hashes', async () => {

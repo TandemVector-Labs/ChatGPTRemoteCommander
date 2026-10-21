@@ -17,6 +17,7 @@ $sourceSha=$null
 $sourceBytes=0
 $status='LOG_MISSING'
 $count=0
+$lastKnownGate=$null
 if(Test-Path -LiteralPath $logRoot -PathType Container){
   $rootAttributes=(Get-Item -LiteralPath $logRoot -Force).Attributes
   if(($rootAttributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'R470_LOG_ROOT_REPARSE_REFUSED'}
@@ -39,8 +40,18 @@ if(Test-Path -LiteralPath $logRoot -PathType Container){
           $label=[regex]::Replace($label,'[^A-Za-z0-9 _().:/+\-]','?')
           if($label.Length -gt 112){$label=$label.Substring(0,112)}
           if($failures.Count -lt 24){$failures+=([pscustomobject]@{index=$number;publicTestName=$label})}
-        } elseif($line -match '^\s*#\s*(tests|pass|fail|cancelled|skipped|todo|duration_ms)\s+([0-9]+(?:\.[0-9]+)?)\s*$') {
+        } elseif($line -match '^\s*[✖×]\s+(.+?)(?:\s+\([0-9]+(?:\.[0-9]+)?ms\))?\s*$') {
+          # Native Node spec reporter uses ✖ rather than TAP "not ok".
+          $label=[string]$Matches[1]
+          if($label -match '(?i)bearer|password|secret|cookie|token|private.?key|authorization|api.?key'){ $label='REDACTED_TEST_NAME' }
+          $label=[regex]::Replace($label,'[^A-Za-z0-9 _().:/+\-]','?')
+          if($label.Length -gt 112){$label=$label.Substring(0,112)}
+          if($failures.Count -lt 24){$failures+=([pscustomobject]@{index=$null;publicTestName=$label})}
+        } elseif($line -match '^\s*(?:#|ℹ)\s*(tests|pass|fail|cancelled|skipped|todo|duration_ms)\s+([0-9]+(?:\.[0-9]+)?)\s*$') {
           $totals[[string]$Matches[1]]=[string]$Matches[2]
+        } elseif($line -match '^(SMOKE_V03_PASS|LEGACY_POWER_COMPAT_V03_PASS|POWER_SMOKE_V03_PASS|CONCURRENCY_SMOKE_PASS|FS_SAFETY_PASS|GUI_CONTROL_CHECK_PASS|LINUX_GUI_CONTRACT_PASS|HEADLESS_PROCESS_LAUNCH_POLICY_PASS|WINDOWS_RUNTIME_CONTRACT_PASS|SOURCE_INTEGRITY_PASS)(?:\s|$)') {
+          # Fixed public marker allowlist; no arbitrary log content persisted.
+          $lastKnownGate=[string]$Matches[1]
         } elseif($line -match 'failureType:.*?(testTimeoutFailure|assertionFailure|uncaughtException|testCodeFailure|hookFailed|subtestsFailed)'){
           if($types.Count -lt 20){$types+=([string]$Matches[1])}
         }
@@ -52,7 +63,7 @@ $report=[ordered]@{
   schema=1;revision='R470';status=$status;commit=$ExpectedCommit
   scope='READ_ONLY_HOSTED_NOPROMOTE_QUALIFICATION_FAILURE'
   matchingLogCount=$count;sourceBytes=$sourceBytes;sourceSha256=$sourceSha
-  failureTests=$failures;failureTypes=$types;tapCounts=$totals
+  failureTests=$failures;failureTypes=$types;tapCounts=$totals;lastKnownGate=$lastKnownGate
   rawLogIncluded=$false;secretsIncluded=$false;absolutePathsIncluded=$false
   stablePromoted=$false;historicalFailureJob=115292112191
 }
