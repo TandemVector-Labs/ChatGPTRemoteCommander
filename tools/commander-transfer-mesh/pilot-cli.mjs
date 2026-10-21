@@ -4,6 +4,21 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+// Deployed Pilot can be copied to a standalone transfer.mjs without the repo's
+// src/ directory. Preserve the root ancestor preflight inside this CLI.
+function assertUnredirectedDirectoryAncestors(input,code='MANAGED_PATH_UNSAFE'){
+ if(typeof input!=='string'||!path.isAbsolute(input))throw Error(code);
+ const normalized=path.normalize(input),anchor=path.parse(normalized).root;
+ let cur=anchor;
+ for(const part of path.relative(anchor,normalized).split(path.sep)){
+  if(!part||part==='.')continue;
+  cur=path.join(cur,part);
+  try{
+   const st=fs.lstatSync(cur);
+   if(st.isSymbolicLink()||!st.isDirectory())throw Error(code);
+  }catch(e){if(e.code==='ENOENT')continue;throw Error(code);}
+ }
+}
 const root=path.resolve(process.env.COMMANDER_TRANSFER_HOME || (process.platform==='win32'
  ?path.join(process.env.LOCALAPPDATA||path.join(os.homedir(),'AppData','Local'),'CommanderTransferPilot')
  :path.join(os.homedir(),'.local','share','commander-transfer-pilot')));
@@ -12,6 +27,27 @@ const arg=(k,fallback)=>{const i=args.indexOf('--'+k);if(i<0)return fallback;if(
 const validAlias=/^(PC|Linux|EmadServer|Amirreza)$/;
 const validId=/^[A-Za-z0-9][A-Za-z0-9._-]{2,90}$/;
 const fail=(m)=>{throw Error(m);};
+// root is an explicitly selected operator trust anchor. Never follow
+// pre-existing symlinks beneath it for managed transfer identity/data.
+function assertManagedEntry(file,directory){
+ let stat;
+ try{stat=fs.lstatSync(file);}catch(error){if(error.code==='ENOENT')return;throw error;}
+ if(stat.isSymbolicLink()||(directory?!stat.isDirectory():!stat.isFile()||stat.nlink!==1))
+  fail('CTMESH_MANAGED_PATH_UNSAFE');
+}
+function assertManagedTree(peer,id){
+ const pairs=path.join(root,'pairs'),peerDir=path.join(pairs,peer);
+ const transfers=path.join(peerDir,'transfers'),dir=path.join(transfers,id);
+ for(const folder of [pairs,peerDir,transfers,dir])assertManagedEntry(folder,true);
+ for(const file of [path.join(dir,'payload.bin'),path.join(dir,'manifest.json')])
+  assertManagedEntry(file,false);
+}
+function assertManagedStaging(peer,id){
+ const staging=path.join(root,'staging'),peerDir=path.join(staging,peer);
+ assertManagedEntry(staging,true);
+ assertManagedEntry(peerDir,true);
+ assertManagedEntry(path.join(peerDir,id+'.part'),false);
+}
 const json=(o)=>process.stdout.write(JSON.stringify(o)+'\n');
 function hash(file){let h=crypto.createHash('sha256'),b=Buffer.allocUnsafe(1048576),fd=fs.openSync(file,'r');
  try{for(;;){const n=fs.readSync(fd,b,0,b.length,null);if(!n)break;h.update(b.subarray(0,n));}}
@@ -19,6 +55,7 @@ function hash(file){let h=crypto.createHash('sha256'),b=Buffer.allocUnsafe(10485
 function transferPaths(peer,self,id){
  if(!validAlias.test(peer)||peer===self)fail('Unknown or self peer');
  if(!validId.test(id))fail('Invalid transfer ID');
+ assertManagedTree(peer,id);
  const dir=path.join(root,'pairs',peer,'transfers',id);
  return {dir,payload:path.join(dir,'payload.bin'),manifest:path.join(dir,'manifest.json')};
 }
@@ -113,6 +150,8 @@ function checkIncoming(peer,self,id){
  return {m,p};
 }
 try{
+ assertUnredirectedDirectoryAncestors(root,'CTMESH_MANAGED_PATH_UNSAFE');
+ assertManagedEntry(path.join(root,'node.json'),false);
  const self=JSON.parse(fs.readFileSync(path.join(root,'node.json'),'utf8')).alias;
  if(!validAlias.test(self))fail('Unrecognized local device');
  if(cmd==='info'){json({schema:'ctmesh-v1',device:self,transport:'Syncthing 2.1.6',root});}
@@ -123,10 +162,13 @@ try{
      const file=path.resolve(filename),st=fs.lstatSync(file),name=path.basename(file);
      if(!st.isFile()||st.isSymbolicLink()||/[\\/:*?"<>|\x00-\x1f]/.test(name))fail('Unsafe source');
      const id=arg('id',crypto.randomUUID()),p=transferPaths(peer,self,id);
+     assertManagedStaging(peer,id);
      fs.mkdirSync(path.dirname(p.dir),{recursive:true});
+     assertManagedTree(peer,id);
      fs.mkdirSync(p.dir); // reject duplicate transfer identifiers
      const staging=path.join(root,'staging',peer);
      fs.mkdirSync(staging,{recursive:true});
+     assertManagedStaging(peer,id);
      const temp=path.join(staging,id+'.part');
      fs.copyFileSync(file,temp,fs.constants.COPYFILE_EXCL);
      const after=fs.statSync(file);

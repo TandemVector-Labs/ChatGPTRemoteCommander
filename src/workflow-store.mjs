@@ -175,9 +175,13 @@ export class WorkflowStore {
     this.#dbPath = path.join(dir, 'workflows.sqlite');
     for (const suffix of ['', '-journal', '-wal', '-shm']) {
       noLinks(this.#dbPath + suffix, false);
-      if (fs.existsSync(this.#dbPath + suffix)) {
+      try {
+        // SQLite creates/removes rollback journals in other processes. A missing
+        // file is normal; never treat a present alias as acceptable.
         const s = fs.lstatSync(this.#dbPath + suffix);
         if (!s.isFile() || s.nlink > 1) fail('WORKFLOW_DATABASE_ALIAS');
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error;
       }
     }
     this.#device = safeText(device, 128);
@@ -196,9 +200,11 @@ export class WorkflowStore {
     this.#leaseDbPath = path.join(leaseDir, 'root-leases.sqlite');
     for (const suffix of ['', '-journal', '-wal', '-shm']) {
       noLinks(this.#leaseDbPath + suffix, false);
-      if (fs.existsSync(this.#leaseDbPath + suffix)) {
+      try {
         const stat = fs.lstatSync(this.#leaseDbPath + suffix);
         if (!stat.isFile() || stat.nlink > 1) fail('WORKFLOW_ROOT_LEASE_DATABASE_ALIAS');
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error;
       }
     }
     this.#leaseDb = new DatabaseSync(this.#leaseDbPath, { allowExtension: false });
@@ -435,6 +441,8 @@ export class WorkflowStore {
       }
     }
     state.planExtensions ??= [];
+    state.planPriorities ??= [];
+    state.planEdits ??= [];
     return { state, head: prev, events };
   }
   #commit(state, previous, kind, data) {
@@ -1039,6 +1047,129 @@ export class WorkflowStore {
       state.planExtensions.push(receipt);
       const committed = this.#commit(state, head, 'plan_extended', { reason, receipt });
       return { state: committed.state, receipt: clone(receipt), cachedReceipt: false };
+    });
+  }
+
+  prioritizePlan(input) {
+    // Explicit owner-provided complete display order. Never alter dependency
+    // edges, steps with committed receipts, or any running/uncertain operation.
+    planRecord(input,
+      ['id','expectedRevision','operationId','orderedStepIds','reason'],
+      ['id','expectedRevision','operationId','orderedStepIds','reason']);
+    const { id, expectedRevision, operationId, orderedStepIds, reason } = input;
+    identifier(id); revision(expectedRevision);safeText(reason,1000);
+    if (typeof operationId !== 'string' ||
+        !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(operationId))
+      fail('WORKFLOW_PLAN_OPERATION_ID');
+    planArray(orderedStepIds);
+    if (!orderedStepIds.length || orderedStepIds.length > 100)
+      fail('WORKFLOW_PLAN_STEP_LIMIT');
+    for (const item of orderedStepIds) identifier(item);
+    if (new Set(orderedStepIds).size !== orderedStepIds.length)
+      fail('WORKFLOW_PLAN_DUPLICATE_ORDER_ID');
+    const payloadHash = jsonHash({orderedStepIds,reason});
+    return this.#transaction(()=>{
+      const {state,head}=this.#load(id);
+      this.#identity(state);
+      const prior=(state.planPriorities ?? []).find(x=>x.operationId===operationId);
+      if (prior) {
+        if (prior.payloadHash!==payloadHash) fail('WORKFLOW_PLAN_OPERATION_CONFLICT');
+        if (expectedRevision!==prior.sourceRevision &&
+            expectedRevision!==state.revision) fail('WORKFLOW_REVISION_CONFLICT');
+        return {state:clone(state),receipt:clone(prior),cachedReceipt:true,action:'PRIORITIZED'};
+      }
+      if (state.revision!==expectedRevision) fail('WORKFLOW_REVISION_CONFLICT');
+      requireActive(state);
+      if (['FAILED','FINALIZING','VALIDATING'].includes(state.lifecycleState))
+        fail('WORKFLOW_PLAN_STATE_BLOCKED');
+      if (state.steps.some(step=>['running','uncertain'].includes(step.status)) ||
+          this.#db.prepare("SELECT 1 FROM operations WHERE workflow=? AND status IN ('PREPARED','EXECUTING','UNCERTAIN') LIMIT 1").get(id))
+        fail('WORKFLOW_BUSY_OR_UNCERTAIN');
+      requireOrderedPlan(state.steps);
+      if (state.steps.length!==orderedStepIds.length ||
+          state.steps.some(step=>!orderedStepIds.includes(step.id)))
+        fail('WORKFLOW_PLAN_ORDER_SET_MISMATCH');
+      const rows=new Map(state.steps.map(s=>[s.id,s]));
+      const next=orderedStepIds.map(id=>rows.get(id));
+      // Previously executed, uncertain or identity-linked slots stay fixed.
+      for (let i=0;i<state.steps.length;i++){
+        const step=state.steps[i];
+        if (step.status!=='pending' ||
+            ['operationId','callHash','receipt','startedAt','endedAt','attemptId',
+             'idempotencyKey','tool','reconciliation'].some(k=>Object.hasOwn(step,k)) ||
+            this.#db.prepare('SELECT 1 FROM operations WHERE workflow=? AND step_id=? LIMIT 1').get(id,step.id)) {
+          if (next[i].id!==step.id) fail('WORKFLOW_PLAN_FIXED_STEP_MOVED');
+        }
+      }
+      // A user priority cannot invert a dependency or silently replace one.
+      requireOrderedPlan(next);
+      const sourcePlanHash=structuralPlanHash(state.steps);
+      if (state.steps.every((x,i)=>x.id===next[i].id))
+        return {state:clone(state),receipt:null,cachedReceipt:false,action:'NO_OP'};
+      if (state.planPriorities.length >= 99) fail('WORKFLOW_PLAN_STEP_LIMIT');
+      state.steps=next;
+      const receipt={
+        operationId,sourceRevision:state.revision,resultRevision:state.revision+1,
+        orderedStepIds:[...orderedStepIds],payloadHash,
+        sourcePlanHash,resultPlanHash:structuralPlanHash(state.steps)
+      };
+      state.planPriorities.push(receipt);
+      const committed=this.#commit(state,head,'plan_prioritized',{reason,receipt});
+      return {state:committed.state,receipt:clone(receipt),
+              cachedReceipt:false,action:'PRIORITIZED'};
+    });
+  }
+
+  editPlanStep(input) {
+    // Only rename one unexecuted, unleased step. Do not rewrite dependencies,
+    // stable IDs, acceptance criteria or any already-started operation.
+    planRecord(input,['id','expectedRevision','operationId','stepId','title','reason'],
+      ['id','expectedRevision','operationId','stepId','title','reason']);
+    const {id,expectedRevision,operationId,stepId,title,reason}=input;
+    identifier(id);identifier(stepId);revision(expectedRevision);
+    safeText(title,500);safeText(reason,1000);
+    if (typeof operationId!=='string' ||
+        !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(operationId))
+      fail('WORKFLOW_PLAN_OPERATION_ID');
+    const payloadHash=jsonHash({stepId,title,reason});
+    return this.#transaction(()=>{
+      const {state,head}=this.#load(id);this.#identity(state);
+      const prior=(state.planEdits??[]).find(x=>x.operationId===operationId);
+      if(prior){
+        if(prior.payloadHash!==payloadHash)fail('WORKFLOW_PLAN_OPERATION_CONFLICT');
+        if(expectedRevision!==prior.sourceRevision &&
+            expectedRevision!==state.revision)fail('WORKFLOW_REVISION_CONFLICT');
+        return {state:clone(state),receipt:clone(prior),cachedReceipt:true,action:'EDITED'};
+      }
+      if(state.revision!==expectedRevision)fail('WORKFLOW_REVISION_CONFLICT');
+      requireActive(state);
+      if(['FAILED','FINALIZING','VALIDATING'].includes(state.lifecycleState))
+        fail('WORKFLOW_PLAN_STATE_BLOCKED');
+      if(state.steps.some(s=>['running','uncertain'].includes(s.status)) ||
+          this.#db.prepare("SELECT 1 FROM operations WHERE workflow=? AND status IN ('PREPARED','EXECUTING','UNCERTAIN') LIMIT 1").get(id))
+        fail('WORKFLOW_BUSY_OR_UNCERTAIN');
+      const item=state.steps.find(s=>s.id===stepId);
+      if(!item)fail('WORKFLOW_STEP_NOT_FOUND');
+      if(item.status!=='pending' ||
+          ['operationId','callHash','receipt','startedAt','endedAt','attemptId',
+           'idempotencyKey','tool','reconciliation'].some(k=>Object.hasOwn(item,k)) ||
+          this.#db.prepare('SELECT 1 FROM operations WHERE workflow=? AND step_id=? LIMIT 1').get(id,stepId))
+        fail('WORKFLOW_PLAN_TARGET_NOT_PENDING');
+      if(item.title===title)
+        return {state:clone(state),receipt:null,cachedReceipt:false,action:'NO_OP'};
+      if(state.planEdits.length>=99)fail('WORKFLOW_PLAN_STEP_LIMIT');
+      const sourcePlanHash=structuralPlanHash(state.steps);
+      const priorTitle=item.title;
+      item.title=title;
+      const receipt={
+        operationId,stepId,sourceRevision:state.revision,resultRevision:state.revision+1,
+        payloadHash,sourcePlanHash,resultPlanHash:structuralPlanHash(state.steps),
+        previousTitle:priorTitle,newTitle:title
+      };
+      state.planEdits.push(receipt);
+      const committed=this.#commit(state,head,'plan_step_edited',{reason,receipt});
+      return {state:committed.state,receipt:clone(receipt),
+              cachedReceipt:false,action:'EDITED'};
     });
   }
 

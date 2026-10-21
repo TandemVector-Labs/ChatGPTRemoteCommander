@@ -1,5 +1,5 @@
 param(
-  [string]$SourceRef = 'v0.10.23',
+  [string]$SourceRef = 'v0.10.24',
   [string]$ExpectedCommit = '',
   [ValidateSet('Power','Standard')][string]$AccessMode = 'Power',
   [ValidateSet('Auto','On','Off')][string]$GuiControl = 'Auto',
@@ -18,6 +18,18 @@ $script:BootstrapGitHubToken = [Environment]::GetEnvironmentVariable('RC_GITHUB_
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $Repo = 'https://github.com/GOD13emad/ChatGPTRemoteCommander.git'
+# The organization-fork source is allowed only for a SHA-pinned GitHub-hosted
+# same-repository installer canary. Normal installs use the upstream origin.
+# This is not an arbitrary repository URL override or a publication permit.
+if ([Environment]::GetEnvironmentVariable('RC_GITHUB_CI_FORK_SOURCE','Process') -eq '1') {
+  if ($env:GITHUB_ACTIONS -ne 'true' -or
+      $env:GITHUB_REPOSITORY -ne 'TandemVector-Labs/ChatGPTRemoteCommander' -or
+      $ExpectedCommit -notmatch '^[0-9a-fA-F]{40}$' -or
+      $SourceRef -notmatch '^[A-Za-z0-9._/-]{1,128}$') {
+    throw 'CI_FORK_SOURCE_CONTEXT_DENIED'
+  }
+  $Repo = 'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git'
+}
 $BootstrapRoot = Join-Path $env:ProgramData 'ChatGPTRemoteCommander\bootstrap'
 $ManifestPath = Join-Path $env:ProgramData 'ChatGPTRemoteCommander\server-install-allowlist.json'
 $Downloads = Join-Path $BootstrapRoot ('downloads-' + [guid]::NewGuid().ToString('N'))
@@ -38,7 +50,7 @@ function Refresh-Path {
 
 function Invoke-Download([string]$Url,[string]$Destination) {
   Write-Host "Downloading $Url"
-  Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination -Headers @{'User-Agent'='ChatGPTRemoteCommander-ServerInstaller/0.10.23'}
+  Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination -Headers @{'User-Agent'='ChatGPTRemoteCommander-ServerInstaller/0.10.24'}
   if (-not (Test-Path -LiteralPath $Destination -PathType Leaf)) { throw "Download did not create $Destination" }
 }
 
@@ -176,7 +188,7 @@ function Ensure-Git([string]$Arch) {
   # Public GitHub shared runner IPs can exhaust the unauthenticated REST limit.
   # Authentication is optional, fixed to this release-metadata endpoint only.
   $headers = @{
-    'User-Agent'='ChatGPTRemoteCommander-ServerInstaller/0.10.23'
+    'User-Agent'='ChatGPTRemoteCommander-ServerInstaller/0.10.24'
     'X-GitHub-Api-Version'='2022-11-28'
   }
   if ($script:BootstrapGitHubToken) {

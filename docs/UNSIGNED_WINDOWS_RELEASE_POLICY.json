@@ -1,10 +1,16 @@
 {
   "schema": "commander-unsigned-windows-release-v1",
-  "version": "0.10.23",
-  "tag": "v0.10.23",
+  "version": "0.10.24",
+  "tag": "v0.10.24",
   "allowUnsignedWithGitHubAttestation": true,
   "scope": "only-this-version",
   "publishedInstallerSignature": "NotSigned",
   "verification": "GitHub Sigstore build provenance + exact source tag/commit + SHA256SUMS.txt",
-  "riskAcknowledgement": "Unsigned Windows executable; SmartScreen or Smart App Control may warn or block; SHA256 and provenance do not replace Authenticode."
+  "riskAcknowledgement": "Owner explicitly approves public UNSIGNED preview distribution for v0.10.24 only, dated 2026-10-16. Microsoft SmartScreen and Smart App Control may warn or block. Publisher may display Unknown publisher. Project brand, SHA256SUMS and GitHub Sigstore attestation do not replace Authenticode. No system security feature should be disabled or bypassed.",
+  "ownerApproval": "Explicit version-specific owner request 2026-10-16; no extension to future versions.",
+  "releaseChannel": "public-prerelease-not-stable",
+  "organizationBrand": "TandemVector Labs (GitHub Usefull-Skills)",
+  "primarySourceMaintainer": "Aliakbar Emadoddin (@GOD13emad)",
+  "supportingSourceMaintainer": "MMZ (@mohammadmohammadzadeh19960-code)",
+  "stableAutoUpdateAllowed": false
 }

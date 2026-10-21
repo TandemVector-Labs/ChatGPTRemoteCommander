@@ -57,7 +57,7 @@ for (const required of [
   if (!workflow.includes(required)) throw new Error(`release workflow missing ${required}`);
 }
 if (workflow.includes('gh release upload')) throw new Error('immutable release workflow must attach assets at create time, not after publication');
-// R499: v0.10.23 may be tagged and attested, but never silently become
+// R499: v0.10.24 may be tagged and attested, but never silently become
 // latest Stable while owner endpoints have autoUpdate.enabled=true and the
 // Saeid host is unreachable. Preserve atomic full-asset draft creation.
 if (!(workflow.includes('gh release create "$tag" "${assets[@]}"') &&
@@ -73,7 +73,7 @@ if (!browserFetcher.includes('Get-FileHash') || !browserFetcher.includes('Browse
 if (!innoFetcher.includes('9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732')) throw new Error('Inno Setup compiler hash pin missing');
 if (!workflow.includes(browserVersion) || !workflow.includes(browserSha256)) throw new Error('Browser release pin missing from workflow');
 if (!workflow.includes('docs/RELEASE_${version}.md')) throw new Error('release notes must follow package version');
-if (pkg.version !== '0.10.23') throw new Error(`unexpected package version ${pkg.version}`);
+if (pkg.version !== '0.10.25') throw new Error(`unexpected package version ${pkg.version}`);
 
 // R171: Provenance must fail closed before an immutable release can be published.
 for (const marker of [
@@ -125,7 +125,7 @@ if (!(releaseIdentityAt>0 && policyAt>releaseIdentityAt && attestAt>policyAt &&
 if (workflow.includes('name: Block unsigned setup before production release'))
  throw new Error('LEGACY_UNSATISFIABLE_SIGNATURE_GATE_PRESENT');
 if (!workflow.includes('docs/UNSIGNED_WINDOWS_RELEASE_POLICY.*') ||
- !workflow.includes('docs/RELEASE_0.10.23.md') ||
+ !workflow.includes('docs/RELEASE_0.10.24.md') ||
  !workflow.includes('test/unsigned-windows-release-policy.test.mjs'))
  throw new Error('UNSIGNED_RELEASE_POLICY_TRIGGER_MISSING');
 console.log('R11_SCOPED_UNSIGNED_ATTESTED_RELEASE_GUARD_PASS');

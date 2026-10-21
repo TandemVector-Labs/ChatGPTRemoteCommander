@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
+import {selectSystemGeckoDriver} from './browser-geckodriver-policy.mjs';
 import { createInterface } from 'node:readline';
 
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
@@ -31,8 +32,7 @@ function detectFirefox(explicit){
  return null;
 }
 function detectGecko(){
- for(const p of [which('geckodriver'),'/snap/bin/geckodriver','/usr/bin/geckodriver'])if(p&&exists(p))return path.resolve(p);
- return null;
+ return selectSystemGeckoDriver();
 }
 async function freePort(){
  const s=net.createServer();

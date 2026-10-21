@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { terminateProcessesUsingBrowserProfile } from '../src/browser-owned-processes.mjs';
+import { terminateProcessesUsingBrowserProfile, waitForBrowserDevToolsPort } from '../src/browser-owned-processes.mjs';
+import {selectTrustedChromium} from './browser-chromium-executable-policy.mjs';
 import { createInterface } from 'node:readline';
 
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
@@ -19,29 +20,8 @@ const redactUrl=value=>{
   return {url:u.href,queryRedacted:hadSearch,fragmentRedacted:hadHash,schemeRedacted:false};
  }catch{return {url:null,queryRedacted:false,fragmentRedacted:false,schemeRedacted:false};}
 };
-const exists=p=>{try{return fs.statSync(p).isFile();}catch{return false;}};
-function which(name){
- const exts=process.platform==='win32'?['.exe','.cmd','']:[''];
- for(const dir of String(process.env.PATH??'').split(path.delimiter).filter(Boolean)){
-  for(const ext of exts){const p=path.join(dir,name+ext);if(exists(p))return p;}
- }
- return null;
-}
 function detectBrowser(explicit){
- if(typeof explicit==='string'&&explicit&&exists(explicit))return path.resolve(explicit);
- const candidates=[];
- if(process.platform==='win32'){
-  for(const base of [process.env.LOCALAPPDATA,process.env.PROGRAMFILES,process.env['PROGRAMFILES(X86)']].filter(Boolean)){
-   candidates.push(path.join(base,'Google','Chrome','Application','chrome.exe'));
-   candidates.push(path.join(base,'Microsoft','Edge','Application','msedge.exe'));
-  }
- }else{
-  for(const n of ['google-chrome','google-chrome-stable','chromium','chromium-browser','microsoft-edge','msedge']){
-   const p=which(n);if(p)candidates.push(p);
-  }
-  candidates.push('/usr/bin/google-chrome','/usr/bin/chromium','/usr/bin/chromium-browser','/usr/bin/microsoft-edge');
- }
- return candidates.find(exists)??null;
+ return selectTrustedChromium(explicit);
 }
 class Cdp {
  constructor(url){this.url=url;this.ws=null;this.seq=0;this.pending=new Map();}
@@ -80,15 +60,8 @@ async function portAlive(port){
  try{const c=new AbortController();const t=setTimeout(()=>c.abort(),350);const r=await fetch('http://127.0.0.1:'+port+'/json/version',{signal:c.signal});clearTimeout(t);return r.ok;}catch{return false;}
 }
 async function waitForPortFile(file,child){
- for(let i=0;i<240;i++){
-  if(child.exitCode!==null)throw fail('BROWSER_LAUNCH_FAILED');
-  if(fs.existsSync(file)){
-   const lines=fs.readFileSync(file,'utf8').trim().split(/\r?\n/);const port=Number(lines[0]);
-   if(Number.isInteger(port)&&port>0)return port;
-  }
-  await sleep(25);
- }
- throw fail('BROWSER_DEVTOOLS_TIMEOUT');
+ try{return await waitForBrowserDevToolsPort(file,child);}
+ catch(error){throw fail(error?.message==='BROWSER_LAUNCH_FAILED'?'BROWSER_LAUNCH_FAILED':'BROWSER_DEVTOOLS_TIMEOUT');}
 }
 async function evaluate(expression,{returnByValue=true,timeoutMs=30000}={}){
  if(!browser?.cdp||!browser.sessionId)throw fail('BROWSER_SESSION_NOT_RUNNING');
