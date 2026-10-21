@@ -98,3 +98,41 @@ test('Doctor rejects relative operator root before touching files',async()=>{
    'http://127.0.0.1:18384','test-only','/rest/system/status'),
    /Syncthing HTTPS identity certificate unavailable/);
 });
+
+test('standalone transfer workers reject a group-readable POSIX state root before identity access',
+ {skip:process.platform==='win32'||typeof process.getuid!=='function'},()=>{
+ const root=temp();
+ try{
+  fs.writeFileSync(path.join(root,'node.json'),JSON.stringify({alias:'PC'}));
+  fs.chmodSync(root,0o750);
+  const info=call(pilot,root,'info');
+  assert.notEqual(info.status,0);
+  assert.match(info.stderr,/CTMESH_MANAGED_PATH_UNSAFE/);
+  assert.equal(info.stdout.includes('PC'),false);
+  const job=call(durable,root,'job-status','--peer','Linux','--id','private-root-001');
+  assert.notEqual(job.status,0);
+  assert.match(job.stderr,/TRANSFER_MANAGED_PATH_UNSAFE/);
+  fs.chmodSync(root,0o700);
+  const accepted=call(pilot,root,'info');
+  assert.equal(accepted.status,0,accepted.stderr);
+  assert.equal(JSON.parse(accepted.stdout).device,'PC');
+ }finally{fs.chmodSync(root,0o700);fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('pilot creates private transfer and staging directories regardless of caller umask',
+ {skip:process.platform==='win32'||typeof process.getuid!=='function'},()=>{
+ const root=temp(),old=process.umask(0o022);
+ try{
+  fs.writeFileSync(path.join(root,'node.json'),JSON.stringify({alias:'PC'}));
+  const source=path.join(root,'source.txt');
+  fs.writeFileSync(source,'non-secret test content');
+  const sent=call(pilot,root,'send','--peer','Linux','--path',source,'--id','private-mode-001');
+  assert.equal(sent.status,0,sent.stderr);
+  const dirs=['pairs','pairs/Linux','pairs/Linux/transfers',
+   'pairs/Linux/transfers/private-mode-001','staging','staging/Linux'];
+  for(const rel of dirs){
+   const st=fs.statSync(path.join(root,rel));
+   assert.equal(st.mode&0o077,0,'group/other permissions for '+rel);
+  }
+ }finally{process.umask(old);fs.rmSync(root,{recursive:true,force:true});}
+});
