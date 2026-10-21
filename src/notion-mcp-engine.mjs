@@ -260,13 +260,36 @@ export class NotionMcpEngine {
       aiSearchStatus: ['available','available_with_limit','upgrade_required','plan_required','not_enabled'].includes(access)
         ? access : 'unknown' };
   }
+  async fetchPage({ pageId } = {}) {
+    if (typeof pageId !== 'string' || !/^(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$/.test(pageId))
+      throw codeError('NOTION_MCP_PAGE_ID_INVALID');
+    const normalized = pageId.replace(/-/g, '').toLowerCase();
+    if (!this.session) await this.verify();
+    const available = await this.listTools();
+    if (!available.names.includes('notion-fetch')) throw codeError('NOTION_MCP_FETCH_UNAVAILABLE');
+    const result = await this.mcpPost(this.session.token,
+      { jsonrpc: '2.0', id: 4, method: 'tools/call',
+        params: { name: 'notion-fetch', arguments: { id: normalized } } },
+      { sessionId: this.session.id, protocolVersion: this.session.version });
+    if (result.payload?.error || result.payload?.result?.isError) throw codeError('NOTION_MCP_PAGE_FETCH_FAILED');
+    const value = result.payload?.result;
+    const content = value?.content?.find(item => item.type === 'text' && typeof item.text === 'string')?.text
+      ?? (typeof value?.structuredContent?.text === 'string' ? value.structuredContent.text : null);
+    if (content === null) throw codeError('NOTION_MCP_PAGE_CONTENT_INVALID');
+    const maxOutput = 6000;
+    return { pageId: normalized, content: content.slice(0, maxOutput),
+      textTruncated: content.length > maxOutput, contentBytes: Buffer.byteLength(content) };
+  }
   async mcpPost(token, rpc, { sessionId = null, protocolVersion = '2025-06-18' } = {}) {
     // The official Notion MCP tools/list payload contains large JSON schemas.
     // Raise the in-memory bound ONLY for read-only discovery and fixed self fetch.
     // Public tool results remain sanitized and small.
+    const fetchId = rpc.params?.arguments?.id;
+    const isNotionPageFetch = typeof fetchId === 'string'
+      && /^(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$/.test(fetchId);
     const responseLimit = rpc.method === 'tools/list' ? 512 * 1024
       : rpc.method === 'tools/call' && rpc.params?.name === 'notion-fetch'
-        && rpc.params?.arguments?.id === 'self' ? 256 * 1024
+        && (fetchId === 'self' || isNotionPageFetch) ? 256 * 1024
         : 32768;
     if (sessionId && !/^[\x21-\x7e]{1,256}$/.test(sessionId)) throw codeError('NOTION_MCP_SESSION_INVALID');
     const headers = { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json',
@@ -313,19 +336,23 @@ export function createNotionMcpTools(args = {}) {
   const readOnly = { readOnlyHint:true, destructiveHint:false, openWorldHint:false };
   const action = { readOnlyHint:false, destructiveHint:false, idempotentHint:false, openWorldHint:true };
   const schema = { type:'object', properties:{}, additionalProperties:false };
+  const pageSchema = { type:'object', properties:{ pageId: { type:'string', minLength:32, maxLength:36,
+    description:'Notion page UUID, with or without dashes.' } }, required:['pageId'], additionalProperties:false };
   return { engine, definitions:[
     { name:'notion_mcp_status', description:'Check independent Notion MCP account connection status without secrets.', inputSchema:schema, annotations:readOnly },
     { name:'notion_mcp_connect_start', description:'Start independent official Notion MCP OAuth/PKCE authorization; returns URL for owner consent.', inputSchema:schema, annotations:action },
     { name:'notion_mcp_verify', description:'Verify hosted MCP initialize and initialized lifecycle; never reveals credentials.', inputSchema:schema, annotations:readOnly },
     { name:'notion_mcp_list_tools', description:'Read bounded list of hosted Notion MCP tool names after authorization.', inputSchema:schema, annotations:readOnly },
-    { name:'notion_mcp_fetch_self', description:'Read sanitized connected Notion workspace identity and AI-search availability.', inputSchema:schema, annotations:readOnly }
-  ], execute: async name => {
+    { name:'notion_mcp_fetch_self', description:'Read sanitized connected Notion workspace identity and AI-search availability.', inputSchema:schema, annotations:readOnly },
+    { name:'notion_mcp_fetch_page', description:'Fetch a user-authorized Notion page by strict UUID; 6,000-character read-only preview with truncation metadata.', inputSchema:pageSchema, annotations:readOnly }
+  ], execute: async (name, args = {}) => {
     switch (name) {
       case 'notion_mcp_status': return engine.status();
       case 'notion_mcp_connect_start': return engine.connectStart();
       case 'notion_mcp_verify': return engine.verify();
       case 'notion_mcp_list_tools': return engine.listTools();
       case 'notion_mcp_fetch_self': return engine.fetchSelf();
+      case 'notion_mcp_fetch_page': return engine.fetchPage(args);
       default: throw codeError('NOTION_MCP_UNKNOWN_TOOL');
     }
   } };

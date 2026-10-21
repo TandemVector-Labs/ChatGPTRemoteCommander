@@ -33,7 +33,7 @@ test('PKCE verifier is random and challenge is SHA-256 base64url', () => {
 test('Notion MCP is opt-in and never exposes arbitrary HTTP execution', async () => {
   const t=createNotionMcpTools({ config:{} });
   assert.deepEqual(await t.execute('notion_mcp_status'),{enabled:false,connected:false});
-  assert.deepEqual(t.definitions.map(x=>x.name),['notion_mcp_status','notion_mcp_connect_start','notion_mcp_verify','notion_mcp_list_tools','notion_mcp_fetch_self']);
+  assert.deepEqual(t.definitions.map(x=>x.name),['notion_mcp_status','notion_mcp_connect_start','notion_mcp_verify','notion_mcp_list_tools','notion_mcp_fetch_self','notion_mcp_fetch_page']);
   assert.equal(JSON.stringify(t.definitions).includes('access_token'),false);
   await assert.rejects(t.execute('notion_mcp_connect_start'),/NOTION_MCP_DISABLED/);
 });
@@ -271,4 +271,60 @@ test('even official tools/list rejects streams beyond its 512KiB bound',async()=
     })});
   await assert.rejects(engine.mcpPost('fixture',{jsonrpc:'2.0',id:2,method:'tools/list'}),
     /NOTION_MCP_RESPONSE_TOO_LARGE/);
+});
+
+test('MCP project page fetch validates strict UUID and returns bounded text only',async()=>{
+  const vault=fakeVault();
+  await vault.save({access_token:'synthetic-token',workspace_id:'test-workspace'});
+  const pageId='400d5b4a86f6812db36cd9f00711a063';
+  const data='Page fixture content '.repeat(950);
+  const calls=[];
+  const engine=new NotionMcpEngine({config:{enabled:true},vault,fetchImpl:async(url,init)=>{
+    const rpc=JSON.parse(init.body);calls.push(rpc.method);
+    if(rpc.method==='initialize')return respond(200,{jsonrpc:'2.0',id:1,result:{protocolVersion:'2025-06-18'}});
+    if(rpc.method==='notifications/initialized')return respond(202,{});
+    if(rpc.method==='tools/list')return respond(200,{jsonrpc:'2.0',id:2,result:{tools:[{name:'notion-fetch'}]}});
+    if(rpc.method==='tools/call'){
+      assert.deepEqual(rpc.params,{name:'notion-fetch',arguments:{id:pageId}});
+      return respond(200,{jsonrpc:'2.0',id:4,result:{content:[{type:'text',text:data}]}});
+    }
+    throw Error('unexpected provider call');
+  }});
+  const page=await engine.fetchPage({pageId});
+  assert.equal(page.pageId,pageId);
+  assert.equal(page.content.length,6000);
+  assert.equal(page.textTruncated,true);
+  assert.equal(page.contentBytes,Buffer.byteLength(data));
+  assert.equal(page.content,data.slice(0,6000));
+  assert.deepEqual(calls,['initialize','notifications/initialized','tools/list','tools/call']);
+  await assert.rejects(engine.fetchPage({pageId:'https://evil.example/test'}),/NOTION_MCP_PAGE_ID_INVALID/);
+  await assert.rejects(engine.fetchPage({pageId:'self'}),/NOTION_MCP_PAGE_ID_INVALID/);
+  await assert.rejects(engine.fetchPage({pageId:'400d5b4a86f6812db36cd9f00711a063\nAuthorization: secret'}),/NOTION_MCP_PAGE_ID_INVALID/);
+  assert.equal(calls.length,4);
+  const hyphenated='400d5b4a-86f6-812d-b36c-d9f00711a063';
+  const other=await engine.fetchPage({pageId:hyphenated});
+  assert.equal(other.pageId,pageId);
+});
+test('MCP page fetch provider error is fail-closed without passing error text through',async()=>{
+  const vault=fakeVault();await vault.save({access_token:'fixture'});
+  const engine=new NotionMcpEngine({config:{enabled:true},vault,fetchImpl:async(url,init)=>{
+    const rpc=JSON.parse(init.body);
+    if(rpc.method==='initialize')return respond(200,{jsonrpc:'2.0',id:1,result:{protocolVersion:'2025-06-18'}});
+    if(rpc.method==='notifications/initialized')return respond(202,{});
+    if(rpc.method==='tools/list')return respond(200,{jsonrpc:'2.0',id:2,result:{tools:[{name:'notion-fetch'}]}});
+    return respond(200,{jsonrpc:'2.0',id:4,result:{isError:true,content:[{type:'text',text:'synthetic internal provider error fixture'}]}});
+  }});
+  await assert.rejects(engine.fetchPage({pageId:'400d5b4a86f6812db36cd9f00711a063'}),/NOTION_MCP_PAGE_FETCH_FAILED/);
+});
+test('MCP bounded large page response does not expand arbitrary tools/call transport cap',async()=>{
+  const fixture='Synthetic test page body '.repeat(3500);
+  const engine=new NotionMcpEngine({config:{enabled:true},vault:fakeVault(),
+    fetchImpl:async()=>respond(200,{jsonrpc:'2.0',id:4,result:{content:[{type:'text',text:fixture}]}})});
+  const fetchCall={jsonrpc:'2.0',id:4,method:'tools/call',
+    params:{name:'notion-fetch',arguments:{id:'400d5b4a86f6812db36cd9f00711a063'}}};
+  const ok=await engine.mcpPost('fixture',fetchCall);
+  assert.equal(ok.httpStatus,200);
+  const other={jsonrpc:'2.0',id:4,method:'tools/call',
+    params:{name:'notion-delete',arguments:{id:'400d5b4a86f6812db36cd9f00711a063'}}};
+  await assert.rejects(engine.mcpPost('fixture',other),/NOTION_MCP_RESPONSE_TOO_LARGE/);
 });
