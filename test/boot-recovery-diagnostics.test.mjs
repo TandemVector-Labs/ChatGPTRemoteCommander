@@ -58,6 +58,7 @@ test('boot, handoff, and user-logon task launchers do not pin the versioned MSIX
   assert.match(install,/New-ScheduledTaskAction -Execute \$bootstrap -Argument \$bootArgs/u);
   assert.match(install,/New-ScheduledTaskAction -Execute \$bootstrap -Argument \$handoffArgs/u);
   assert.match(install,/-Mode UserSupervisor/u);
+  assert.match(launcher,/Get-AppxPackage -Name 'Microsoft.PowerShell' -ErrorAction Stop/u);
   assert.match(launcher,/Get-AppxPackage -AllUsers -Name 'Microsoft.PowerShell'/u);
   assert.match(launcher,/Sort-Object Version -Descending/u);
   assert.match(launcher,/BOOT_LAUNCHER_PWSH7_NOT_FOUND/u);
