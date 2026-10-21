@@ -4,7 +4,21 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
-import {assertUnredirectedDirectoryAncestors} from '../../src/managed-path-anchor.mjs';
+// Deployed Pilot can be copied to a standalone transfer.mjs without the repo's
+// src/ directory. Preserve the root ancestor preflight inside this CLI.
+function assertUnredirectedDirectoryAncestors(input,code='MANAGED_PATH_UNSAFE'){
+ if(typeof input!=='string'||!path.isAbsolute(input))throw Error(code);
+ const normalized=path.normalize(input),anchor=path.parse(normalized).root;
+ let cur=anchor;
+ for(const part of path.relative(anchor,normalized).split(path.sep)){
+  if(!part||part==='.')continue;
+  cur=path.join(cur,part);
+  try{
+   const st=fs.lstatSync(cur);
+   if(st.isSymbolicLink()||!st.isDirectory())throw Error(code);
+  }catch(e){if(e.code==='ENOENT')continue;throw Error(code);}
+ }
+}
 const root=path.resolve(process.env.COMMANDER_TRANSFER_HOME || (process.platform==='win32'
  ?path.join(process.env.LOCALAPPDATA||path.join(os.homedir(),'AppData','Local'),'CommanderTransferPilot')
  :path.join(os.homedir(),'.local','share','commander-transfer-pilot')));
