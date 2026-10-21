@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import {assertUnredirectedDirectoryAncestors} from '../../src/managed-path-anchor.mjs';
 const root=path.resolve(process.env.COMMANDER_TRANSFER_HOME || (process.platform==='win32'
  ?path.join(process.env.LOCALAPPDATA||path.join(os.homedir(),'AppData','Local'),'CommanderTransferPilot')
  :path.join(os.homedir(),'.local','share','commander-transfer-pilot')));
@@ -135,6 +136,7 @@ function checkIncoming(peer,self,id){
  return {m,p};
 }
 try{
+ assertUnredirectedDirectoryAncestors(root,'CTMESH_MANAGED_PATH_UNSAFE');
  assertManagedEntry(path.join(root,'node.json'),false);
  const self=JSON.parse(fs.readFileSync(path.join(root,'node.json'),'utf8')).alias;
  if(!validAlias.test(self))fail('Unrecognized local device');

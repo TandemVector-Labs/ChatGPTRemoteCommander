@@ -6,6 +6,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {assertUnredirectedDirectoryAncestors} from '../../src/managed-path-anchor.mjs';
 process.umask(0o077);
 const root=path.resolve(process.env.COMMANDER_TRANSFER_HOME||(
  process.platform==='win32'?path.join(process.env.LOCALAPPDATA||path.join(os.homedir(),'AppData','Local'),'CommanderTransferPilot'):path.join(os.homedir(),'.local','share','commander-transfer-pilot')));
@@ -209,6 +210,7 @@ try{
   reply({schema:'ctmesh-durable-v1',contractVersion:2,admissionQuotas:true,
     supports:['enqueue','job-status','resume','cancel'],workerPersistence:true,hashVerification:'sha256'});
  }else{
+ assertUnredirectedDirectoryAncestors(root,'TRANSFER_MANAGED_PATH_UNSAFE');
  const peer=opt('peer'),id=opt('id'),p=safePaths(peer,id);
  if(command==='enqueue'){
   const source=opt('path'),sourceRoot=opt('source-root');
