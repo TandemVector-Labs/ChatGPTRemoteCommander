@@ -43,7 +43,19 @@ for (const expectedIgnored of ['config.local.json', '.env', 'connections.local.j
 const history = git(['log', '--all', '-p', '--no-color', '--no-ext-diff']);
 for (const [type, pattern] of patterns) {
   pattern.lastIndex = 0;
-  if (pattern.test(history)) findings.push({ scope: 'HISTORY', type, location: 'git log --all -p' });
+  const match = pattern.exec(history);
+  if (!match) continue;
+  // Print only verified Git provenance, never the matched credential bytes.
+  // A SHA/path locator makes historical findings actionable without weakening
+  // the fail-closed audit or revealing the detected secret in Actions logs.
+  const before = history.slice(0, match.index);
+  const anchor = before.lastIndexOf('\ncommit ');
+  const section = before.slice(anchor < 0 ? 0 : anchor + 1);
+  const commit = /^commit ([0-9a-f]{40})/m.exec(section)?.[1] ?? 'unknown';
+  const changed = [...section.matchAll(/^diff --git a\/(.+?) b\/(.+)$/gm)];
+  const candidate = changed.at(-1)?.[2] ?? '(commit metadata)';
+  const file = /^[a-zA-Z0-9._/-]{1,128}$/.test(candidate) ? candidate : '(nonstandard path)';
+  findings.push({ scope: 'HISTORY', type, location: 'git log --all -p', commit: commit.slice(0, 12), file });
 }
 const emails = [...new Set(git(['log', '--all', '--format=%ae%n%ce']).split(/\r?\n/).filter(Boolean))].sort();
 if (emails.length) {
