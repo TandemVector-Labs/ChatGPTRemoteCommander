@@ -7,6 +7,25 @@ import crypto from 'node:crypto';
 const root=path.resolve(process.env.COMMANDER_TRANSFER_HOME || (process.platform==='win32'
  ?path.join(process.env.LOCALAPPDATA||path.join(os.homedir(),'AppData','Local'),'CommanderTransferPilot')
  :path.join(os.homedir(),'.local','share','commander-transfer-pilot')));
+// Each deployed CLI is intentionally self-contained; the large-file preflight
+// copies only durable-send.mjs. Keep root validation in this executable rather
+// than importing an adjacent module that will not ship with the worker.
+function assertUnredirectedRoot(){
+ const normalized=path.normalize(root),anchor=path.parse(normalized).root;
+ let current=anchor;
+ for(const part of path.relative(anchor,normalized).split(path.sep)){
+  if(!part||part==='.')continue;
+  current=path.join(current,part);
+  try{
+   const st=fs.lstatSync(current);
+   if(st.isSymbolicLink()||!st.isDirectory())throw Error('CTMESH_MANAGED_PATH_UNSAFE');
+  }catch(e){
+   if(e.code==='ENOENT')continue;
+   throw Error('CTMESH_MANAGED_PATH_UNSAFE');
+  }
+ }
+}
+
 const args=process.argv.slice(2),cmd=args.shift();
 const arg=(k,fallback)=>{const i=args.indexOf('--'+k);if(i<0)return fallback;if(i===args.length-1)throw Error('Missing value '+k);return args[i+1];};
 const validAlias=/^(PC|Linux|EmadServer|Amirreza)$/;
@@ -135,6 +154,7 @@ function checkIncoming(peer,self,id){
  return {m,p};
 }
 try{
+ assertUnredirectedRoot();
  assertManagedEntry(path.join(root,'node.json'),false);
  const self=JSON.parse(fs.readFileSync(path.join(root,'node.json'),'utf8')).alias;
  if(!validAlias.test(self))fail('Unrecognized local device');

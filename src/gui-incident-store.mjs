@@ -4,7 +4,7 @@
 import path from 'node:path';
 import os from 'node:os';
 import {randomUUID} from 'node:crypto';
-import {constants} from 'node:fs';
+import {constants,lstatSync} from 'node:fs';
 import fs from 'node:fs/promises';
 
 const SCHEMA='rc-gui-pending-input-v1';
@@ -13,6 +13,25 @@ const INPUT_TOOLS=new Set([
   'gui_mouse_drag','gui_type_text','gui_key_press','gui_focus_window'
 ]);
 const fail=(code)=>Object.assign(new Error(code),{guiCode:code});
+// GUI Incident Store is also copied into standalone Agent Extension fixtures.
+// Keep this guard self-contained rather than importing another package file.
+export function assertUnredirectedDirectoryAncestors(input,code='MANAGED_PATH_UNSAFE'){
+ if(typeof input!=='string'||!path.isAbsolute(input))throw Error(code);
+ const normalized=path.normalize(input),anchor=path.parse(normalized).root;
+ let dir=anchor;
+ for(const part of path.relative(anchor,normalized).split(path.sep)){
+  if(!part||part==='.')continue;
+  dir=path.join(dir,part);
+  try{
+   const st=lstatSync(dir);
+   if(st.isSymbolicLink()||!st.isDirectory())throw Error(code);
+  }catch(e){
+   if(e.code==='ENOENT')continue;
+   throw Error(code);
+  }
+ }
+}
+
 const defaultFile=()=>{
   const base=process.platform==='win32'
     ?(process.env.LOCALAPPDATA||path.join(os.homedir(),'AppData','Local'))
@@ -23,6 +42,7 @@ export function createGuiInputIncidentStore({file=defaultFile(),now=()=>new Date
   if(!path.isAbsolute(file))throw fail('GUI_INCIDENT_PATH_INVALID');
   const folder=path.dirname(file);
   async function pending(){
+    assertUnredirectedDirectoryAncestors(folder,'GUI_INCIDENT_STORAGE_UNAVAILABLE');
     // Open once and read through that same handle. A separate lstat/readFile
     // sequence could read an attacker-swapped path after the identity check.
     let handle;
@@ -67,6 +87,7 @@ export function createGuiInputIncidentStore({file=defaultFile(),now=()=>new Date
     return {id:record.id,tool:record.tool,startedUtc:record.startedUtc};
   }
   async function begin(tool){
+    assertUnredirectedDirectoryAncestors(folder,'GUI_INCIDENT_STORAGE_UNAVAILABLE');
     if(!INPUT_TOOLS.has(tool))throw fail('GUI_INCIDENT_TOOL_INVALID');
     const prior=await pending();
     if(prior)throw fail('GUI_INCIDENT_UNRESOLVED');
@@ -87,6 +108,7 @@ export function createGuiInputIncidentStore({file=defaultFile(),now=()=>new Date
     }
   }
   async function resolve(handle){
+    assertUnredirectedDirectoryAncestors(folder,'GUI_INCIDENT_STORAGE_UNAVAILABLE');
     if(!handle||typeof handle.id!=='string')throw fail('GUI_INCIDENT_HANDLE_INVALID');
     const prior=await pending();
     if(!prior||prior.id!==handle.id||prior.tool!==handle.tool)throw fail('GUI_INCIDENT_RESOLUTION_MISMATCH');

@@ -9,6 +9,25 @@ import {fileURLToPath} from 'node:url';
 process.umask(0o077);
 const root=path.resolve(process.env.COMMANDER_TRANSFER_HOME||(
  process.platform==='win32'?path.join(process.env.LOCALAPPDATA||path.join(os.homedir(),'AppData','Local'),'CommanderTransferPilot'):path.join(os.homedir(),'.local','share','commander-transfer-pilot')));
+// Each deployed CLI is intentionally self-contained; the large-file preflight
+// copies only durable-send.mjs. Keep root validation in this executable rather
+// than importing an adjacent module that will not ship with the worker.
+function assertUnredirectedRoot(){
+ const normalized=path.normalize(root),anchor=path.parse(normalized).root;
+ let current=anchor;
+ for(const part of path.relative(anchor,normalized).split(path.sep)){
+  if(!part||part==='.')continue;
+  current=path.join(current,part);
+  try{
+   const st=fs.lstatSync(current);
+   if(st.isSymbolicLink()||!st.isDirectory())throw Error('TRANSFER_MANAGED_PATH_UNSAFE');
+  }catch(e){
+   if(e.code==='ENOENT')continue;
+   throw Error('TRANSFER_MANAGED_PATH_UNSAFE');
+  }
+ }
+}
+
 const peers=['PC','Linux','EmadServer','Amirreza'];
 const re=/^[a-zA-Z0-9][a-zA-Z0-9._-]{2,90}$/;
 const [command,...args]=process.argv.slice(2);
@@ -209,6 +228,7 @@ try{
   reply({schema:'ctmesh-durable-v1',contractVersion:2,admissionQuotas:true,
     supports:['enqueue','job-status','resume','cancel'],workerPersistence:true,hashVerification:'sha256'});
  }else{
+ assertUnredirectedRoot();
  const peer=opt('peer'),id=opt('id'),p=safePaths(peer,id);
  if(command==='enqueue'){
   const source=opt('path'),sourceRoot=opt('source-root');
