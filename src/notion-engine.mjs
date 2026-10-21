@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile, lstat, unlink } from 'node:fs/promises';
 
 const API = 'https://api.notion.com/v1';
 const VERSION = '2026-03-11';
@@ -83,6 +83,25 @@ export function createNotionVault({ profile = 'default', directory = path.join(o
       const value = await processInput('secret-tool', ['lookup', 'service', 'remote-commander-notion', 'profile', profile], '', { emptyExitOneIsNotFound: true });
       return value ? JSON.parse(value) : null;
     },
+    async clear() {
+      if (!available) throw fail('NOTION_VAULT_UNAVAILABLE');
+      if (platform === 'win32') {
+        let record;
+        try { record = await lstat(location); }
+        catch (error) { if (error.code === 'ENOENT') return false; throw fail('NOTION_VAULT_UNAVAILABLE'); }
+        if (!record.isFile() || record.isSymbolicLink())
+          throw fail('NOTION_VAULT_UNSAFE_PATH');
+        try { await unlink(location); }
+        catch { throw fail('NOTION_VAULT_UNAVAILABLE'); }
+        return true;
+      }
+      if (platform === 'linux') {
+        await processInput('secret-tool',
+          ['clear', 'service', 'remote-commander-notion', 'profile', profile], '');
+        return true;
+      }
+      throw fail('NOTION_VAULT_UNAVAILABLE');
+    },
     async save(record) {
       if (!available) throw fail('NOTION_VAULT_UNAVAILABLE');
       const plaintext = JSON.stringify(record);
@@ -132,6 +151,15 @@ export class NotionEngine {
       workspaceId: account?.workspace_id ?? null, workspaceName: account?.workspace_name ?? null,
       loginPending: Boolean(this.pending && Date.now() < this.pending.expiresAt),
       lastVerifiedAt: this.lastVerifiedAt };
+  }
+  async disconnect({ confirmed = false } = {}) {
+    if (!this.config.enabled) throw fail('NOTION_DISABLED');
+    if (confirmed !== true) throw fail('NOTION_DISCONNECT_CONFIRMATION_REQUIRED');
+    if (!this.vault.available) throw fail('NOTION_VAULT_UNAVAILABLE');
+    if (typeof this.vault.clear !== 'function') throw fail('NOTION_VAULT_UNAVAILABLE');
+    const cleared = await this.vault.clear();
+    this.lastVerifiedAt = null;
+    return { connected: false, removed: cleared === true };
   }
   async importPersonalAccessToken(token, { replaceExisting = false } = {}) {
     if (!this.config.enabled) throw fail('NOTION_DISABLED');

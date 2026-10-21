@@ -5,16 +5,21 @@ import { NotionEngine } from '../src/notion-engine.mjs';
 
 function options(args) {
   if (args.length === 1 && (args[0] === '--help' || args[0] === '-h')) return { help: true };
-  const parsed = { profile: 'default', stdin: false, status: false, replaceExisting: false };
+  const parsed = { profile: 'default', stdin: false, status: false, verify: false, disconnect: false, confirmDisconnect: false, replaceExisting: false };
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--profile' && args[i + 1]) { parsed.profile = args[++i]; continue; }
     if (args[i] === '--token-stdin' && !parsed.stdin) { parsed.stdin = true; continue; }
     if (args[i] === '--status' && !parsed.status) { parsed.status = true; continue; }
+    if (args[i] === '--verify' && !parsed.verify) { parsed.verify = true; continue; }
+    if (args[i] === '--disconnect' && !parsed.disconnect) { parsed.disconnect = true; continue; }
+    if (args[i] === '--confirm-disconnect' && !parsed.confirmDisconnect) { parsed.confirmDisconnect = true; continue; }
     if (args[i] === '--replace-existing' && !parsed.replaceExisting) { parsed.replaceExisting = true; continue; }
     throw new Error('NOTION_PAT_CLI_ARGUMENT_INVALID');
   }
   if (!/^[A-Za-z0-9_-]{1,80}$/.test(parsed.profile)) throw new Error('NOTION_PAT_PROFILE_INVALID');
-  if (parsed.status === parsed.stdin || (parsed.status && parsed.replaceExisting))
+  if ([parsed.status, parsed.stdin, parsed.verify, parsed.disconnect].filter(Boolean).length !== 1
+      || (parsed.replaceExisting && !parsed.stdin)
+      || (parsed.confirmDisconnect !== parsed.disconnect))
     throw new Error('NOTION_PAT_CLI_ARGUMENT_INVALID');
   return parsed;
 }
@@ -39,7 +44,7 @@ async function main() {
   const opts = options(process.argv.slice(2));
   if (opts.help) {
     process.stdout.write(
-      'Usage: node tools/notion-pat-import.mjs (--token-stdin | --status) [--profile default] [--replace-existing]\n' +
+      'Usage: node tools/notion-pat-import.mjs (--token-stdin | --status | --verify | --disconnect --confirm-disconnect) [--profile default] [--replace-existing]\n' +
       'Token must arrive via stdin from a masked, owner-local terminal prompt.\n' +
       'Never place the token in command arguments, logs, Git or ChatGPT messages.\n'
     );
@@ -50,6 +55,16 @@ async function main() {
     const state = await engine.status();
     const credential = state.connected ? (state.credentialType === 'personal_access_token' ? 'PAT' : 'OAUTH') : 'NONE';
     process.stdout.write(`NOTION_REST_STATUS ${state.connected ? 'CONNECTED' : 'DISCONNECTED'} ${credential} VAULT_${state.vaultAvailable ? 'READY' : 'UNAVAILABLE'}\n`);
+    return;
+  }
+  if (opts.verify) {
+    await engine.verify();
+    process.stdout.write('NOTION_REST_VERIFIED\n');
+    return;
+  }
+  if (opts.disconnect) {
+    await engine.disconnect({ confirmed: opts.confirmDisconnect });
+    process.stdout.write('NOTION_REST_DISCONNECTED\n');
     return;
   }
   const token = await readTokenStdin();

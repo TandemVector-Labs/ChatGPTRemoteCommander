@@ -19,6 +19,8 @@ internal sealed class NotionSetupForm : Form
     private readonly Button connect = new() { Text = "Verify and connect", Width = 165, Height = 38 };
     private readonly Button portal = new() { Text = "Create token in Notion", Width = 185, Height = 38 };
     private readonly Button checkStatus = new() { Text = "Check status", Width = 115, Height = 38 };
+    private readonly Button verify = new() { Text = "Verify access", Width = 125, Height = 38 };
+    private readonly Button disconnect = new() { Text = "Disconnect", Width = 125, Height = 38 };
     private readonly Button close = new() { Text = "Close", Width = 105, Height = 38 };
     private readonly Color muted = Color.FromArgb(174, 193, 214);
     private bool connecting;
@@ -28,9 +30,9 @@ internal sealed class NotionSetupForm : Form
         Text = "Remote Commander — Notion connection";
         AccessibleName = "Remote Commander Control Center — Notion setup";
         StartPosition = FormStartPosition.CenterScreen;
-        Width = 745;
-        Height = 480;
-        MinimumSize = new Size(700, 455);
+        Width = 800;
+        Height = 545;
+        MinimumSize = new Size(710, 525);
         Font = new Font("Segoe UI", 10);
         BackColor = Color.FromArgb(19, 30, 45);
         ForeColor = Color.White;
@@ -41,7 +43,7 @@ internal sealed class NotionSetupForm : Form
             RowCount = 11, AutoScroll = true
         };
         content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        foreach (int height in new[] { 48, 50, 32, 40, 28, 42, 34, 36, 26, 57, 45 })
+        foreach (int height in new[] { 48, 50, 32, 40, 28, 42, 34, 36, 26, 57, 95 })
             content.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
         Controls.Add(content);
 
@@ -66,8 +68,8 @@ internal sealed class NotionSetupForm : Form
 
         status.ForeColor = Color.FromArgb(147, 197, 253);
         content.Controls.Add(status, 0, 9);
-        var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
-        foreach (var b in new[] { portal, connect, checkStatus, close })
+        var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = true };
+        foreach (var b in new[] { portal, connect, checkStatus, verify, disconnect, close })
         {
             b.BackColor = Color.FromArgb(37, 58, 82);
             b.ForeColor = Color.White;
@@ -80,6 +82,8 @@ internal sealed class NotionSetupForm : Form
         portal.Click += (_, _) => OpenOfficialPortal();
         connect.Click += async (_, _) => await ConnectAsync();
         checkStatus.Click += async (_, _) => await RefreshStatusAsync();
+        verify.Click += async (_, _) => await ManageAsync(disconnectCredential: false);
+        disconnect.Click += async (_, _) => await ManageAsync(disconnectCredential: true);
         Shown += async (_, _) => await RefreshStatusAsync();
         close.Click += (_, _) => Close();
         FormClosing += (_, e) => { if (connecting) e.Cancel = true; };
@@ -177,6 +181,85 @@ internal sealed class NotionSetupForm : Form
                 : "Local Notion status could not be checked.";
         }
         finally { checkStatus.Enabled = true; }
+    }
+
+    private async Task ManageAsync(bool disconnectCredential)
+    {
+        if (connecting) return;
+        var selectedProfile = profile.Text.Trim();
+        if (!System.Text.RegularExpressions.Regex.IsMatch(selectedProfile, @"^[A-Za-z0-9_-]{1,80}$"))
+        {
+            status.Text = "Select a valid Commander profile.";
+            return;
+        }
+        if (disconnectCredential && MessageBox.Show(this,
+            $"Remove the local Notion REST credential for profile '{selectedProfile}'?\n" +
+            "This does not revoke the token in Notion or disconnect hosted Notion MCP.",
+            "Confirm Notion REST disconnect", MessageBoxButtons.YesNo, MessageBoxIcon.Warning)
+            != DialogResult.Yes) return;
+        connecting = true;
+        connect.Enabled = false;
+        verify.Enabled = false;
+        disconnect.Enabled = false;
+        checkStatus.Enabled = false;
+        close.Enabled = false;
+        secret.Clear();
+        status.Text = disconnectCredential ? "Removing this profile's local credential..." :
+            "Checking live Notion REST access...";
+        try
+        {
+            var start = new ProcessStartInfo
+            {
+                FileName = "node", UseShellExecute = false,
+                RedirectStandardOutput = true, RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+            start.ArgumentList.Add(FindImporter());
+            start.ArgumentList.Add(disconnectCredential ? "--disconnect" : "--verify");
+            if (disconnectCredential) start.ArgumentList.Add("--confirm-disconnect");
+            start.ArgumentList.Add("--profile");
+            start.ArgumentList.Add(selectedProfile);
+            using var process = new Process { StartInfo = start };
+            if (!process.Start()) throw new InvalidOperationException("NOTION_ACTION_START_FAILED");
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+            try { await process.WaitForExitAsync(timeout.Token); }
+            catch (OperationCanceledException)
+            {
+                try { process.Kill(entireProcessTree: true); } catch { }
+                status.Text = "Notion operation timed out. Check connection status.";
+                return;
+            }
+            var output = (await process.StandardOutput.ReadToEndAsync()).Trim();
+            if (process.ExitCode == 0 && output ==
+                (disconnectCredential ? "NOTION_REST_DISCONNECTED" : "NOTION_REST_VERIFIED"))
+            {
+                status.ForeColor = disconnectCredential ? muted : Color.FromArgb(107, 224, 170);
+                status.Text = disconnectCredential
+                    ? "Disconnected local Notion REST credential for this profile. Hosted MCP is unchanged."
+                    : "Verified: Notion REST credentials have live access.";
+            }
+            else
+            {
+                status.ForeColor = muted;
+                status.Text = "Notion operation could not be verified. Use Check status; credentials were not printed.";
+            }
+        }
+        catch (Exception e) when (e is InvalidOperationException or System.ComponentModel.Win32Exception or System.IO.IOException)
+        {
+            status.Text = e.Message == "NOTION_REST_MODULE_NOT_INSTALLED"
+                ? "Install a compatible Commander Core before managing Notion."
+                : "Notion management is unavailable.";
+        }
+        finally
+        {
+            secret.Clear();
+            connecting = false;
+            connect.Enabled = true;
+            verify.Enabled = true;
+            disconnect.Enabled = true;
+            checkStatus.Enabled = true;
+            close.Enabled = true;
+        }
     }
 
     private async Task ConnectAsync()
