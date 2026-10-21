@@ -15,6 +15,8 @@ test('audit permits only the exact known historical fake-vault OAuth assertion',
   const provenance=historyMatchProvenance(history,offset);
   assert.deepEqual(provenance,{commit,file});
   assert.equal(isVerifiedSyntheticNotionBearer('Bearer token literal',synthetic,provenance),true);
+  assert.equal(isVerifiedSyntheticNotionBearer('Bearer token literal',synthetic,{commit:'7602330376070ca3681838e49bf7f932179a04d9',file}),true);
+  assert.equal(isVerifiedSyntheticNotionBearer('Bearer token literal','Bearer '+'REAL_TOKEN_1234567890123456',{commit:'7602330376070ca3681838e49bf7f932179a04d9',file}),false);
   assert.equal(isVerifiedSyntheticNotionBearer('Bearer token literal',synthetic,{commit,file:'src/notion-mcp-engine.mjs'}),false);
   assert.equal(isVerifiedSyntheticNotionBearer('Bearer token literal',synthetic,{commit:'0'.repeat(40),file}),false);
   assert.equal(isVerifiedSyntheticNotionBearer('Bearer token literal','Bearer '+'REAL_TOKEN_1234567890123456',provenance),false);
