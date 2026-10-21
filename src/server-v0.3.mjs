@@ -20,6 +20,7 @@ import { createDeliveryTools } from './delivery-tools.mjs';
 import { compactToolSuccessPayload, serializeBoundedJsonResponse, synchronousCommandInput } from './retry-guard.mjs';
 import { MutationIdempotencyStore } from './mutation-idempotency.mjs';
 import { createAgentExtensionRegistry } from './agent-extensions.mjs';
+import { createNotionTools } from './notion-engine.mjs';
 import { createCoucouBridge } from './coucou-bridge.mjs';
 import { startBrowserCompanionMonitor } from './browser-companion-monitor.mjs';
 import {
@@ -74,6 +75,7 @@ const agentExtensionDirectories = configuredAgentExtensionDirectories.map(value 
   return path.isAbsolute(expanded) ? path.resolve(expanded) : path.resolve(projectDir, expanded);
 });
 const agentExtensions = createAgentExtensionRegistry({ directories: agentExtensionDirectories });
+const notionTools = createNotionTools({ config: config.notion ?? {}, profile: config.instance?.profile ?? 'default' });
 const transferMesh = config.transferMesh?.enabled === true && config.powerMode?.enabled === true
   ? (await import('./transfer-tools.mjs')).createTransferMeshTools({config})
   : { enabled: false, definitions: [], execute: async () => { throw new Error('TRANSFER_MESH_DISABLED'); } };
@@ -211,6 +213,7 @@ const TOOLS = [
   ...asyncOperationTools.definitions,
   ...deliveryTools.definitions,
   ...agentExtensions.definitions,
+  ...(config.notion?.enabled === true ? notionTools.definitions : []),
   ...transferMesh.definitions,
   ...powerToolDefinitions,
   ...(BROWSER_ENABLED ? browserToolDefinitions : []),
@@ -439,6 +442,7 @@ async function executeToolEffect(name, args) {
   if (name.startsWith('operation_')) return asyncOperationTools.execute(name, args);
   if (name.startsWith('delivery_')) return deliveryTools.execute(name, args);
   if (name.startsWith('agent_extension_')) return agentExtensions.execute(name, args);
+  if (name.startsWith('notion_')) return notionTools.execute(name, args);
   if (name.startsWith('transfer_mesh_')) return transferMesh.execute(name, args);
   if (name.startsWith('workflow_')) return workflowTools.execute(name, args);
   switch (name) {
@@ -499,6 +503,7 @@ async function executeToolEffect(name, args) {
         completionBeacon: deliveryStore.beacon(5),
         mutationIdempotency: mutationIdempotency.status(),
         agentExtensions: agentExtensions.status(),
+        notionIntegration: { enabled: config.notion?.enabled === true, configured: Boolean(config.notion?.clientId && config.notion?.redirectUri), selfManagedCredentials: true },
         transferMesh: { enabled: transferMesh.enabled },
         browserCompanionMonitor: browserCompanionMonitor?.status() ?? { enabled:false, lastWriteAtEpochMs:0, lastError:'' },
         delegationPolicy: { ...NO_CODEX_POLICY, commanderMayLaunchCodex: codexLaunchAuthorized(ctx.config), status: delegationStatus(ctx.config) },
