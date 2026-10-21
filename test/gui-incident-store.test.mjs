@@ -150,7 +150,7 @@ test('read-only status and screenshot do not create a phantom incident',()=>ownF
  assert.equal(await store.pending(),null);
  await assert.rejects(fs.lstat(file),{code:'ENOENT'});
 }));
-test('POSIX evidence refuses a group-readable or foreign incident directory',t=>ownFile(async file=>{
+test('POSIX evidence refuses a group-readable incident directory',t=>ownFile(async file=>{
   if(process.platform==='win32'||typeof process.getuid!=='function'){
     t.skip('POSIX private directory ownership contract');return;
   }
