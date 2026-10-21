@@ -39,6 +39,7 @@ $status=New-Object Windows.Forms.Label;$status.Text='Ready';$status.AutoSize=$fa
 $status.Anchor='Left,Right,Bottom';$status.ForeColor=[Drawing.Color]::FromArgb(120,195,245);$form.Controls.Add($status)
 
 $script:all=@()
+$script:monitorIssues=@()
 function Read-Json([string]$Path){try{Get-Content -LiteralPath $Path -Raw|ConvertFrom-Json}catch{return $null}}
 function Invoke-Cli([string]$Config,[string]$Action){
   if(-not(Test-Path -LiteralPath $Cli -PathType Leaf)){throw "workflow-cli missing: $Cli"}
@@ -63,6 +64,7 @@ function Apply-Filter{
   foreach($item in @($items)){[void]$rows.Add($item)}
   $grid.DataSource=$rows
   $status.Text="Showing $($items.Count) of $($script:all.Count) persisted workflow records. 'RUNNING' is persisted lifecycle, not proof of a live process."
+  if($script:monitorIssues.Count -gt 0){$status.Text="DEGRADED ($($script:monitorIssues.Count) issue(s)): "+$status.Text}
 }
 function Refresh-Monitor{
   try{
@@ -71,8 +73,13 @@ function Refresh-Monitor{
     $routes=@(Get-ChildItem $RoutingRoot -Filter '*.json' -File|Where-Object{$_.Name -notlike '*.runtime.json'}|Sort-Object Name)
     foreach($f in $routes){
       $route=Read-Json $f.FullName
-      if(-not $route.active.configPath -or -not(Test-Path -LiteralPath $route.active.configPath)){continue}
+      if($null -eq $route -or [string]::IsNullOrWhiteSpace([string]$route.profile)){
+        $summaries+=("$($f.BaseName): MONITOR_ERROR invalid route JSON or missing profile");continue
+      }
       $profile=[string]$route.profile
+      if([string]::IsNullOrWhiteSpace([string]$route.active.configPath) -or -not(Test-Path -LiteralPath ([string]$route.active.configPath) -PathType Leaf)){
+        $summaries+=("${profile}: MONITOR_ERROR missing workflow config");continue
+      }
       try{
         $st=Invoke-Cli ([string]$route.active.configPath) 'status'
         $list=@(Invoke-Cli ([string]$route.active.configPath) 'list')
@@ -88,10 +95,16 @@ function Refresh-Monitor{
         $summaries+=("${profile}: MONITOR_ERROR $($_.Exception.Message)")
       }
     }
+    if ($routes.Count -eq 0) { $summaries += 'NO_PROFILES: No routing profiles were discovered.' }
     $script:all=@($rows|Sort-Object Profile,Lifecycle,Id)
+    $script:monitorIssues=@($summaries|Where-Object{$_ -match 'MONITOR_ERROR|NO_PROFILES'})
     $summary.Text=($summaries -join [Environment]::NewLine)
     Apply-Filter
-  }catch{$status.Text="Refresh failed: $($_.Exception.Message)"}
+  }catch{
+    $script:all=@();$script:monitorIssues=@('MONITOR_ERROR')
+    $grid.DataSource=$null;$summary.Text='MONITOR_ERROR: Refresh unavailable'
+    $status.Text="DEGRADED: Refresh failed: $($_.Exception.Message)"
+  }
 }
 $refresh.Add_Click({Refresh-Monitor})
 $filter.Add_TextChanged({Apply-Filter})

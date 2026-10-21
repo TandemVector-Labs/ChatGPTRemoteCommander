@@ -147,3 +147,13 @@ test('new Windows desktop/admin scripts parse without execution',t=>{
     assert.equal(r.status,0,script+'\n'+(r.stdout||'')+(r.stderr||''));
   }
 });
+
+
+test('Operations Monitor preserves degraded status across filtering and clears stale rows',t=>{
+  if(process.platform!=='win32'){t.skip('Windows PowerShell behavior gate');return;}
+  const result=spawnSync('pwsh.exe',['-NoLogo','-NoProfile','-NonInteractive','-File',path.join(root,'test','operations-monitor-state.test.ps1')],{
+    cwd:root,encoding:'utf8',windowsHide:true,timeout:20000
+  });
+  assert.equal(result.status,0,(result.stdout||'')+'\n'+(result.stderr||''));
+  assert.match(result.stdout,/OPERATIONS_MONITOR_BEHAVIOR_PASS checks=\d+/);
+});
