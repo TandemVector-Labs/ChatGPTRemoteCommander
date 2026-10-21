@@ -14,7 +14,8 @@ function fakeVault() {
   return {
     available: true, backend: 'fixture-memory',
     async load() { return stored; },
-    async save(value) { stored = structuredClone(value); }
+    async save(value) { stored = structuredClone(value); },
+    async clear() { const had = stored !== null; stored = null; return had; }
   };
 }
 function mockResponse(status, body, headers = {}) {
@@ -340,5 +341,36 @@ test('safe PAT status CLI exposes only bounded state, accepts named profiles, an
     const bad=spawnSync(process.execPath,[cli,...args],{encoding:'utf8',timeout:8000});
     assert.equal(bad.status,1);
     assert.match(bad.stderr,/NOTION_PAT_CLI_ARGUMENT_INVALID/);
+  }
+});
+
+test('disconnect explicitly removes only local REST credential and does not expose secrets', async () => {
+  const token='ntn_'+'s'.repeat(48), vault=fakeVault();
+  await vault.save({access_token:token,auth_type:'personal_access_token'});
+  const engine=new NotionEngine({config:{enabled:true},vault});
+  await assert.rejects(engine.disconnect(),/NOTION_DISCONNECT_CONFIRMATION_REQUIRED/);
+  assert.equal((await vault.load()).access_token,token);
+  const result=await engine.disconnect({confirmed:true});
+  assert.deepEqual(result,{connected:false,removed:true});
+  assert.equal(await vault.load(),null);
+  assert.equal((await engine.status()).connected,false);
+  assert.equal(JSON.stringify(result).includes(token),false);
+  assert.deepEqual(await engine.disconnect({confirmed:true}),{connected:false,removed:false});
+  await assert.rejects(new NotionEngine({config:{enabled:true},vault:{available:false}}).disconnect({confirmed:true}),
+    /NOTION_VAULT_UNAVAILABLE/);
+  await assert.rejects(new NotionEngine({config:{enabled:false},vault}).disconnect({confirmed:true}),
+    /NOTION_DISABLED/);
+});
+test('Notion manager CLI rejects accidental disconnect and mixed actions without touching vault', async()=>{
+  const {spawnSync}=await import('node:child_process');
+  const {fileURLToPath}=await import('node:url');
+  const cli=fileURLToPath(new URL('../tools/notion-pat-import.mjs',import.meta.url));
+  for(const args of [['--disconnect'],['--confirm-disconnect'],['--verify','--status'],
+    ['--disconnect','--confirm-disconnect','--status'],['--verify','--replace-existing'],
+    ['--disconnect','--confirm-disconnect','--token-stdin']]){
+    const r=spawnSync(process.execPath,[cli,...args],{encoding:'utf8',timeout:8000});
+    assert.equal(r.status,1,args.join(' '));
+    assert.match(r.stderr,/NOTION_PAT_CLI_ARGUMENT_INVALID/);
+    assert.doesNotMatch(r.stdout+r.stderr,/access_token|refresh_token|ntn_/);
   }
 });
