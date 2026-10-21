@@ -21,6 +21,22 @@ function Test-SystemOwner($Process){
     return ([string]$owner.User -ieq 'SYSTEM')
   } catch { return $false }
 }
+# A machine-only tunnel credential cannot be decrypted by the logged-in user.
+# Preserve the live SYSTEM supervisor and all tunnels instead of handing off
+# to a user supervisor that would silently skip the primary profile.
+$CredDir=Join-Path $OwnerLocal 'ChatGPTRemoteCommander\\credentials'
+$missingUserCredentials=@()
+foreach($profile in @(Get-ChildItem -LiteralPath $ProfileDir -Filter '*.yaml' -File -ErrorAction SilentlyContinue)){
+  $userCredential=Join-Path $CredDir ($profile.BaseName+'.dpapi')
+  if(-not(Test-Path -LiteralPath $userCredential -PathType Leaf)){
+    $missingUserCredentials += $profile.BaseName
+  }
+}
+if($missingUserCredentials.Count -gt 0){
+  Write-HandoffLog ('HANDOFF_DEFERRED_MACHINE_ONLY_CREDENTIALS profiles=' + ($missingUserCredentials -join ','))
+  exit 0
+}
+
 function Get-CommanderBusy {
   try {
     $body=@{jsonrpc='2.0';id=1;method='tools/call';params=@{name='system_status';arguments=@{}}}|ConvertTo-Json -Depth 8 -Compress

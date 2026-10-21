@@ -172,7 +172,7 @@ hasAll(account, [
 ], 'connect-chatgpt-account.ps1');
 
 if (process.platform === 'win32') {
-  for (const script of ['autostart-windows.ps1','windows-supervisor-runtime.ps1','enable-boot-recovery.ps1','handoff-user-session-windows.ps1','disable-boot-recovery.ps1']) {
+  for (const script of ['autostart-windows.ps1','windows-supervisor-runtime.ps1','enable-boot-recovery.ps1','windows-pwsh-task-launcher.ps1','handoff-user-session-windows.ps1','disable-boot-recovery.ps1']) {
     const parse = spawnSync('pwsh.exe', ['-NoLogo','-NoProfile','-Command',
       '$t=$null;$e=$null;[void][System.Management.Automation.Language.Parser]::ParseFile("'+script+'",[ref]$t,[ref]$e);if($e.Count){$e|ForEach-Object{$_.Message};exit 1}'],
       { encoding:'utf8', windowsHide:true });
