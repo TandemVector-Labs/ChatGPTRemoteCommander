@@ -1,7 +1,7 @@
 # Native Notion Engine — scoped prototype (2026-10-21)
 
 ## Purpose and status
-Implements a **Commander Core-owned**, opt-in Notion REST client and OAuth connection, not a second workflow engine. Code lives in `src/notion-engine.mjs` and is integrated into `src/server-v0.3.mjs`. It is a **development candidate** in `feat/native-notion-engine-20261021`; **not installed, signed, released or connected to a real Notion Workspace**. Notion MCP remote-client support, dashboard, webhooks and two-way sync remain separate later integration gates.
+Implements a **Commander Core-owned**, opt-in Notion REST client and OAuth connection, not a second workflow engine. Code lives in `src/notion-engine.mjs` and is integrated into `src/server-v0.3.mjs`. It is a **development candidate** in `feat/native-notion-engine-20261021`; **not merged, installed as the new candidate, signed or released**. The independent hosted Notion MCP client is authenticated on Emad-PC and live page reads are verified; the separate REST client is not yet enrolled. Dashboard, webhooks and two-way sync remain separate later integration gates.
 
 ## Notion MCP OAuth/PKCE (optional, independent client)
 Notion's hosted MCP OAuth service is a distinct audience from the REST API. **Do not interchange tokens.** As of the verified public metadata probe on 2026-10-21, resource metadata is accessible at `https://mcp.notion.com/.well-known/oauth-protected-resource` (HTTP 200), and the authorization-server metadata advertises dynamic client registration, S256 PKCE, authorization and refresh token endpoints. The documentation's alternative `/mcp/.well-known/oauth-protected-resource` returned HTTP 401 from this host; the engine uses the verified working root discovery path.
@@ -96,3 +96,25 @@ The CLI's isolated argument, consent-flow and browser-launch tests live in `test
 - Provider response bodies are capped at 256 KiB for validated `notion-fetch` page IDs; other arbitrary tool calls remain capped at 32 KiB. Public Commander results include only a 6,000-character content preview, truncation status and byte length. Invalid IDs and provider errors fail closed.
 - Real non-mutating acceptance on Emad-PC: `ChatGPTRemoteCommander` project page was fetched with independent credentials; the same page was subsequently fetched through an **isolated real Commander server HTTP `tools/list` / `tools/call`** route. Page content/IDs and access tokens were not printed in qualification output. Fake provider and negative-input unit tests: Windows 22/22 tests PASS in focused suite including Core HTTP and login checks; Linux Node22 Notion MCP 16/16 PASS with SHA-256 identical staged files; Security Audit and Smoke PASS.
 - REST OAuth remains independently unconfigured on Emad-PC (no REST client secret and no REST vault credential). This MCP page-read success does not authorize Notion REST access or any write. A controlled disposable write/read-back/cleanup is therefore a separate acceptance gate, and protected production merge/deploy remains unpromoted.
+
+### Optional native REST Personal Access Token (PAT) enrollment — 2026-10-21
+
+For the owner's **single-user** Commander on their own trusted PC, Notion's current official docs support a user-scoped PAT as an alternative to registering a public OAuth integration. The personal token has the creator's own page permissions and must have **Notion API** capability. A multi-user/distributed Commander product should continue to use a public OAuth connection per user. This alternative is not related to the already-authorized hosted MCP token; do not copy or exchange those audiences.
+
+- Secure local importer: `node tools/notion-pat-import.mjs --token-stdin --profile default`. It **rejects command-line token arguments**, receives only a masked terminal prompt through stdin, verifies the token at `GET https://api.notion.com/v1/users/me` with pinned official API base/Notion-Version before persisting, and saves only the verified credential to the profile's protected Windows DPAPI/Linux libsecret REST vault. Invalid tokens and unavailable vaults fail closed. Existing OAuth/PAT credentials cannot be overwritten without explicit `--replace-existing`.
+- The importer is **not** an MCP tool and the secret must never be pasted in chats, CLI arguments or repository files. On the Windows owner machine, after creating a dedicated PAT with the Notion API capability in the official Developer portal, run from this feature worktree in a local PowerShell terminal:
+
+```powershell
+$secret = Read-Host 'Notion REST PAT' -AsSecureString
+$ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secret)
+try {
+  $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
+  $plain | node tools/notion-pat-import.mjs --token-stdin --profile default
+} finally {
+  if ($ptr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
+  Remove-Variable plain,secret -ErrorAction SilentlyContinue
+}
+```
+
+- Supported REST authentication is **opt-in** and separate from `notionMcp`. `notion_status.credentialType` reports `personal_access_token` versus `oauth` without emitting credentials. Failed verification does not disturb a pre-existing vault entry. All write calls remain disabled until `notion.allowWrites` is explicitly true; the current CLI only performs authentication, not writes.
+- Windows synthetic regression for PAT verification, rejection, safe replacement and CLI argv/secret redaction passed. **No real PAT has yet been created/enrolled or verified in the REST vault** in the evidence available here; the REST acceptance gate remains OPEN. See official docs: https://developers.notion.com/guides/get-started/personal-access-tokens

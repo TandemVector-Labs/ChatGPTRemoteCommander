@@ -253,3 +253,75 @@ test('529 service overload retries safely without duplicating writes', async () 
   assert.equal((await engine.getPage(page)).id, page);
   assert.equal(attempts, 2);
 });
+
+test('personal token REST enrollment validates identity before storing in OS-backed vault', async () => {
+  const token = 'ntn_' + 'q'.repeat(48);
+  const vault = fakeVault(), calls = [];
+  const engine = new NotionEngine({config:{enabled:true}, vault, fetchImpl:async(url,opts)=>{
+    calls.push({url,method:opts.method,redirect:opts.redirect,auth:opts.headers.Authorization});
+    return mockResponse(200,{object:'user',id:workspace});
+  }});
+  assert.deepEqual(await engine.importPersonalAccessToken(token),{
+    connected:true,credentialType:'personal_access_token',verified:true
+  });
+  const status=await engine.status();
+  assert.equal(status.connected,true);
+  assert.equal(status.credentialType,'personal_access_token');
+  assert.equal(JSON.stringify(status).includes(token),false);
+  assert.equal((await vault.load()).access_token,token);
+  assert.equal((await vault.load()).refresh_token,null);
+  assert.equal(calls.length,1);
+  assert.equal(calls[0].url,'https://api.notion.com/v1/users/me');
+  assert.equal(calls[0].method,'GET');
+  assert.equal(calls[0].redirect,'error');
+  assert.equal(calls[0].auth,'Bearer '+token);
+  await assert.rejects(engine.importPersonalAccessToken('ntn_'+'r'.repeat(48)),/NOTION_ALREADY_CONNECTED/);
+  assert.equal(calls.length,1);
+});
+test('personal token import refuses missing vault, disabled state, invalid or unauthorized credentials',async()=>{
+  const token='ntn_'+'z'.repeat(48);
+  const noVault=new NotionEngine({config:{enabled:true},vault:{available:false}});
+  await assert.rejects(noVault.importPersonalAccessToken(token),/NOTION_VAULT_UNAVAILABLE/);
+  const disabled=new NotionEngine({config:{enabled:false},vault:fakeVault()});
+  await assert.rejects(disabled.importPersonalAccessToken(token),/NOTION_DISABLED/);
+  let requests=0;
+  const vault=fakeVault();
+  const rejecting=new NotionEngine({config:{enabled:true},vault,fetchImpl:async()=>{
+    requests++;return mockResponse(401,{message:'synthetic private auth error'});
+  }});
+  for (const wrong of ['abc', 'not a token', 'ntn_'+'a'.repeat(520)]) {
+    await assert.rejects(rejecting.importPersonalAccessToken(wrong),/NOTION_PAT_INVALID_FORMAT/);
+  }
+  assert.equal(requests,0);
+  await assert.rejects(rejecting.importPersonalAccessToken(token),/NOTION_PAT_UNAUTHORIZED/);
+  assert.equal(await vault.load(),null);
+  assert.equal(requests,1);
+  const invalidResponse=new NotionEngine({config:{enabled:true},vault,fetchImpl:async()=>mockResponse(200,{object:'not_user',id:workspace})});
+  await assert.rejects(invalidResponse.importPersonalAccessToken(token),/NOTION_PAT_VERIFICATION_FAILED/);
+  assert.equal(await vault.load(),null);
+});
+test('personal token replacement is an explicit local action and preserves old entry on failed verification', async()=>{
+  const old='ntn_'+'b'.repeat(48),candidate='ntn_'+'c'.repeat(48);
+  const vault=fakeVault();await vault.save({access_token:old,refresh_token:'old-refresh'});
+  const engine=new NotionEngine({config:{enabled:true},vault,fetchImpl:async()=>mockResponse(500,{})});
+  await assert.rejects(engine.importPersonalAccessToken(candidate,{replaceExisting:true}),/NOTION_PAT_VERIFICATION_FAILED/);
+  assert.equal((await vault.load()).access_token,old);
+  assert.equal((await vault.load()).refresh_token,'old-refresh');
+});
+test('PAT CLI only accepts piped credentials, redacts failures and has a safe help path',async()=>{
+  const {spawnSync}=await import('node:child_process');
+  const {fileURLToPath}=await import('node:url');
+  const cli=fileURLToPath(new URL('../tools/notion-pat-import.mjs',import.meta.url));
+  const help=spawnSync(process.execPath,[cli,'--help'],{encoding:'utf8',timeout:8000});
+  assert.equal(help.status,0);
+  assert.match(help.stdout,/token-stdin/);
+  const credential='ntn_'+'p'.repeat(48);
+  const improper=spawnSync(process.execPath,[cli,'--token',credential],{encoding:'utf8',timeout:8000});
+  assert.equal(improper.status,1);
+  assert.equal((improper.stdout+improper.stderr).includes(credential),false);
+  assert.match(improper.stderr,/NOTION_PAT_CLI_ARGUMENT_INVALID/);
+  const invalid=spawnSync(process.execPath,[cli,'--token-stdin'],{encoding:'utf8',input:'NOT_VALID_PAT_TEST\n',timeout:8000});
+  assert.equal(invalid.status,1);
+  assert.equal((invalid.stdout+invalid.stderr).includes('NOT_VALID_PAT_TEST'),false);
+  assert.match(invalid.stderr,/NOTION_PAT_INVALID_FORMAT/);
+});

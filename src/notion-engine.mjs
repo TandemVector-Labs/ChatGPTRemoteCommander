@@ -128,9 +128,43 @@ export class NotionEngine {
     const account = this.vault.available ? await this.vault.load().catch(() => null) : null;
     return { enabled: true, oauthConfigured: Boolean(this.config.clientId && process.env.REMOTE_COMMANDER_NOTION_CLIENT_SECRET),
       vault: this.vault.backend, vaultAvailable: this.vault.available, connected: Boolean(account?.access_token),
+      credentialType: account?.access_token ? (account.auth_type === 'personal_access_token' ? 'personal_access_token' : 'oauth') : null,
       workspaceId: account?.workspace_id ?? null, workspaceName: account?.workspace_name ?? null,
       loginPending: Boolean(this.pending && Date.now() < this.pending.expiresAt),
       lastVerifiedAt: this.lastVerifiedAt };
+  }
+  async importPersonalAccessToken(token, { replaceExisting = false } = {}) {
+    if (!this.config.enabled) throw fail('NOTION_DISABLED');
+    if (!this.vault.available) throw fail('NOTION_VAULT_UNAVAILABLE');
+    // PATs are never accepted from tool arguments. This method is called only by
+    // the local, stdin-only onboarding CLI; it never echoes or logs credentials.
+    if (typeof token !== 'string' || !/^[A-Za-z0-9._-]{24,512}$/.test(token))
+      throw fail('NOTION_PAT_INVALID_FORMAT');
+    const previous = await this.vault.load();
+    if (previous?.access_token && replaceExisting !== true) throw fail('NOTION_ALREADY_CONNECTED');
+    let response;
+    try {
+      response = await this.fetch(API + '/users/me', {
+        method: 'GET', redirect: 'error', headers: {
+          Authorization: 'Bearer ' + token, 'Notion-Version': VERSION,
+          'Content-Type': 'application/json'
+        }, signal: timeout(15_000)
+      });
+    } catch { throw fail('NOTION_PAT_VERIFICATION_UNAVAILABLE'); }
+    if (!response?.ok) throw fail(response?.status === 401 || response?.status === 403
+      ? 'NOTION_PAT_UNAUTHORIZED' : 'NOTION_PAT_VERIFICATION_FAILED');
+    let account;
+    try { account = await response.json(); }
+    catch { throw fail('NOTION_PAT_VERIFICATION_FAILED'); }
+    if (account?.object !== 'user' || typeof account?.id !== 'string'
+      || !/^(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$/.test(account.id))
+      throw fail('NOTION_PAT_VERIFICATION_FAILED');
+    await this.vault.save({
+      access_token: token, refresh_token: null, auth_type: 'personal_access_token',
+      workspace_id: null, workspace_name: null
+    });
+    this.lastVerifiedAt = new Date().toISOString();
+    return { connected: true, credentialType: 'personal_access_token', verified: true };
   }
   async connectStart() {
     if (!this.config.enabled) throw fail('NOTION_DISABLED');
