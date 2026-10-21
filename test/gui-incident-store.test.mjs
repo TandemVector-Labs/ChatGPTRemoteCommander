@@ -189,3 +189,35 @@ test('incident pending reads a verified file handle and refuses oversized record
  await fs.appendFile(file,' '.repeat(2050));
  await assert.rejects(s.pending(),/GUI_INCIDENT_STORAGE_UNAVAILABLE/);
 }));
+
+
+test('POSIX incident pending refuses FIFO and symlink-to-FIFO without blocking',t=>ownFile(async file=>{
+ if(process.platform==='win32'){t.skip('mkfifo is POSIX-only');return;}
+ const fifo=file+'.fifo';
+ const mk=spawnSync('mkfifo',[fifo],{encoding:'utf8',timeout:2000});
+ if(mk.error?.code==='ENOENT'){t.skip('mkfifo unavailable');return;}
+ assert.equal(mk.status,0,mk.stderr||String(mk.error));
+ const url=pathToFileURL(path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../src/gui-incident-store.mjs')).href;
+ const script=[
+   'import {createGuiInputIncidentStore} from '+JSON.stringify(url)+';',
+   'try {',
+   ' await createGuiInputIncidentStore({file:process.argv.at(-1)}).pending();',
+   " process.exitCode=5;",
+   '} catch(error) {',
+   " if(error?.message==='GUI_INCIDENT_STORAGE_UNAVAILABLE')console.log('SAFE_DENY');",
+   ' else { console.error(error?.code||error?.name);process.exitCode=6; }',
+   '}'
+ ].join('\n');
+ const run=()=>spawnSync(process.execPath,['--input-type=module','-e',script,file],{
+   encoding:'utf8',timeout:1500,windowsHide:true
+ });
+ await fs.symlink(fifo,file,'file');
+ const viaLink=run();
+ assert.equal(viaLink.status,0,'symlink->FIFO must fail before blocking: '+String(viaLink.error||viaLink.stderr));
+ assert.match(viaLink.stdout,/SAFE_DENY/);
+ await fs.unlink(file);
+ await fs.rename(fifo,file);
+ const directFifo=run();
+ assert.equal(directFifo.status,0,'direct FIFO must fail before blocking: '+String(directFifo.error||directFifo.stderr));
+ assert.match(directFifo.stdout,/SAFE_DENY/);
+}));
