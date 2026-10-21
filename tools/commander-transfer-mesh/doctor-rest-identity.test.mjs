@@ -30,8 +30,8 @@ test('REST endpoint and key are bound to one explicit loopback GUI config',()=>{
   assert.throws(()=>configuredLoopbackRest(config(address)),/loopback IP/);
  assert.throws(()=>configuredLoopbackRest(config('127.0.0.1:8384','enabled="false" tls="false"')),
   /disabled/);
- assert.throws(()=>configuredLoopbackRest(config('127.0.0.1:8384','enabled="true" tls="true"')),
-  /verified HTTPS/);
+ assert.deepEqual(configuredLoopbackRest(config('127.0.0.1:8384','enabled="true" tls="true"')),
+  {base:'http://127.0.0.1:8384',apiKey:'fixture-only-key'});
  assert.deepEqual(configuredLoopbackRest(config('127.0.0.1:8384'),'127.0.0.1:18384'),
    {base:'http://127.0.0.1:18384',apiKey:'fixture-only-key'});
  for(const bad of ['127.0.0.1:0','http://127.0.0.1:18384','127.0.0.1:70000','0.0.0.0:18384'])
@@ -48,14 +48,14 @@ test('doctor uses authenticated local REST checks, not executable paths',()=>{
  assert.ok(!src.includes('child_process')&&!src.includes('execFileSync('));
  for(const endpoint of ['/rest/system/status','/rest/system/version','/rest/config/folders','/rest/system/connections'])
   assert.ok(src.includes("'"+endpoint+"'"));
- assert.ok(src.includes("redirect:'error'"));
+ assert.ok(src.includes('pinnedSyncthingJson(root,base,key,url,authenticated)'));
  assert.ok(src.includes('verifySyncthingDaemon(status,version,IDS[node.alias])'));
  assert.ok(src.includes('configuredLoopbackRest(xml,GUI_OVERRIDES[node.alias])'));
  assert.ok(!src.includes('const candidates='));
  assert.ok(src.includes("const GUI_OVERRIDES={PC:'127.0.0.1:18384'}"));
 });
 
-test('mocked local REST doctor works without launching a substituted binary',async(t)=>{
+test('plaintext REST is refused if no verified HTTPS certificate exists',async(t)=>{
  if(process.platform!=='linux'){t.skip('Linux executable fixture');return;}
  const os=await import('node:os');
  const path=await import('node:path');
@@ -102,24 +102,9 @@ test('mocked local REST doctor works without launching a substituted binary',asy
   const run=(extra={})=>spawnSync(process.execPath,['--import',preload,doctor],{
    encoding:'utf8',timeout:7000,env:{...process.env,COMMANDER_TRANSFER_HOME:root,...extra}
   });
-  const pass=run();
-  assert.equal(pass.status,0,pass.stderr+' '+pass.stdout);
-  const result=JSON.parse(pass.stdout);
-  assert.equal(result.ok,true);
-  assert.equal(result.version,'syncthing v2.1.6');
-  assert.equal(result.activePairCount,3);
-  assert.equal(result.legacyBroadcastPaused,true);
+  const denied=run();
+  assert.equal(denied.status,1,denied.stderr+' '+denied.stdout);
+  assert.match(denied.stdout,/HTTPS identity certificate unavailable or unsafe/);
   assert.equal(fs.existsSync(marker),false);
-  for(const item of [{FAKE_BAD_ID:'1',expected:/Daemon identity mismatch/},
-                    {FAKE_BAD_VERSION:'1',expected:/Daemon version invalid/}]){
-   const {expected,...env}=item;
-   const out=run(env);
-   assert.equal(out.status,1);
-   assert.match(out.stdout,expected);
-  }
-  const wrong=run({FAKE_HEALTH_BAD:'1'});
-  assert.equal(wrong.status,1);
-  assert.match(wrong.stdout,/Configured local Syncthing REST health unavailable/);
-  assert.equal(fs.existsSync(marker),false,'unexpected binary launch');
  }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
