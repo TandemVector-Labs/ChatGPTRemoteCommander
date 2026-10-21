@@ -141,7 +141,7 @@ if (['--crash-extension', '--crash-before-extension', '--crash-extension-extra']
   // before crash-worker fixtures accumulate I/O; assertions unchanged.
   const team = { workers: [{ id: 'reader', role: 'Inspect the evidence' }, { id: 'reviewer', role: 'Review acceptance and safety' }], maxParallel: 2 };
 
-  test('team reserves all calls before workers and executes only the coordinator proposal', { timeout: 20000 }, async () => {
+  test('team reserves all calls before workers and executes only the coordinator proposal', { timeout: 6000 }, async () => {
     const entered = deferred(), release = deferred();
     let active = 0, maximum = 0, advice;
     const reservations = [];
