@@ -6,6 +6,22 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+// This worker is copied to COMMANDER_TRANSFER_HOME/durable-send.mjs on hosts.
+// Keep the minimal path-root guard self-contained so a copied worker can run
+// without relative source-tree dependencies.
+function assertUnredirectedDirectoryAncestors(input,code='MANAGED_PATH_UNSAFE'){
+ if(typeof input!=='string'||!path.isAbsolute(input))throw Error(code);
+ const normalized=path.normalize(input),anchor=path.parse(normalized).root;
+ let cur=anchor;
+ for(const part of path.relative(anchor,normalized).split(path.sep)){
+  if(!part||part==='.')continue;
+  cur=path.join(cur,part);
+  try{
+   const st=fs.lstatSync(cur);
+   if(st.isSymbolicLink()||!st.isDirectory())throw Error(code);
+  }catch(e){if(e.code==='ENOENT')continue;throw Error(code);}
+ }
+}
 process.umask(0o077);
 const root=path.resolve(process.env.COMMANDER_TRANSFER_HOME||(
  process.platform==='win32'?path.join(process.env.LOCALAPPDATA||path.join(os.homedir(),'AppData','Local'),'CommanderTransferPilot'):path.join(os.homedir(),'.local','share','commander-transfer-pilot')));
@@ -15,11 +31,29 @@ const [command,...args]=process.argv.slice(2);
 const opt=k=>{const i=args.indexOf('--'+k);return i<0?undefined:args[i+1];};
 const assertion=(test,code)=>{if(!test)throw Error(code);};
 const within=(file,base)=>{const rel=path.relative(base,file);return rel===''||(rel!=='..'&&!rel.startsWith('..'+path.sep)&&!path.isAbsolute(rel));};
+// All managed paths are within the operator-selected private transfer root.
+// A symlink in an internal ancestor or journal can escape that root even if
+// peer/id pass allow-list validation. Reject it before reading or writing.
+function assertManagedEntry(file, directory){
+ let st;
+ try { st=fs.lstatSync(file); }
+ catch(e){ if(e.code==='ENOENT')return; throw e; }
+ assertion(!st.isSymbolicLink() && (directory ? st.isDirectory() : st.isFile() && st.nlink===1),
+   'TRANSFER_MANAGED_PATH_UNSAFE');
+}
 function safePaths(peer,id){
  assertion(peers.includes(peer)&&re.test(String(id||'')),'INVALID_TRANSFER_ID_OR_PEER');
  const jobDir=path.join(root,'jobs',peer);
  const stageDir=path.join(root,'staging',peer);
- return {jobDir,stageDir,record:path.join(jobDir,id+'.json'),lock:path.join(jobDir,id+'.lock'),part:path.join(stageDir,id+'.part'),destination:path.join(root,'pairs',peer,'transfers',id)};
+ const destination=path.join(root,'pairs',peer,'transfers',id);
+ const record=path.join(jobDir,id+'.json'),lock=path.join(jobDir,id+'.lock'),part=path.join(stageDir,id+'.part');
+ // The root itself is chosen by the owner; forbid redirection below it.
+ for(const dir of [path.join(root,'jobs'),jobDir,path.join(root,'staging'),stageDir,
+  path.join(root,'pairs'),path.join(root,'pairs',peer),path.dirname(destination),destination])
+  assertManagedEntry(dir,true);
+ for(const file of [record,lock,part,path.join(destination,'payload.bin'),path.join(destination,'manifest.json')])
+  assertManagedEntry(file,false);
+ return {jobDir,stageDir,record,lock,part,destination};
 }
 const recordRead=p=>JSON.parse(fs.readFileSync(p.record,'utf8'));
 function atomicRename(from,to){
@@ -191,6 +225,7 @@ try{
   reply({schema:'ctmesh-durable-v1',contractVersion:2,admissionQuotas:true,
     supports:['enqueue','job-status','resume','cancel'],workerPersistence:true,hashVerification:'sha256'});
  }else{
+ assertUnredirectedDirectoryAncestors(root,'TRANSFER_MANAGED_PATH_UNSAFE');
  const peer=opt('peer'),id=opt('id'),p=safePaths(peer,id);
  if(command==='enqueue'){
   const source=opt('path'),sourceRoot=opt('source-root');

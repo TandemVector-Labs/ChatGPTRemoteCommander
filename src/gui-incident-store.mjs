@@ -6,6 +6,7 @@ import os from 'node:os';
 import {randomUUID} from 'node:crypto';
 import {constants} from 'node:fs';
 import fs from 'node:fs/promises';
+import {assertUnredirectedDirectoryAncestors} from './managed-path-anchor.mjs';
 
 const SCHEMA='rc-gui-pending-input-v1';
 const INPUT_TOOLS=new Set([
@@ -23,14 +24,47 @@ export function createGuiInputIncidentStore({file=defaultFile(),now=()=>new Date
   if(!path.isAbsolute(file))throw fail('GUI_INCIDENT_PATH_INVALID');
   const folder=path.dirname(file);
   async function pending(){
-    let st;
-    try{st=await fs.lstat(file);}
+    assertUnredirectedDirectoryAncestors(folder,'GUI_INCIDENT_STORAGE_UNAVAILABLE');
+    // A symlink to a FIFO could block a read-only open before file identity
+    // is checked. Preflight the named entry; re-validate after open as well.
+    let before;
+    try{before=await fs.lstat(file);}
     catch(e){if(e.code==='ENOENT')return null;throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');}
-    if(!st.isFile()||st.isSymbolicLink()||st.nlink!==1||st.size<1||st.size>2048)
+    if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1||
+       before.size<1||before.size>2048)
       throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');
-    let raw,record;
-    try{raw=await fs.readFile(file,'utf8');record=JSON.parse(raw);}
+    // On POSIX, atomically refuse the final symlink and avoid blocking on
+    // a swapped FIFO/device. Windows lacks these flags; the verified
+    // descriptor plus before/after file identity checks still fail closed
+    // for normal file swaps but do not prove a fully race-free open.
+    const flags=constants.O_RDONLY|(constants.O_NOFOLLOW??0)|(constants.O_NONBLOCK??0);
+    let handle;
+    try{handle=await fs.open(file,flags);}
     catch{throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');}
+    let record;
+    try{
+      const [st,named]=await Promise.all([handle.stat(),fs.lstat(file)]);
+      if(!st.isFile()||!named.isFile()||named.isSymbolicLink()||
+        st.nlink!==1||named.nlink!==1||st.dev!==named.dev||st.ino!==named.ino||
+        st.dev!==before.dev||st.ino!==before.ino||st.size!==before.size||
+        st.size<1||st.size>2048)
+        throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');
+      // Read only through the verified descriptor, with a hard 2 KiB cap
+      // even if another process grows the file after fstat.
+      const buffer=Buffer.alloc(2049);
+      let used=0;
+      while(used<buffer.length){
+        const {bytesRead}=await handle.read(buffer,used,buffer.length-used,used);
+        if(bytesRead===0)break;
+        used+=bytesRead;
+      }
+      if(used!==st.size||used<1||used>2048)throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');
+      record=JSON.parse(buffer.subarray(0,used).toString('utf8'));
+    }catch{throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');}
+    finally{
+      try{await handle.close();}
+      catch{throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');}
+    }
     if(record?.schema!==SCHEMA||record.status!=='PENDING_NATIVE_EFFECT'||
       !INPUT_TOOLS.has(record.tool)||typeof record.id!=='string'||
       !/^[a-zA-Z0-9-]{8,128}$/.test(record.id)||
@@ -39,6 +73,7 @@ export function createGuiInputIncidentStore({file=defaultFile(),now=()=>new Date
     return {id:record.id,tool:record.tool,startedUtc:record.startedUtc};
   }
   async function begin(tool){
+    assertUnredirectedDirectoryAncestors(folder,'GUI_INCIDENT_STORAGE_UNAVAILABLE');
     if(!INPUT_TOOLS.has(tool))throw fail('GUI_INCIDENT_TOOL_INVALID');
     const prior=await pending();
     if(prior)throw fail('GUI_INCIDENT_UNRESOLVED');
@@ -59,6 +94,7 @@ export function createGuiInputIncidentStore({file=defaultFile(),now=()=>new Date
     }
   }
   async function resolve(handle){
+    assertUnredirectedDirectoryAncestors(folder,'GUI_INCIDENT_STORAGE_UNAVAILABLE');
     if(!handle||typeof handle.id!=='string')throw fail('GUI_INCIDENT_HANDLE_INVALID');
     const prior=await pending();
     if(!prior||prior.id!==handle.id||prior.tool!==handle.tool)throw fail('GUI_INCIDENT_RESOLUTION_MISMATCH');

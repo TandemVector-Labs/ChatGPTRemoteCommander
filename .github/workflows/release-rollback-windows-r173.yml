@@ -1,4 +1,4 @@
-name: Core real promotion and rollback R173 (isolated Windows)
+name: Core version-qualified promotion and rollback R173/V025W (isolated Windows)
 
 on:
   pull_request:
@@ -36,23 +36,34 @@ jobs:
           $ErrorActionPreference='Stop'
           $sha='${{ github.event.pull_request.head.sha || github.sha }}'
           if((git rev-parse HEAD).Trim() -ne $sha){throw 'R173_WRONG_CHECKOUT_SHA'}
-          if((Get-Content package.json -Raw|ConvertFrom-Json).version -ne '0.10.23'){throw 'R173_WRONG_VERSION'}
+          $version=[string](Get-Content package.json -Raw|ConvertFrom-Json).version
+          switch($version){
+            '0.10.24' {$mode='R173';$testScript='test/release-rollback-windows-r173.ps1';$rootName='remote-commander-rollback-r173'}
+            '0.10.25' {$mode='V025W';$testScript='test/release-rollback-windows-v01025.ps1';$rootName='remote-commander-rollback-v025w'}
+            default {throw ('ROLLBACK_UNQUALIFIED_SOURCE_VERSION_'+$version)}
+          }
           $tokens=$null;$errs=$null
-          [Management.Automation.Language.Parser]::ParseFile((Join-Path $env:GITHUB_WORKSPACE 'test/release-rollback-windows-r173.ps1'),[ref]$tokens,[ref]$errs)|Out-Null
-          if(@($errs).Count){throw ('R173_PARSER_ERRORS_'+@($errs).Count)}
+          [Management.Automation.Language.Parser]::ParseFile((Join-Path $env:GITHUB_WORKSPACE $testScript),[ref]$tokens,[ref]$errs)|Out-Null
+          if(@($errs).Count){throw ('ROLLBACK_SELECTED_PARSER_ERRORS_'+@($errs).Count)}
           & pwsh.exe -NoLogo -NoProfile -NonInteractive -File test/router-ports-windows-r189.ps1 -SelfTest
           if($LASTEXITCODE -ne 0){throw 'R189_ROUTER_SCHEMA_NEGATIVE_TESTS_FAILED'}
-          $p=Join-Path $env:RUNNER_TEMP 'remote-commander-rollback-r173'
-          if(Test-Path $p){throw 'R173_NO_BLIND_RERUN'}
-          if(Test-Path (Join-Path $env:LOCALAPPDATA 'ChatGPTRemoteCommander')){throw 'R173_PREEXISTING_INSTALL'}
-          Write-Output 'R173_STATIC_EXACT_HEAD_PRESTATE_PASS'
-      - name: Real candidate v0.10.23 promotion then stable v0.10.20 rollback
+          $p=Join-Path $env:RUNNER_TEMP $rootName
+          if(Test-Path -LiteralPath $p){throw ('ROLLBACK_NO_BLIND_RERUN_'+$mode)}
+          if(Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA 'ChatGPTRemoteCommander')){throw ('ROLLBACK_PREEXISTING_INSTALL_'+$mode)}
+          ('ROLLBACK_MODE='+$mode) >> $env:GITHUB_ENV
+          Write-Output ('ROLLBACK_STATIC_EXACT_HEAD_PRESTATE_PASS mode='+$mode)
+      - name: Real version-qualified promotion and rollback in isolated runner
         shell: pwsh
         timeout-minutes: 53
         run: |
           $ErrorActionPreference='Stop'
-          & pwsh.exe -NoLogo -NoProfile -NonInteractive -File test/release-rollback-windows-r173.ps1 -ExpectedCommit '${{ github.event.pull_request.head.sha || github.sha }}'
-          if($LASTEXITCODE -ne 0){throw ('R173_NONZERO_'+$LASTEXITCODE)}
+          switch($env:ROLLBACK_MODE){
+            'R173' {$testScript='test/release-rollback-windows-r173.ps1'}
+            'V025W' {$testScript='test/release-rollback-windows-v01025.ps1'}
+            default {throw 'ROLLBACK_MODE_UNQUALIFIED'}
+          }
+          & pwsh.exe -NoLogo -NoProfile -NonInteractive -File $testScript -ExpectedCommit '${{ github.event.pull_request.head.sha || github.sha }}'
+          if($LASTEXITCODE -ne 0){throw ('ROLLBACK_SELECTED_NONZERO_'+$env:ROLLBACK_MODE+'_'+$LASTEXITCODE)}
       - name: Upload scoped CI-only evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -68,3 +79,11 @@ jobs:
             ${{ runner.temp }}/remote-commander-rollback-r173/ROLLBACK.stderr.log
             ${{ runner.temp }}/remote-commander-rollback-r173/ROUTE_PROMOTE.json
             ${{ runner.temp }}/remote-commander-rollback-r173/ROUTE_ROLLBACK.json
+            ${{ runner.temp }}/remote-commander-rollback-v025w/RETURN_V025W.json
+            ${{ runner.temp }}/remote-commander-rollback-v025w/PROMOTE.stdout.log
+            ${{ runner.temp }}/remote-commander-rollback-v025w/PROMOTE.stderr.log
+            ${{ runner.temp }}/remote-commander-rollback-v025w/ROLLBACK.stdout.log
+            ${{ runner.temp }}/remote-commander-rollback-v025w/ROLLBACK.stderr.log
+            ${{ runner.temp }}/remote-commander-rollback-v025w/ROUTE_PROMOTE.json
+            ${{ runner.temp }}/remote-commander-rollback-v025w/ROUTE_ROLLBACK.json
+            ${{ runner.temp }}/remote-commander-rollback-v025w/DIAGNOSTIC_R470.json

@@ -10,12 +10,24 @@ param(
   [switch]$StartServer,
   [switch]$SkipTunnelClient,
   [string]$TunnelClientVersion = '0.0.15',
-  [string]$SourceRef = 'v0.10.23',
+  [string]$SourceRef = 'v0.10.24',
   [string]$ExpectedCommit = ''
 )
 $ErrorActionPreference = 'Stop'
 
 $Repo = 'https://github.com/GOD13emad/ChatGPTRemoteCommander.git'
+# The organization-fork source is allowed only for a SHA-pinned GitHub-hosted
+# same-repository installer canary. Normal installs use the upstream origin.
+# This is not an arbitrary repository URL override or a publication permit.
+if ([Environment]::GetEnvironmentVariable('RC_GITHUB_CI_FORK_SOURCE','Process') -eq '1') {
+  if ($env:GITHUB_ACTIONS -ne 'true' -or
+      $env:GITHUB_REPOSITORY -ne 'TandemVector-Labs/ChatGPTRemoteCommander' -or
+      $ExpectedCommit -notmatch '^[0-9a-fA-F]{40}$' -or
+      $SourceRef -notmatch '^[A-Za-z0-9._/-]{1,128}$') {
+    throw 'CI_FORK_SOURCE_CONTEXT_DENIED'
+  }
+  $Repo = 'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git'
+}
 
 if ($PowerMode -and $StandardMode) {
   throw 'Use only one of -PowerMode or -StandardMode.'
