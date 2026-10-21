@@ -25,6 +25,14 @@ $StableRoot = Join-Path $OwnerLocal 'ChatGPTRemoteCommander\app'
 $stableSupervisor = Join-Path $StableRoot 'autostart-windows.ps1'
 $stableHandoff = Join-Path $StableRoot 'handoff-user-session-windows.ps1'
 $stableLauncher = Join-Path $StableRoot 'windows-pwsh-task-launcher.ps1'
+if ((Test-Path -LiteralPath $stableSupervisor -PathType Leaf) -and
+    (Test-Path -LiteralPath $stableHandoff -PathType Leaf) -and
+    -not (Test-Path -LiteralPath $stableLauncher -PathType Leaf) -and
+    [IO.Path]::GetFullPath($SourceRoot) -ne [IO.Path]::GetFullPath($StableRoot)) {
+  # Do not persist tasks pointing at an ephemeral update/staging checkout.
+  # A qualified Core update must place its tracked launcher in StableRoot first.
+  throw 'BOOT_RECOVERY_STABLE_LAUNCHER_UPDATE_REQUIRED'
+}
 $Root = if((Test-Path -LiteralPath $stableSupervisor -PathType Leaf) -and (Test-Path -LiteralPath $stableHandoff -PathType Leaf) -and (Test-Path -LiteralPath $stableLauncher -PathType Leaf)){$StableRoot}else{$SourceRoot}
 $CredDir = Join-Path $OwnerLocal 'ChatGPTRemoteCommander\credentials'
 $ProfileDir = Join-Path $OwnerRoaming 'tunnel-client'
