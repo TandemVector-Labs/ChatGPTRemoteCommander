@@ -17,6 +17,17 @@ Set optional `notionMcp` independently of REST `notion`:
 
 Local fixture tests include PKCE challenge correctness, DCR flow, invalid state/denied consent, vault isolation, token refresh, hosted MCP init and SSE parsing. The public OAuth metadata probe is real; successful account authorization and the complete live MCP tool lifecycle remain **OPEN**. Do not represent a fixture handshake as real Workspace access. For remote-to-desktop browser handoff, the callback must run on the user's own host/loopback; a callback bound to a remote server does not become accessible on the local browser without an authorized redirect architecture.
 
+### Owner-operated login using the native Commander engine (no ChatGPT token reuse)
+Run on the **same computer** that owns the localhost callback; the source checkout must be the qualified Notion feature branch. When invoking in an existing Commander profile, select the same profile name and an unused port:
+```sh
+node tools/notion-login.mjs --probe
+node tools/notion-login.mjs --profile default --port 49732
+# optional: add --open-browser to launch the OS browser on this computer
+```
+The first command performs only live, unauthenticated OAuth discovery and does **not** register a client or open a callback. The second performs official Notion DCR/PKCE registration, binds `127.0.0.1` for up to 10 minutes, and displays the official authorization URL. The owner opens it **on the host running this command** and approves or denies access to their Notion Workspace. The authorization code and PKCE verifier are never pasted into ChatGPT. On successful consent the OS vault stores the tokens in `mcp-<profile>`, the client verifies the MCP session and attempts the fixed read-only `notion-fetch({ id: "self" })` query. On failure, disconnection or timeout the command reports a bounded gate status; no credentials are exposed in output.
+
+No browser focus is taken unless `--open-browser` was supplied. A link opened on another machine cannot reach the loopback callback. This is a bounded integration path for owner consent, **not** an authorization bypass and not an automatic production deployment. The read-only MCP path is separate from REST OAuth and cannot authorize the REST write test.
+
 Official reference: https://developers.notion.com/guides/mcp/build-mcp-client
 
 ## Requirements and external authorization
@@ -50,7 +61,7 @@ Official reference: https://developers.notion.com/guides/mcp/build-mcp-client
 `node --check src/notion-engine.mjs`
 `node --test test/notion-engine.test.mjs test/notion-mcp-engine.test.mjs test/notion-core-http.test.mjs`
 
-Tests use a synthetic memory vault and mocked Notion API; they do **not** establish real-account authorization. A Windows DPAPI round-trip test uses only fixture data and cleans its temporary directory. For full acceptance: live consent, read, explicitly authorized disposable-page create, restart/refresh, account isolation, Linux libsecret availability, invalid callback, rate-limit and failure recovery, host restart, and integration qualification on current product SHA.
+The CLI's isolated argument, consent-flow and browser-launch tests live in `test/notion-login.test.mjs`. Tests use a synthetic memory vault and mocked Notion API; they do **not** establish real-account authorization. A Windows DPAPI round-trip test uses only fixture data and cleans its temporary directory. For full acceptance: live consent, read, explicitly authorized disposable-page create, restart/refresh, account isolation, Linux libsecret availability, invalid callback, rate-limit and failure recovery, host restart, and integration qualification on current product SHA.
 
 - https://developers.notion.com/reference/get-block-children
 
