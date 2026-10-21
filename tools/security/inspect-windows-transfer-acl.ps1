@@ -18,6 +18,7 @@ try {
  if (-not [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
   throw 'WINDOWS_REQUIRED'
  }
+ if($Root -notmatch '^[A-Za-z]:[\\/]' ){throw 'LOCAL_ABSOLUTE_DRIVE_REQUIRED'}
  $full=[IO.Path]::GetFullPath($Root)
  $entry=Get-Item -LiteralPath $full -Force -ErrorAction Stop
  if(-not $entry.PSIsContainer){throw 'DIRECTORY_REQUIRED'}

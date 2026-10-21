@@ -28,7 +28,8 @@ const configure=(root,addEveryone=false)=>{
  const result=spawnSync('pwsh',['-NoProfile','-NonInteractive','-Command',ps],
    {encoding:'utf8',timeout:10000});
  assert.equal(result.status,0,result.stderr);
-};test('Windows transfer root ACL audit is fail-closed, scoped, and read-only',
+};
+test('Windows transfer root ACL audit is fail-closed, scoped, and read-only',
  {skip:process.platform!=='win32'},()=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'rc-acl-test-'));
  try{
@@ -42,6 +43,14 @@ const configure=(root,addEveryone=false)=>{
   assert.equal(clean.body.ownerIsCaller,true);
   assert.equal(clean.body.inheritanceProtected,true);
   assert.equal(fs.statSync(root).mtimeMs,before);
+  const target=path.join(root,'target');
+  fs.mkdirSync(target);
+  const junction=path.join(root,'redirected');
+  fs.symlinkSync(target,junction,'junction');
+  const redirected=run(junction);
+  assert.equal(redirected.exit,2);
+  assert.equal(redirected.body.reparseAncestorDetected,true);
+  assert.equal(run('\\\\invalid-host\\invalid-share').exit,3);
   configure(root,true);
   const exposed=run(root);
   assert.equal(exposed.exit,2);
