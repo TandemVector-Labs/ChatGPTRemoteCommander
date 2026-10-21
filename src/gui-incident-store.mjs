@@ -15,7 +15,7 @@ const INPUT_TOOLS=new Set([
 const fail=(code)=>Object.assign(new Error(code),{guiCode:code});
 // GUI Incident Store is also copied into standalone Agent Extension fixtures.
 // Keep this guard self-contained rather than importing another package file.
-export function assertUnredirectedDirectoryAncestors(input,code='GUI_INCIDENT_STORAGE_UNAVAILABLE'){
+export function assertUnredirectedDirectoryAncestors(input,code='MANAGED_PATH_UNSAFE'){
  if(typeof input!=='string'||!path.isAbsolute(input))throw Error(code);
  const normalized=path.normalize(input),anchor=path.parse(normalized).root;
  let dir=anchor;
