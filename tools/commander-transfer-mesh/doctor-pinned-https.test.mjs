@@ -36,8 +36,17 @@ test('pinned HTTPS sends dummy key only to trusted certificate, rejects imperson
  let goodCount=0,badCount=0,badKey=false;
  const cert=dir=>{
   const crt=path.join(dir,'https-cert.pem'),key=path.join(dir,'https-key.pem');
+  const config=path.join(dir,'openssl-fixture.cnf');
+  fs.writeFileSync(config,'[req]\n'+
+   'distinguished_name=dn\n'+
+   'prompt=no\n'+
+   'x509_extensions=v3\n'+
+   '[dn]\n'+
+   'CN=SyncthingFixture\n'+
+   '[v3]\n'+
+   'subjectAltName=IP:127.0.0.1\n');
   const x=spawnSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes',
-   '-keyout',key,'-out',crt,'-subj','/CN=SyncthingFixture','-days','1'],
+   '-keyout',key,'-out',crt,'-days','1','-config',config],
    {stdio:'ignore',timeout:10000});
   assert.equal(x.status,0);
   return {cert:fs.readFileSync(crt),key:fs.readFileSync(key)};
