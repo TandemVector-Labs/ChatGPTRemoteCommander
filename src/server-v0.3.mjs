@@ -354,6 +354,9 @@ function rpcError(id, code, message, data) {
 }
 async function executeTool(name, args, executionContext = {}) {
   if (!toolDefinition(name)) throw protocolFailure(200, -32602, 'Unknown tool');
+  // OAuth state is a short-lived process lease, not a durable mutation receipt: replaying a
+  // persisted authorization URL after restart would point to a nonexistent callback server.
+  if (name === 'notion_connect_start') return executeToolEffect(name, args);
   if (AUTO_DEFERRED_MUTATIONS.has(name)) {
     const { requestId, continuation, ...effectArgs } = args ?? {};
     return asyncOperationTools.execute('operation_start', {

@@ -2,7 +2,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 
 const API = 'https://api.notion.com/v1';
@@ -223,7 +223,8 @@ export class NotionEngine {
         }
         if (safe && (response.status === 429 || response.status === 529 || [500, 502, 503, 504].includes(response.status)) && attempt < 3) {
           const header = Number(response.headers?.get?.('retry-after'));
-          const delay = Number.isFinite(header) && header > 0 ? Math.min(header * 1000, 30_000) : Math.min(2 ** attempt * 1000, 8000);
+          if (Number.isFinite(header) && header > 30) throw fail('NOTION_RATE_LIMIT_RETRY_LATER');
+          const delay = Number.isFinite(header) && header > 0 ? header * 1000 : Math.min(2 ** attempt * 1000, 8000);
           await sleep(delay + Math.round(Math.random() * 150)); continue;
         }
         return bounded(await readJson(response));
