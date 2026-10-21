@@ -9,10 +9,13 @@ $ErrorActionPreference = 'Stop'
 # Windows PowerShell 5.1 is a stable system-owned task entrypoint only.
 # Always execute the actual Commander runtime using PowerShell 7.
 function Resolve-InstalledPowerShell7 {
-  $stable = @(
-    (Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'),
-    (Join-Path ([Environment]::GetEnvironmentVariable('ProgramW6432')) 'PowerShell\7\pwsh.exe')
-  ) | Select-Object -Unique
+  $stable = @()
+  foreach ($programFiles in @($env:ProgramFiles,[Environment]::GetEnvironmentVariable('ProgramW6432'))) {
+    if (-not [string]::IsNullOrWhiteSpace($programFiles)) {
+      $stable += Join-Path $programFiles 'PowerShell\7\pwsh.exe'
+    }
+  }
+  $stable = @($stable | Select-Object -Unique)
   foreach ($candidate in $stable) {
     if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
       return [IO.Path]::GetFullPath($candidate)
@@ -48,6 +51,19 @@ if ($Mode -eq 'UserSupervisor') {
     $credential = Join-Path (Join-Path $ownerLocal 'ChatGPTRemoteCommander\credentials') ($profile.BaseName + '.dpapi')
     if (-not (Test-Path -LiteralPath $credential -PathType Leaf)) {
       Write-Output 'USER_SUPERVISOR_DEFERRED_MACHINE_CREDENTIALS'
+      exit 0
+    }
+    # A present but undecryptable user-scoped key is not usable for handoff.
+    try {
+      $secure = ConvertTo-SecureString (Get-Content -LiteralPath $credential -Raw)
+      $isReady = -not [string]::IsNullOrWhiteSpace([System.Net.NetworkCredential]::new('',$secure).Password)
+    } catch {
+      $isReady = $false
+    } finally {
+      $secure = $null
+    }
+    if (-not $isReady) {
+      Write-Output 'USER_SUPERVISOR_DEFERRED_INVALID_USER_CREDENTIAL'
       exit 0
     }
   }
