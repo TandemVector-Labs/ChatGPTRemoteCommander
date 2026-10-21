@@ -52,7 +52,7 @@ export function createIsolatedSeatCoordinator({
   const active=new Map();
   const reservedIds=new Set();
   const pendingCompletions=new Set();
-  let pending=0, closed=false;
+  let pending=0, closed=false, unresolvedStartupCleanup=false;
 
   function required(ownerId,seatId,lease) {
     if (!word(ownerId) || !word(seatId) || typeof lease!=='string') throw fail('SEAT_AUTH_INVALID');
@@ -120,7 +120,7 @@ export function createIsolatedSeatCoordinator({
     } catch(e) {
       if (handle!==undefined && !registered) {
         try {await backend.stop(handle);}
-        catch {closed=true;throw fail('SEAT_CLEANUP_UNCERTAIN');}
+        catch {closed=true;unresolvedStartupCleanup=true;throw fail('SEAT_CLEANUP_UNCERTAIN');}
       }
       throw e;
     } finally {
@@ -159,10 +159,12 @@ export function createIsolatedSeatCoordinator({
     // Do not report a successful shutdown while startup is still in progress.
     await Promise.allSettled([...pendingCompletions]);
     const r=await Promise.allSettled([...active.values()].map(stopSeat));
-    return {ok:r.every(x=>x.status==='fulfilled'),cleanupFailed:r.filter(x=>x.status==='rejected').length};
+    const cleanupFailed=r.filter(x=>x.status==='rejected').length+Number(unresolvedStartupCleanup);
+    return {ok:cleanupFailed===0,cleanupFailed};
   }
   const status=()=>({closed,isolatedOnly:true,hostDesktopTouched:false,
     leases:[...active.values()].filter(s=>!s.revoked).length,
-    quarantined:[...active.values()].filter(s=>s.quarantined).length,pending});
+    quarantined:[...active.values()].filter(s=>s.quarantined).length,
+    unresolvedStartupCleanup,pending});
   return {begin,run,end,sweep,close,status};
 }

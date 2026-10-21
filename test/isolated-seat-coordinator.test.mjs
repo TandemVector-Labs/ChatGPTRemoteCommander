@@ -207,6 +207,18 @@ test('explicit end aborts a pending input operation and never reports stale succ
   assert.equal(f.c.status().leases,0);
 });
 
+test('failed cleanup of a never-admitted child cannot report successful shutdown',async()=>{
+  const f=fixture({
+    inspect:async()=>({kernelIdentityVerified:false}),
+    stop:async()=>{throw Error('orphaned worker');},
+  });
+  await assert.rejects(begin(f.c),/SEAT_CLEANUP_UNCERTAIN/);
+  assert.equal(f.c.status().closed,true);
+  assert.equal(f.c.status().unresolvedStartupCleanup,true);
+  assert.deepEqual(await f.c.close(),{ok:false,cleanupFailed:1});
+  await assert.rejects(begin(f.c),/SEAT_COORDINATOR_CLOSED/);
+});
+
 test('close returns failure when cleanup is unverified and never reopens admission',async()=>{
   const f=fixture({stop:async()=>{throw Error('cannot stop');}});
   await begin(f.c);
