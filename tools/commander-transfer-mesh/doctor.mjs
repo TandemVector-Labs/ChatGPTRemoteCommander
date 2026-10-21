@@ -20,6 +20,10 @@ const output={schema:'ctmesh-doctor-v1',ok:false,alias:null,version:null,apiStat
  activePairCount:0,legacyBroadcastPaused:false,staleMisconfiguredActive:0,connectedPeers:0,transports:{},errors:[]};
 function err(e){output.errors.push(String(e?.message||e).slice(0,200).replace(/<apikey>.*?<\/apikey>/ig,'[REDACTED]'));}
 try {
+ // Reject network shares and device paths before any potentially blocking I/O.
+ if(!path.isAbsolute(root)||
+    (process.platform==='win32'&&!/^[A-Za-z]:[\\/]/.test(root)))
+   throw Error('Untrusted operator state root namespace');
  const node=JSON.parse(fs.readFileSync(path.join(root,'node.json'),'utf8'));
  output.alias=node.alias;
  if(!Object.hasOwn(IDS,node.alias)||node.deviceID!==IDS[node.alias])throw new Error('Node identity mismatch');

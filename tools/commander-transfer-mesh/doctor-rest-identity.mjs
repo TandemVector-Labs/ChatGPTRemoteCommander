@@ -53,6 +53,10 @@ export async function pinnedSyncthingJson(stateRoot,base,apiKey,endpoint,authent
  // Deny symlinks/junctions in all parent components, not only the PEM itself.
  // This uses the same operator-selected stateRoot but does not trust linked
  // ancestors or a final-file symlink as certificate provenance.
+ // Reject UNC/device certificate authorities before any disk or network access.
+ if(typeof stateRoot!=='string'||!path.isAbsolute(stateRoot)||
+    (process.platform==='win32'&&!/^[A-Za-z]:[\\/]/.test(stateRoot)))
+   throw Error('Syncthing HTTPS identity certificate unavailable or unsafe');
  const certPath=path.join(stateRoot,'state','https-cert.pem');
  let cert;
  try{
