@@ -1,7 +1,10 @@
 // Fail-closed historical audit provenance. A single known Notion fake-vault
 // bearer assertion is not a credential. Do not widen this exception to an
 // entire branch, file, token class, or unrelated commit.
-const notionFixtureCommit='7b28ae4ffbfc3094c70647fd1ad8c4c491ba7bf5';
+const notionFixtureCommits=new Set([
+  '7b28ae4ffbfc3094c70647fd1ad8c4c491ba7bf5',
+  '7602330376070ca3681838e49bf7f932179a04d9'
+]);
 const notionFixtureFile='test/notion-mcp-engine.test.mjs';
 const notionFixtureHeader='Bearer ' + 'FIXTURE_PRIVATE_ACCESS';
 
@@ -21,6 +24,6 @@ export function historyMatchProvenance(history,index){
 export function isVerifiedSyntheticNotionBearer(type,matched,origin){
   return type==='Bearer token literal' &&
     matched===notionFixtureHeader &&
-    origin?.commit===notionFixtureCommit &&
+    notionFixtureCommits.has(origin?.commit) &&
     origin?.file===notionFixtureFile;
 }
