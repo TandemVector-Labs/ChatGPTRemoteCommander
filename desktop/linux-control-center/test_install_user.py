@@ -38,6 +38,36 @@ class LocalControlCenterPackageTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "STAGING_DESTINATION_EXISTS"):
             installer.stage(self.source, dest, self.target)
 
+    def test_owner_home_environment_cannot_escape_or_follow_symlinks(self):
+        private = self.root / "safe-xdg"
+        private.mkdir(mode=0o700)
+        with patch.object(installer, "_system_owner_home", return_value=self.root):
+            with patch.dict(os.environ, {"XDG_DATA_HOME": str(private)}):
+                self.assertEqual(installer._validated_xdg_data_home(), private)
+            with patch.dict(os.environ, {"XDG_DATA_HOME": "/etc"}):
+                with self.assertRaisesRegex(RuntimeError, "UNSAFE_XDG_DATA_HOME"):
+                    installer._validated_xdg_data_home()
+            with patch.dict(os.environ, {"XDG_DATA_HOME": "relative/hijack"}):
+                with self.assertRaisesRegex(RuntimeError, "XDG_DATA_HOME_MUST_BE_ABSOLUTE"):
+                    installer._validated_xdg_data_home()
+            link = self.root / "link"
+            link.symlink_to(private, target_is_directory=True)
+            with patch.dict(os.environ, {"XDG_DATA_HOME": str(link)}):
+                with self.assertRaisesRegex(RuntimeError, "UNSAFE_XDG_DATA_HOME"):
+                    installer._validated_xdg_data_home()
+
+    def test_stage_path_rejects_escaping_or_symlinked_parents(self):
+        target = self.root / "stage1"
+        self.assertEqual(installer._bounded_stage_target(target), target)
+        with self.assertRaisesRegex(RuntimeError, "UNTRUSTED_DESTINATION"):
+            installer._bounded_stage_target(Path("/etc/rc-notion-invalid"))
+        nested = self.root / "owned"
+        nested.mkdir(mode=0o700)
+        symlink = self.root / "alias"
+        symlink.symlink_to(nested, target_is_directory=True)
+        with self.assertRaisesRegex(RuntimeError, "STAGE_PATH_SYMLINK_ANCESTOR"):
+            installer._bounded_stage_target(symlink / "stage2")
+
     def test_install_then_retry_is_idempotent(self):
         self.assertEqual(installer.install(source=self.source, data_home=self.home),
                          "LINUX_CONTROL_CENTER_INSTALL_PASS")

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import pwd
 from pathlib import Path
 import shutil
 import stat
@@ -30,6 +31,45 @@ def _private_dir(folder: Path) -> None:
         raise RuntimeError("UNTRUSTED_DESTINATION")
     if folder.stat().st_mode & 0o022:
         raise RuntimeError("UNSAFE_DESTINATION_PERMISSIONS")
+
+
+def _system_owner_home() -> Path:
+    """Use OS uid identity, not a caller-supplied HOME environment variable."""
+    home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    if home.is_symlink() or not home.is_dir() or home.stat().st_uid != os.getuid():
+        raise RuntimeError("UNTRUSTED_HOME")
+    return home.resolve(strict=True)
+
+
+def _validated_xdg_data_home() -> Path:
+    """XDG override may only select a canonical owner-home descendant.
+
+    A hostile environment may not redirect an updater into system paths,
+    another user's directory, or a symlink-redirected tree.
+    """
+    owner = _system_owner_home()
+    override = os.environ.get("XDG_DATA_HOME")
+    if not override:
+        return owner / ".local" / "share"
+    if not os.path.isabs(override):
+        raise RuntimeError("XDG_DATA_HOME_MUST_BE_ABSOLUTE")
+    requested = Path(os.path.abspath(override))
+    real = Path(os.path.realpath(override))
+    if requested != real or not real.is_relative_to(owner) or real == owner:
+        raise RuntimeError("UNSAFE_XDG_DATA_HOME")
+    return real
+
+
+def _bounded_stage_target(requested: Path) -> Path:
+    """Stage only into an already private, owner-controlled parent directory."""
+    if not requested.is_absolute() or requested.name in ("", ".", ".."):
+        raise RuntimeError("STAGE_PATH_INVALID")
+    absolute = Path(os.path.abspath(requested))
+    canonical = Path(os.path.realpath(requested))
+    if absolute != canonical:
+        raise RuntimeError("STAGE_PATH_SYMLINK_ANCESTOR")
+    _private_dir(canonical.parent)
+    return canonical
 
 
 def desktop_entry(target: Path) -> str:
@@ -148,11 +188,11 @@ def main() -> None:
     group.add_argument("--install", action="store_true")
     args = parser.parse_args()
     source = Path(__file__).resolve().parent
-    data_home = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))).resolve()
+    data_home = _validated_xdg_data_home()
     if args.install:
         print(install(source=source, data_home=data_home))
     else:
-        dest = args.stage_dir.absolute()
+        dest = _bounded_stage_target(args.stage_dir)
         stage(source, dest, data_home / "remote-commander-control-center")
         print("LINUX_CONTROL_CENTER_STAGE_PASS")
 
