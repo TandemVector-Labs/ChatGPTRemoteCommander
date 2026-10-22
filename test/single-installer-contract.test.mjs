@@ -239,3 +239,12 @@ test('all Windows organization source entrypoints fail closed without a SHA pin'
       name+' must check a full SHA before organization source selection');
   }
 });
+
+
+test('PowerShell organizational-source preflight has no non-PowerShell slash comments',()=>{
+  for(const name of ['install.ps1','server-install-windows.ps1','auto-update-windows.ps1']){
+    const script=read(name);
+    assert.equal(/^\s*\/\/\s/m.test(script),false,
+      name+' must not contain JavaScript-style slash comments that execute as PowerShell commands');
+  }
+});
