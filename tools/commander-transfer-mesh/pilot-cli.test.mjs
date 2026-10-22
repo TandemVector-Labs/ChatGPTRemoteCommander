@@ -118,6 +118,44 @@ test('node identity cannot switch to external symlink after preflight',t=>{
  }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
 
+test('Linux rejects transfer ancestor symlink swapped after managed preflight',t=>{
+ if(process.platform!=='linux'){t.skip('Linux descriptor-relative path hardening only');return;}
+ withFixtures((src,dst)=>{
+  const id='ancestor-race-001',data=Buffer.from('external peer record with equal hash');
+  send(src,id,data);
+  const dir=mirror(src,dst,id),manifest=path.join(dir,'manifest.json');
+  const outside=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-ancestor-outside-'));
+  try{
+   fs.cpSync(dir,outside,{recursive:true,force:true});
+   const forged=path.join(outside,'manifest.json');
+   const original=JSON.parse(fs.readFileSync(forged,'utf8'));
+   fs.writeFileSync(forged,JSON.stringify({...original,name:'outside-ancestor-selected.bin'}));
+   const marker=path.join(dst,'ancestor-race-fired.marker');
+   const preload=path.join(dst,'ancestor-race-hook.cjs');
+   fs.writeFileSync(preload,[
+    "const fs=require('node:fs'),mod=require('node:module');",
+    "const old=fs.lstatSync;let fired=false,seen=0;",
+    "fs.lstatSync=function(file,...args){",
+    "if(!fired&&String(file)===process.env.RC_MANIFEST&&++seen===2){fired=true;",
+    "fs.renameSync(process.env.RC_DIRECTORY,process.env.RC_DIRECTORY+'.original');",
+    "fs.symlinkSync(process.env.RC_EXTERNAL,process.env.RC_DIRECTORY,'dir');",
+    "fs.writeFileSync(process.env.RC_MARKER,'ATTACK_FIRED');",
+    "}return old.call(this,file,...args);};",
+    "mod.syncBuiltinESMExports();"
+   ].join('\n'));
+   const result=spawnSync(process.execPath,['--require',preload,cli,'status',
+    '--peer','PC','--id',id],{encoding:'utf8',timeout:15000,
+    env:{...process.env,COMMANDER_TRANSFER_HOME:dst,RC_MANIFEST:manifest,
+     RC_DIRECTORY:dir,RC_EXTERNAL:outside,RC_MARKER:marker}});
+   assert.equal(fs.existsSync(marker),true,'Ancestor substitution must actually execute');
+   assert.notEqual(result.status,0,
+    'A post-preflight symlink ancestor must never import an outside manifest');
+   assert.match(result.stderr,/UNTRUSTED_MANAGED_ANCESTOR|ELOOP|Unsafe|Untrusted/);
+   assert.equal(JSON.parse(fs.readFileSync(forged,'utf8')).name,'outside-ancestor-selected.bin');
+  }finally{fs.rmSync(outside,{recursive:true,force:true});}
+ });
+});
+
 test('oversized untrusted incoming manifest is rejected before parsing',()=>{
  withFixtures((src,dst)=>{
   const id='oversize-manifest-001';send(src,id,Buffer.from('legitimate payload'));
@@ -194,9 +232,18 @@ test('incoming payload cannot be swapped to external symlink just before hash op
   const result=spawnSync(process.execPath,['--require',preload,cli,'status',
     '--peer','PC','--id',id],{encoding:'utf8',timeout:15000,env:{...process.env,
     COMMANDER_TRANSFER_HOME:dst,RC_PAYLOAD:payload,RC_EXTERNAL:external,RC_MARKER:marker}});
-  assert.equal(fs.existsSync(marker),true,'Attack hook must fire');
-  assert.notEqual(result.status,0,'External symlink with same digest must never authorize payload');
-  assert.match(result.stderr,/Untrusted hashed file|ELOOP|Unsafe source/);
+  if(fs.existsSync(marker)){
+   // On Windows the final pathname may still be opened; the same-digest
+   // substitution must fail closed by handle identity or O_NOFOLLOW.
+   assert.notEqual(result.status,0,'External symlink with same digest must never authorize payload');
+   assert.match(result.stderr,/Untrusted hashed file|ELOOP|Unsafe source/);
+  }else{
+   // Linux now hashes through a pinned /proc/self/fd parent: the old absolute
+   // pathname open hook is not invoked and no substitution takes place.
+   assert.equal(process.platform,'linux');
+   assert.equal(result.status,0,result.stderr);
+   assert.equal(JSON.parse(result.stdout).status,'RECEIVED_HASH_VERIFIED');
+  }
   assert.deepEqual(fs.readFileSync(external),data);
  });
 });

@@ -66,11 +66,56 @@ function assertManagedStaging(peer,id){
  assertManagedEntry(path.join(peerDir,id+'.part'),false);
 }
 const json=(o)=>process.stdout.write(JSON.stringify(o)+'\n');
+// On Linux, pin each managed ancestor by directory fd. The final component
+// is then accessed relative to the held parent via procfs, even if a peer
+// renames its apparent directory pathname after managed-tree preflight.
+// The Windows trust boundary instead depends on its protected root NTFS ACL;
+// ordinary Node path APIs cannot provide NtCreateFile handle-relative semantics.
+function withLinuxPinnedManagedPath(file,read){
+ if(process.platform!=='linux')return read(file);
+ const rel=path.relative(root,file);
+ if(rel===''||rel==='..'||rel.startsWith('..'+path.sep)||path.isAbsolute(rel))
+  return read(file); // Operator's explicit external source/destination.
+ const parts=rel.split(path.sep);
+ if(parts.some(p=>!p||p==='.'||p==='..'))fail('UNTRUSTED_MANAGED_ANCESTOR');
+ const flags=fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_NOFOLLOW;
+ const fds=[];
+ try{
+  const rootBefore=fs.lstatSync(root);
+  if(!rootBefore.isDirectory()||rootBefore.isSymbolicLink())
+   fail('UNTRUSTED_MANAGED_ANCESTOR');
+  const rootFd=fs.openSync(root,flags);
+  fds.push(rootFd);
+  const rootOpened=fs.fstatSync(rootFd),rootNamed=fs.lstatSync(root);
+  if(!rootOpened.isDirectory()||
+     rootOpened.dev!==rootBefore.dev||rootOpened.ino!==rootBefore.ino||
+     rootNamed.dev!==rootOpened.dev||rootNamed.ino!==rootOpened.ino||
+     rootNamed.isSymbolicLink()||
+     (typeof process.getuid==='function'&&
+      (rootOpened.uid!==process.getuid()||(rootOpened.mode&0o077)!==0)))
+   fail('UNTRUSTED_MANAGED_ANCESTOR');
+  for(const part of parts.slice(0,-1)){
+   let next;
+   try{next=fs.openSync('/proc/self/fd/'+fds.at(-1)+'/'+part,flags);}
+   catch(e){
+    if(['ENOTDIR','ELOOP','ENOENT'].includes(e.code))
+     fail('UNTRUSTED_MANAGED_ANCESTOR');
+    throw e;
+   }
+   fds.push(next);
+   if(!fs.fstatSync(next).isDirectory())fail('UNTRUSTED_MANAGED_ANCESTOR');
+  }
+  return read('/proc/self/fd/'+fds.at(-1)+'/'+parts.at(-1));
+ }finally{for(let n=fds.length-1;n>=0;n--)fs.closeSync(fds[n]);}
+}
 // A same-digest symlink is still an untrusted source: bind each hash to the
 // regular file actually opened, rejecting a swapped final path component.
 // This protects the final component on O_NOFOLLOW platforms; a separate
 // protected parent directory is still required to exclude ancestor races.
 function hash(file){
+ return withLinuxPinnedManagedPath(file,name=>hashVerifiedName(name));
+}
+function hashVerifiedName(file){
  const unsafe=()=>fail('Untrusted hashed file');
  const before=fs.lstatSync(file);
  if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1)unsafe();
@@ -218,6 +263,9 @@ function copyVerifiedPartial(source,part,bytes){
 // Identity and incoming manifest JSON are authoritative. Both must be parsed
 // from the same descriptor that passed regular-file / pathname identity checks.
 function readVerifiedJson(file,code){
+ return withLinuxPinnedManagedPath(file,name=>readVerifiedJsonName(name,code));
+}
+function readVerifiedJsonName(file,code){
  const unsafe=()=>fail(code);
  const before=fs.lstatSync(file),limit=16384;
  if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1||
