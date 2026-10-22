@@ -142,7 +142,7 @@ function enforceAdmission(bytes){
   for(const item of fs.readdirSync(path.join(dir,peerDir.name),{withFileTypes:true})){
    if(!item.name.endsWith('.json'))continue;
    assertion(item.isFile()&&!item.isSymbolicLink(),'QUEUE_RECORD_UNSAFE');
-   const j=JSON.parse(fs.readFileSync(path.join(dir,peerDir.name,item.name),'utf8'));
+   const j=recordRead({record:path.join(dir,peerDir.name,item.name)});
    assertion(Number.isSafeInteger(j.bytes)&&j.bytes>=0,'QUEUE_RECORD_INVALID');
    if(['PUBLISHED','CANCELLED'].includes(j.status))continue;
    pending+=j.bytes;
