@@ -80,7 +80,7 @@ Type: files; Name: "{group}\Remote Commander Operations Monitor.lnk"
 Type: files; Name: "{group}\Remote Commander Admin Runtime.lnk"
 
 [Run]
-Filename: "{app}\RemoteCommander.exe"; Description: "Open Remote Commander"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\RemoteCommander.exe"; Description: "Open Remote Commander"; Flags: nowait postinstall skipifsilent; Check: ShouldAutoLaunchCommander
 
 [Code]
 var
@@ -99,6 +99,17 @@ begin
   else Result := 0;
 end;
 #endif
+
+// Inno's [Run] executes before ssPostInstall Browser return-code qualification.
+ // If Browser is selected, avoid starting the Control Center before the
+ // nested setup has completed; the user can open it from the installed shortcut.
+function ShouldAutoLaunchCommander: Boolean;
+begin
+  Result := True;
+#ifdef BrowserSetup
+  Result := not WizardIsComponentSelected('browser');
+#endif
+end;
 
 function JsonBool(Value: Boolean): String;
 begin
@@ -290,7 +301,7 @@ begin
     ExtractTemporaryFile('{#BrowserSetupName}');
     WizardForm.StatusLabel.Caption := 'Installing selected Remote Commander Browser...';
     if not Exec(ExpandConstant('{tmp}\{#BrowserSetupName}'),
-      '/VERYSILENT /NORESTART', '', SW_HIDE, ewWaitUntilTerminated, BrowserExitCode) then
+      '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART', '', SW_HIDE, ewWaitUntilTerminated, BrowserExitCode) then
     begin
       BrowserSetupFailed := True;
       Log('BROWSER_INSTALL_LAUNCH_FAILED');

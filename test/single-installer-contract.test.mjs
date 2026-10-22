@@ -187,3 +187,15 @@ test('selected nested Browser failure is checked before writing installation met
   assert.ok(code.indexOf('BROWSER_INSTALL_EXIT_NONZERO_') <
     code.indexOf("SaveStringToFile(ExpandConstant('{app}\\product-install.json')"));
 });
+
+
+test('Browser selection cannot auto-open Commander before Browser post-install succeeds',()=>{
+  const iss=read('installer/RemoteCommander.iss');
+  const run=iss.slice(iss.indexOf('[Run]'),iss.indexOf('[Code]'));
+  assert.ok(run.includes('Check: ShouldAutoLaunchCommander'));
+  assert.ok(iss.includes('function ShouldAutoLaunchCommander: Boolean;'));
+  assert.ok(iss.includes("Result := not WizardIsComponentSelected('browser')"));
+  assert.ok(iss.includes('#ifdef BrowserSetup'));
+  assert.ok(iss.includes("'/VERYSILENT /SUPPRESSMSGBOXES /NORESTART'"));
+  assert.ok(iss.includes('if not WizardSilent then'));
+});
