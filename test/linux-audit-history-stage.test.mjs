@@ -8,6 +8,12 @@ import {spawnSync} from 'node:child_process';
 
 const linuxOnly={skip:process.platform!=='linux'&&'Linux Git unshallow verification'};
 const source=fs.readFileSync(new URL('../auto-update-linux.sh',import.meta.url),'utf8');
+const installerSource=fs.readFileSync(new URL('../install.sh',import.meta.url),'utf8');
+const installStart=installerSource.indexOf('ensure_install_audit_history(){');
+const installEnd=installerSource.indexOf('\nvalidate_installation() {',installStart);
+assert.ok(installStart>=0&&installEnd>installStart,'fresh installer must have a history verifier');
+const installVerifier=installerSource.slice(installStart,installEnd);
+const installCommand=['set -euo pipefail','INSTALL_DIR="$1"','EXPECTED_COMMIT="$2"',installVerifier,'ensure_install_audit_history'].join('\n');
 const start=source.indexOf('ensure_complete_audit_history(){');
 const end=source.indexOf('\nstage_release(){',start);
 assert.ok(start>=0&&end>start,'fail-closed candidate history verifier must exist');
@@ -90,4 +96,46 @@ test('candidate history provenance gate precedes audit and all Core promotion',(
   assert.ok(stage>=0&&history>stage&&audit>history&&state>audit);
   assert.match(func,/git -C "\$stage" fetch --quiet --no-tags --unshallow origin "\$expected"/);
   assert.match(func,/GIT_TERMINAL_PROMPT=0 timeout/);
+});
+
+
+test('fresh Linux Core install expands stage history before strict security audit',linuxOnly,t=>{
+  const f=fixture(t);
+  const result=run('bash',['-euo','pipefail','-c',installCommand,'qa',f.stage,f.head],f.root);
+  assert.equal(result.status,0,result.stderr);
+  assert.match(result.stdout,/INSTALL_AUDIT_HISTORY_FETCH_START/);
+  assert.match(result.stdout,/INSTALL_AUDIT_HISTORY_FULL_PASS/);
+  assert.equal(git(f.stage,'rev-parse','--is-shallow-repository'),'false');
+  assert.equal(git(f.stage,'rev-parse','HEAD'),f.head);
+  assert.equal(git(f.stage,'status','--porcelain','--untracked-files=no'),'');
+});
+test('fresh Linux installer rejects wrong commit, dirty source and unavailable ancestry',linuxOnly,t=>{
+  const f=fixture(t);
+  const invoke=(sha)=>run('bash',['-euo','pipefail','-c',installCommand,'qa',f.stage,sha],f.root);
+  const wrong=invoke('a'.repeat(40));
+  assert.notEqual(wrong.status,0);
+  assert.match(wrong.stderr,/INSTALL_AUDIT_PIN_MISMATCH/);
+  assert.equal(git(f.stage,'rev-parse','--is-shallow-repository'),'true');
+  fs.appendFileSync(path.join(f.stage,'history.txt'),'dirty\n');
+  const dirty=invoke(f.head);
+  assert.notEqual(dirty.status,0);
+  assert.match(dirty.stderr,/INSTALL_AUDIT_TRACKED_TREE_DIRTY/);
+  assert.equal(git(f.stage,'rev-parse','--is-shallow-repository'),'true');
+  fs.writeFileSync(path.join(f.stage,'history.txt'),'old\nnew\n');
+  git(f.stage,'remote','remove','origin');
+  const noRemote=invoke(f.head);
+  assert.notEqual(noRemote.status,0);
+  assert.match(noRemote.stderr,/INSTALL_AUDIT_HISTORY_FETCH_FAILED/);
+  assert.doesNotMatch(noRemote.stdout,/INSTALL_AUDIT_HISTORY_FULL_PASS/);
+});
+test('Linux install history completion executes after qualification and before audit or start',()=>{
+  const start=installerSource.indexOf('validate_installation() {');
+  const check=installerSource.indexOf('npm run check:qualification',start);
+  const tests=installerSource.indexOf('npm run test:qualification',check);
+  const history=installerSource.indexOf('ensure_install_audit_history',tests);
+  const audit=installerSource.indexOf('npm run audit',tests);
+  const end=installerSource.indexOf('start_server() {',start);
+  assert.ok(start>=0&&check>start&&tests>check&&history>tests&&audit>history&&end>audit);
+  assert.match(installVerifier,/GIT_TERMINAL_PROMPT=0 timeout/);
+  assert.match(installVerifier,/--unshallow origin "\$expected"/);
 });

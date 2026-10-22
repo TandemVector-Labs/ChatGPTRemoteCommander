@@ -387,10 +387,39 @@ install_linux_gui_backend() {
   "$project/tools/install-gnome-gui-extension.sh"
 }
 
+# Fresh server bootstrap and custom Core installs can use a shallow Git fetch.
+# The strict security audit verifies fixture provenance by introducing commit;
+# shallow history would falsely attribute that fixture to the candidate HEAD.
+ensure_install_audit_history(){
+  local candidate="$INSTALL_DIR" expected shallow
+  expected="$(git -C "$candidate" rev-parse HEAD 2>/dev/null)" || return 1
+  [[ "$expected" =~ ^[0-9a-f]{40}$ ]] || { echo 'INSTALL_AUDIT_EXPECTED_SHA_INVALID' >&2; return 1; }
+  if [[ -n "$EXPECTED_COMMIT" && "${expected,,}" != "${EXPECTED_COMMIT,,}" ]]; then
+    echo 'INSTALL_AUDIT_PIN_MISMATCH' >&2; return 1
+  fi
+  [[ -z "$(git -C "$candidate" status --porcelain --untracked-files=no)" ]] ||
+    { echo 'INSTALL_AUDIT_TRACKED_TREE_DIRTY' >&2; return 1; }
+  shallow="$(git -C "$candidate" rev-parse --is-shallow-repository)"
+  if [[ "$shallow" == true ]]; then
+    echo INSTALL_AUDIT_HISTORY_FETCH_START
+    if ! GIT_TERMINAL_PROMPT=0 timeout --signal=TERM --kill-after=10s 120s       git -C "$candidate" fetch --quiet --no-tags --unshallow origin "$expected"; then
+      echo 'INSTALL_AUDIT_HISTORY_FETCH_FAILED' >&2; return 1
+    fi
+  fi
+  [[ "$(git -C "$candidate" rev-parse --is-shallow-repository)" == false ]] ||
+    { echo 'INSTALL_AUDIT_HISTORY_STILL_SHALLOW' >&2; return 1; }
+  [[ "$(git -C "$candidate" rev-parse HEAD)" == "$expected" ]] ||
+    { echo 'INSTALL_AUDIT_STAGED_HEAD_CHANGED' >&2; return 1; }
+  [[ -z "$(git -C "$candidate" status --porcelain --untracked-files=no)" ]] ||
+    { echo 'INSTALL_AUDIT_STAGED_TREE_CHANGED' >&2; return 1; }
+  echo INSTALL_AUDIT_HISTORY_FULL_PASS
+}
+
 validate_installation() {
   cd "$INSTALL_DIR"
   npm run check:qualification
   npm run test:qualification
+  ensure_install_audit_history
   npm run audit
 }
 
