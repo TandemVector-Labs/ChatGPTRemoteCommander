@@ -3,7 +3,8 @@ param(
   [Parameter(Mandatory=$true)][string]$ExpectedCommit,
   [ValidateSet('READ_ONLY_HOSTED_NOPROMOTE_QUALIFICATION_FAILURE',
     'READ_ONLY_HOSTED_V025W_ROLLBACK_QUALIFICATION_FAILURE')]
-  [string]$Scope='READ_ONLY_HOSTED_NOPROMOTE_QUALIFICATION_FAILURE'
+  [string]$Scope='READ_ONLY_HOSTED_NOPROMOTE_QUALIFICATION_FAILURE',
+  [ValidateSet('test','check')][string]$Gate='test'
 )
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
@@ -29,7 +30,7 @@ if(Test-Path -LiteralPath $logRoot -PathType Container){
   $rootAttributes=(Get-Item -LiteralPath $logRoot -Force).Attributes
   if(($rootAttributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'R470_LOG_ROOT_REPARSE_REFUSED'}
   $prefix=$ExpectedCommit.Substring(0,12)
-  $sources=@(Get-ChildItem -LiteralPath $logRoot -File -Filter "qualification-output-qualification-test-$prefix-*.stdout.log" -ErrorAction Stop)
+  $sources=@(Get-ChildItem -LiteralPath $logRoot -File -Filter "qualification-output-qualification-$Gate-$prefix-*.stdout.log" -ErrorAction Stop)
   $count=$sources.Count
   if($count -eq 1){
     $source=$sources[0]
@@ -91,7 +92,7 @@ if(Test-Path -LiteralPath $logRoot -PathType Container){
   } elseif($count -gt 1) {$status='AMBIGUOUS_MULTIPLE_MATCHING_LOGS'}
 }
 $report=[ordered]@{
-  schema=1;revision='R470';status=$status;commit=$ExpectedCommit
+  schema=1;revision='R470';status=$status;commit=$ExpectedCommit;gate=$Gate
   scope=$Scope
   matchingLogCount=$count;sourceBytes=$sourceBytes;sourceSha256=$sourceSha
   failureTests=$failures;failureTypes=$types;tapCounts=$totals
