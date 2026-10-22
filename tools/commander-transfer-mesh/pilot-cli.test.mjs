@@ -85,6 +85,122 @@ test('untrusted peer and malformed transfer ID rejected',()=>{
   }
  });
 });
+test('node identity cannot switch to external symlink after preflight',t=>{
+ const root=create('PC');
+ try{
+  const node=path.join(root,'node.json'),outside=path.join(root,'outside-identity.json');
+  fs.writeFileSync(outside,JSON.stringify({schema:'ctmesh-node-v1',alias:'Linux'}));
+  const trial=path.join(root,'node-link-probe');
+  try{fs.symlinkSync(outside,trial,'file');fs.unlinkSync(trial);}
+  catch(e){if(['EPERM','EACCES','ENOTSUP'].includes(e.code)){t.skip('File symlinks unavailable');return;}throw e;}
+  const marker=path.join(root,'identity-race.marker'),preload=path.join(root,'identity-race-hook.cjs');
+  fs.writeFileSync(preload,[
+   "const fs=require('node:fs'),mod=require('node:module');",
+   "const old=fs.readFileSync;let fired=false;",
+   "fs.readFileSync=function(file,...args){",
+   "if(!fired&&String(file)===process.env.RC_NODE){fired=true;",
+   "fs.renameSync(file,file+'.original');",
+   "fs.symlinkSync(process.env.RC_EXTERNAL,file,'file');",
+   "fs.writeFileSync(process.env.RC_MARKER,'ATTACK_EXECUTED');",
+   "}return old.call(this,file,...args);};",
+   "mod.syncBuiltinESMExports();"
+  ].join('\n'));
+  const result=spawnSync(process.execPath,['--require',preload,cli,'info'],{
+   encoding:'utf8',timeout:15000,env:{...process.env,COMMANDER_TRANSFER_HOME:root,
+    RC_NODE:node,RC_EXTERNAL:outside,RC_MARKER:marker}});
+  if(fs.existsSync(marker)){
+   assert.notEqual(result.status,0,'Outside alias must not become CLI identity');
+   assert.match(result.stderr,/Untrusted node identity|ELOOP/);
+  }else{
+   assert.equal(result.status,0,result.stderr);
+   assert.equal(JSON.parse(result.stdout).device,'PC');
+  }
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('oversized untrusted incoming manifest is rejected before parsing',()=>{
+ withFixtures((src,dst)=>{
+  const id='oversize-manifest-001';send(src,id,Buffer.from('legitimate payload'));
+  const folder=mirror(src,dst,id);
+  fs.writeFileSync(path.join(folder,'manifest.json'),'x'.repeat(16385));
+  const r=run(dst,'status','--peer','PC','--id',id);
+  assert.notEqual(r.status,0);
+  assert.match(r.stderr,/Untrusted transfer manifest/);
+ });
+});
+
+test('incoming manifest cannot be swapped to external symlink before JSON read',t=>{
+ withFixtures((src,dst)=>{
+  const id='manifest-race-read-001';
+  send(src,id,Buffer.from('valid signed-by-hash payload'));
+  const folder=mirror(src,dst,id),manifest=path.join(folder,'manifest.json');
+  const outside=path.join(dst,'outside-fake-manifest.json');
+  const original=JSON.parse(fs.readFileSync(manifest,'utf8'));
+  fs.writeFileSync(outside,JSON.stringify({...original,name:'attacker-forged.bin'}));
+  const testLink=path.join(dst,'manifest-symlink-probe');
+  try{fs.symlinkSync(outside,testLink,'file');fs.unlinkSync(testLink);}
+  catch(e){if(['EPERM','EACCES','ENOTSUP'].includes(e.code)){t.skip('File symlinks unavailable');return;}throw e;}
+  const marker=path.join(dst,'manifest-race.marker'),preload=path.join(dst,'manifest-race-hook.cjs');
+  fs.writeFileSync(preload,[
+   "const fs=require('node:fs'),mod=require('node:module');",
+   "const old=fs.readFileSync;let done=false;",
+   "fs.readFileSync=function(file,...args){",
+   "if(!done&&String(file)===process.env.RC_MANIFEST){done=true;",
+   "fs.renameSync(file,file+'.original');",
+   "fs.symlinkSync(process.env.RC_EXTERNAL,file,'file');",
+   "fs.writeFileSync(process.env.RC_MARKER,'SWAP_FIRED');",
+   "}return old.call(this,file,...args);};",
+   "mod.syncBuiltinESMExports();"
+  ].join('\n'));
+  const result=spawnSync(process.execPath,['--require',preload,cli,'status',
+    '--peer','PC','--id',id],{encoding:'utf8',timeout:15000,env:{...process.env,
+    COMMANDER_TRANSFER_HOME:dst,RC_MANIFEST:manifest,RC_EXTERNAL:outside,RC_MARKER:marker}});
+  if(fs.existsSync(marker)){
+   assert.notEqual(result.status,0,'An external valid-looking manifest cannot choose received filename');
+   assert.match(result.stderr,/Untrusted transfer manifest|ELOOP|Untrusted manifest/);
+  }else{
+   // A descriptor-bound implementation never calls the pathname-based
+   // readFileSync hook, so the malicious replacement cannot be performed.
+   assert.equal(result.status,0,result.stderr);
+   assert.equal(JSON.parse(result.stdout).name,original.name);
+  }
+  assert.equal(JSON.parse(fs.readFileSync(outside,'utf8')).name,'attacker-forged.bin');
+ });
+});
+
+test('incoming payload cannot be swapped to external symlink just before hash opens it',t=>{
+ withFixtures((src,dst)=>{
+  const id='hash-race-payload-001',data=Buffer.from('same payload but external authority');
+  send(src,id,data);
+  const folder=mirror(src,dst,id),payload=path.join(folder,'payload.bin');
+  const external=path.join(dst,'outside-hash-race.bin');
+  fs.writeFileSync(external,data);
+  // Validate the host can create file links before attempting the adversarial case.
+  const trial=path.join(dst,'symlink-capability-check');
+  try{fs.symlinkSync(external,trial,'file');fs.unlinkSync(trial);}
+  catch(e){if(['EPERM','EACCES','ENOTSUP'].includes(e.code)){t.skip('File symlinks unavailable');return;}throw e;}
+  const marker=path.join(dst,'race-fired.marker'),preload=path.join(dst,'hash-race-preload.cjs');
+  fs.writeFileSync(preload,[
+   "const fs=require('node:fs'),mod=require('node:module');",
+   "const old=fs.openSync;let once=false;",
+   "fs.openSync=function(file,...rest){",
+   "if(!once&&String(file)===process.env.RC_PAYLOAD){once=true;",
+   "fs.renameSync(file,file+'.original');",
+   "fs.symlinkSync(process.env.RC_EXTERNAL,file,'file');",
+   "fs.writeFileSync(process.env.RC_MARKER,'ATTACK_ACTUALLY_FIRED');",
+   "}return old.call(this,file,...rest);};",
+   "mod.syncBuiltinESMExports();"
+  ].join('\n'));
+  const result=spawnSync(process.execPath,['--require',preload,cli,'status',
+    '--peer','PC','--id',id],{encoding:'utf8',timeout:15000,env:{...process.env,
+    COMMANDER_TRANSFER_HOME:dst,RC_PAYLOAD:payload,RC_EXTERNAL:external,RC_MARKER:marker}});
+  assert.equal(fs.existsSync(marker),true,'Attack hook must fire');
+  assert.notEqual(result.status,0,'External symlink with same digest must never authorize payload');
+  assert.match(result.stderr,/Untrusted hashed file|ELOOP|Unsafe source/);
+  assert.deepEqual(fs.readFileSync(external),data);
+ });
+});
+
 test('symlink input cannot be transferred as a regular file',(t)=>{
  withFixtures((src)=>{
   const file=path.join(src,'secret.bin'),link=path.join(src,'link.bin');
