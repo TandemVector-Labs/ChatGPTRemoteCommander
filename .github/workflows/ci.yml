@@ -29,6 +29,9 @@ jobs:
         run: node --test test/ci-single-required-context.test.mjs
       - name: Verify large-file transfer preflight safety on both platforms
         run: node --test tools/commander-transfer-mesh/large-transfer-preflight.test.mjs
+      - name: Qualify native Windows handle-relative security prototype
+        if: runner.os == 'Windows'
+        run: node --test test/windows-native-dirfd-prototype.test.mjs
       - name: Install Linux GUI helper dependencies
         if: runner.os == 'Linux'
         run: |
