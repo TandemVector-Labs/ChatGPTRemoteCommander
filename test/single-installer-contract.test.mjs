@@ -176,9 +176,14 @@ test('selected nested Browser failure is checked before writing installation met
   assert.ok(code.includes("ExtractTemporaryFile('{#BrowserSetupName}')"));
   assert.ok(code.includes("if not Exec(ExpandConstant('{tmp}\\{#BrowserSetupName}')"));
   assert.ok(code.includes('ewWaitUntilTerminated, BrowserExitCode)'));
-  assert.ok(code.includes("RaiseException('BROWSER_INSTALL_LAUNCH_FAILED')"));
+  assert.ok(code.includes("Log('BROWSER_INSTALL_LAUNCH_FAILED')"));
   assert.ok(code.includes('if BrowserExitCode <> 0 then'));
-  assert.ok(code.includes("RaiseException('BROWSER_INSTALL_EXIT_NONZERO_'"));
+  assert.ok(iss.includes('function GetCustomSetupExitCode: Integer;'));
+  assert.ok(iss.includes('if BrowserSetupFailed then Result := 4'));
+  assert.equal((code.match(/BrowserSetupFailed := True;/g)??[]).length,2);
+  assert.ok(code.includes('if not WizardSilent then'));
+  assert.ok(!code.includes("RaiseException('BROWSER_INSTALL_EXIT_NONZERO_'"));
+  assert.ok(code.includes("Log('BROWSER_INSTALL_EXIT_NONZERO_'"));
   assert.ok(code.indexOf('BROWSER_INSTALL_EXIT_NONZERO_') <
     code.indexOf("SaveStringToFile(ExpandConstant('{app}\\product-install.json')"));
 });

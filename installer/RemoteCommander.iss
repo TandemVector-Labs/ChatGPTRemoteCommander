@@ -86,6 +86,19 @@ Filename: "{app}\RemoteCommander.exe"; Description: "Open Remote Commander"; Fla
 var
   ProfilePage: TInputQueryWizardPage;
   PwshPath: String;
+#ifdef BrowserSetup
+  BrowserSetupFailed: Boolean;
+#endif
+
+#ifdef BrowserSetup
+// Inno invokes this only if Setup otherwise completed successfully.
+// An exception from ssPostInstall by itself can leave Setup exit code 0.
+function GetCustomSetupExitCode: Integer;
+begin
+  if BrowserSetupFailed then Result := 4
+  else Result := 0;
+end;
+#endif
 
 function JsonBool(Value: Boolean): String;
 begin
@@ -278,9 +291,22 @@ begin
     WizardForm.StatusLabel.Caption := 'Installing selected Remote Commander Browser...';
     if not Exec(ExpandConstant('{tmp}\{#BrowserSetupName}'),
       '/VERYSILENT /NORESTART', '', SW_HIDE, ewWaitUntilTerminated, BrowserExitCode) then
-      RaiseException('BROWSER_INSTALL_LAUNCH_FAILED');
+    begin
+      BrowserSetupFailed := True;
+      Log('BROWSER_INSTALL_LAUNCH_FAILED');
+      if not WizardSilent then
+        MsgBox('The selected Browser could not be started. Commander Core may already be installed.', mbCriticalError, MB_OK);
+      Exit;
+    end;
     if BrowserExitCode <> 0 then
-      RaiseException('BROWSER_INSTALL_EXIT_NONZERO_' + IntToStr(BrowserExitCode));
+    begin
+      BrowserSetupFailed := True;
+      Log('BROWSER_INSTALL_EXIT_NONZERO_' + IntToStr(BrowserExitCode));
+      if not WizardSilent then
+        MsgBox('The selected Browser setup failed (exit ' + IntToStr(BrowserExitCode) +
+          '). Commander Core may already be installed.', mbCriticalError, MB_OK);
+      Exit;
+    end;
   end;
 #endif
 
