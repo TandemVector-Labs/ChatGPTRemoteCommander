@@ -450,7 +450,8 @@ recycle_supervisor(){
     had=1; kill "$pid" 2>/dev/null || true
   done < <(pgrep -f "/bin/bash $INSTALL_DIR/autostart-linux.sh|bash $INSTALL_DIR/autostart-linux.sh" 2>/dev/null || true)
   if [[ "$had" == 1 ]]; then
-    nohup /bin/bash "$INSTALL_DIR/autostart-linux.sh" >>"$INSTALL_DIR/var/autostart-launch.log" 2>&1 &
+    # Do not keep the exclusive updater lock alive in the detached launcher.
+    nohup /bin/bash "$INSTALL_DIR/autostart-linux.sh" 9>&- >>"$INSTALL_DIR/var/autostart-launch.log" 2>&1 &
     log "SUPERVISOR_RECYCLE_PASS mode=process pid=$!"
   fi
 }
@@ -696,7 +697,15 @@ detach_from_commander_backend_if_needed
 
 mkdir -p "$INSTALL_DIR/var"
 exec 9>"$STATE_ROOT/auto-update.lock"
-if command -v flock >/dev/null 2>&1; then flock -n 9 || { log 'AUTO_UPDATE_ALREADY_RUNNING'; exit 0; }; fi
+if command -v flock >/dev/null 2>&1; then
+  if [[ -n "$SOURCE_REF" && "$SOURCE_REF" == "$EXPECTED_COMMIT" && "$SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    # An explicitly requested immutable commit must never return success when
+    # the update was skipped due to contention. Allow bounded handoff only.
+    flock -w 15 9 || { log 'AUTO_UPDATE_EXPLICIT_LOCK_TIMEOUT'; exit 83; }
+  else
+    flock -n 9 || { log 'AUTO_UPDATE_ALREADY_RUNNING'; exit 0; }
+  fi
+fi
 
 if [[ "$SELF_TEST" == 1 ]]; then
   printf '{"ok":true,"installDir":"%s","stateRoot":"%s"}\n' "$INSTALL_DIR" "$STATE_ROOT"
