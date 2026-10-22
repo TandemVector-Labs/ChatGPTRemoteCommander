@@ -217,6 +217,33 @@ function receiveLock(lockFile,{peer,id,sha256}){
   }finally{fs.closeSync(fd);}
  };
 }
+// Bind the outgoing source's bytes to the regular-file inode checked before
+// staging. Node copyFileSync(path, ...) otherwise follows a symlink substituted
+// after the initial lstat, allowing an unrelated file to be queued as trusted.
+function copyOutgoingVerifiedSource(file,temp,initial){
+ if(process.platform!=='linux'){
+  fs.copyFileSync(file,temp,fs.constants.COPYFILE_EXCL);
+  return;
+ }
+ const flags=fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW|(fs.constants.O_NONBLOCK??0);
+ const fd=fs.openSync(file,flags);
+ try{
+  const opened=fs.fstatSync(fd),named=fs.lstatSync(file);
+  const same=(a,b)=>a.dev===b.dev&&a.ino===b.ino&&a.size===b.size&&
+   a.mtimeMs===b.mtimeMs&&a.ctimeMs===b.ctimeMs;
+  if(!opened.isFile()||opened.nlink!==1||!named.isFile()||
+     named.isSymbolicLink()||named.nlink!==1||
+     !same(initial,opened)||!same(opened,named))
+   fail('Source changed before pinned outgoing copy');
+  // Only the held descriptor's target may supply bytes to the managed temp.
+  fs.copyFileSync('/proc/self/fd/'+fd,temp,fs.constants.COPYFILE_EXCL);
+  const after=fs.fstatSync(fd),namedAfter=fs.lstatSync(file);
+  if(!after.isFile()||after.nlink!==1||!namedAfter.isFile()||
+     namedAfter.isSymbolicLink()||namedAfter.nlink!==1||
+     !same(opened,after)||!same(opened,namedAfter))
+   fail('Source changed during pinned outgoing copy');
+ }finally{fs.closeSync(fd);}
+}
 function copyVerifiedPartial(source,part,bytes){
  const flags=fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW||0);
  const sourceFd=fs.openSync(source,flags);
@@ -335,7 +362,7 @@ try{
      // and the actual fs.copyFileSync/fs.renameSync calls.
      const sha256=withLinuxPinnedManagedPath(temp,pinnedTemp=>
       withLinuxPinnedManagedPath(p.payload,pinnedPayload=>{
-       fs.copyFileSync(file,pinnedTemp,fs.constants.COPYFILE_EXCL);
+       copyOutgoingVerifiedSource(file,pinnedTemp,st);
        const after=fs.statSync(file);
        if(after.size!==st.size||after.mtimeMs!==st.mtimeMs)
         fail('Source changed while copying');
