@@ -35,9 +35,10 @@ const grant=(file,rights)=>{
 };
 test('bounded Windows ACL tree audit finds read-only and mutating descendant grants without file reads',
  {skip:process.platform!=='win32'},()=>{
- const root=fs.mkdtempSync(path.join(os.tmpdir(),'rc-tree-acl-'));
+ const sandbox=fs.mkdtempSync(path.join(os.tmpdir(),'rc-tree-acl-'));
+ const root=path.join(sandbox,'secured-root');
  try{
-  configure(root);
+  configure(sandbox);fs.mkdirSync(root);configure(root);
   const inside=path.join(root,'state');fs.mkdirSync(inside);
   const sensitive=path.join(inside,'https-cert.pem');
   fs.writeFileSync(sensitive,'FAKE-CERT-NEVER-READ-BY-AUDIT','utf8');
@@ -68,7 +69,30 @@ test('bounded Windows ACL tree audit finds read-only and mutating descendant gra
   assert.equal(limit.status,3);
   assert.equal(limit.report.truncated,true);
   assert.equal(run('\\\\invalid-host\\untrusted\\state').status,3);
- }finally{fs.rmSync(root,{recursive:true,force:true});}
+ }finally{fs.rmSync(sandbox,{recursive:true,force:true});}
+});
+
+test('parent mutation permission prevents falsely admitting a protected subtree',
+ {skip:process.platform!=='win32'},()=>{
+ const sandbox=fs.mkdtempSync(path.join(os.tmpdir(),'rc-parent-acl-'));
+ const root=path.join(sandbox,'secure-root');
+ try{
+  configure(sandbox);
+  fs.mkdirSync(root);
+  configure(root);
+  const before=run(root);
+  assert.equal(before.status,0,JSON.stringify(before.report));
+  assert.equal(before.report.parentAclChecked,true);
+  assert.equal(before.report.parentMutationAceCount,0);
+  grant(sandbox,'M');
+  const unsafe=run(root);
+  assert.equal(unsafe.status,2,JSON.stringify(unsafe.report));
+  assert.equal(unsafe.report.status,'REVIEW_REQUIRED');
+  assert.equal(unsafe.report.rootInheritanceProtected,true);
+  assert.equal(unsafe.report.unapprovedMutationAceCount,0);
+  assert.ok(unsafe.report.parentMutationAceCount>0,
+   'Parent DELETE_CHILD/create grant can replace a protected root');
+ }finally{fs.rmSync(sandbox,{recursive:true,force:true});}
 });
 
 test('redirected ancestor is rejected before its target is enumerated',

@@ -17,6 +17,8 @@ $report=[ordered]@{
   observerIsSystem=$false
   rootOwnerIsObserver=$false
   rootInheritanceProtected=$false
+  parentAclChecked=$false
+  parentMutationAceCount=0
   inheritedScopeCount=0
   ownersOutsideAllowedCount=0
   unapprovedAllowAceCount=0
@@ -69,6 +71,25 @@ try {
     [Security.AccessControl.FileSystemRights]::ReadExtendedAttributes -bor
     [Security.AccessControl.FileSystemRights]::ReadPermissions -bor
     [Security.AccessControl.FileSystemRights]::ExecuteFile)
+  # A protected target DACL is insufficient if an outsider can replace its
+  # directory entry through DELETE_CHILD / create rights on the parent.
+  # Inspect the immediate parent's effective Allow ACEs without reading data
+  # or changing ACLs. Parent ancestors still need separate operator review.
+  if($report.reparseEntryCount -eq 0){
+    $parentDir=[IO.Path]::GetDirectoryName($full.TrimEnd('\','/'))
+    if(-not $parentDir){throw 'ROOT_PARENT_NOT_AVAILABLE'}
+    $parentAcl=Get-Acl -LiteralPath $parentDir -ErrorAction Stop
+    $report.parentAclChecked=$true
+    foreach($ace in $parentAcl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){
+      if($ace.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow){continue}
+      if($allowed -ccontains $ace.IdentityReference.Value){continue}
+      # Inherit-only ACEs do not apply to the parent directory itself.
+      if(($ace.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0){continue}
+      if(([long]$ace.FileSystemRights -band [long]$writeRights) -ne 0){
+        $report.parentMutationAceCount++
+      }
+    }
+  }
   # If any ancestor is redirected, stop BEFORE enumerating anything under it.
   if($report.reparseEntryCount -eq 0){
     $queue=[Collections.Generic.Stack[string]]::new()
@@ -109,6 +130,7 @@ try {
   $unsafeObserved=(-not $report.rootOwnerIsObserver -or
     -not $report.rootInheritanceProtected -or
     $report.unapprovedAllowAceCount -gt 0 -or
+    $report.parentMutationAceCount -gt 0 -or
     $report.ownersOutsideAllowedCount -gt 0 -or
     $report.reparseEntryCount -gt 0)
   $report.status=if($unsafeObserved){'REVIEW_REQUIRED'}
