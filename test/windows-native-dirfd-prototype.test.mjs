@@ -9,11 +9,22 @@ import {fileURLToPath} from 'node:url';
 const project=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../tools/security/windows-native-dirfd-prototype/NativeDirfdProbe.csproj');
 test('Windows native handle-relative read prototype: pinned parents, no reparse, bounded size',
  {skip:process.platform!=='win32'},async t=>{
-  const build=spawnSync('dotnet',['build',project,'-c','Release','--nologo','-v','quiet'],
-   {encoding:'utf8',timeout:120000});
-  assert.equal(build.status,0,'dotnet SDK/build required on Windows: '+build.stderr+' '+build.stdout);
-  const exe=path.join(path.dirname(project),'bin','Release','net10.0','NativeDirfdProbe.exe');
   const work=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-native-dirfd-regression-'));
+  // Each build uses a separate output and intermediate root; never mix
+  // the race-instrumented test binary with the ordinary Release executable.
+  const build=(name,defines)=>{
+   const output=path.join(work,name,'bin'),intermediate=path.join(work,name,'obj');
+   fs.mkdirSync(output,{recursive:true});fs.mkdirSync(intermediate,{recursive:true});
+   const args=['build',project,'-c','Release','--nologo','-v','quiet',
+    '-p:OutputPath='+output,'-p:BaseIntermediateOutputPath='+intermediate,
+    '-p:AppendTargetFrameworkToOutputPath=false'];
+   if(defines)args.push('-p:DefineConstants='+defines);
+   const result=spawnSync('dotnet',args,{encoding:'utf8',timeout:120000});
+   assert.equal(result.status,0,'dotnet isolated '+name+' build failed: '+result.stderr+' '+result.stdout);
+   return path.join(output,'NativeDirfdProbe.exe');
+  };
+  const exe=build('test-only','CTMESH_TEST_RACE');
+  const releaseExe=build('release',null);
   const root=path.join(work,'transfer'),original=path.join(root,'jobs','Linux'),
    external=path.join(work,'outside');
   fs.mkdirSync(original,{recursive:true});fs.mkdirSync(external);
@@ -22,6 +33,22 @@ test('Windows native handle-relative read prototype: pinned parents, no reparse,
   fs.writeFileSync(inside,queued);fs.writeFileSync(outside,forged);
   const read=(relative)=>spawnSync(exe,[root,relative],{encoding:'utf8',timeout:8000});
   try{
+   await t.test('ordinary Release build rejects test hook, accepts only two arguments',()=>{
+    const release=spawnSync(releaseExe,[root,'jobs\\Linux\\record-001.json'],{encoding:'utf8',timeout:8000});
+    assert.equal(release.status,0,release.stderr);
+    assert.equal(Buffer.from(release.stdout.trim(),'base64').toString('utf8'),queued);
+    const marker=path.join(work,'forbidden.marker');
+    const denied=spawnSync(releaseExe,[root,'jobs\\Linux\\record-001.json',marker],{encoding:'utf8',timeout:8000});
+    assert.notEqual(denied.status,0,'Release must not expose race/test marker');
+    assert.match(denied.stderr,/Usage: RootAbsolute RelFile/);
+    assert.equal(fs.existsSync(marker),false);
+   });
+   await t.test('absolute and drive-prefixed relative path arguments fail closed',()=>{
+    for(const candidate of ['C:\\Windows\\system.ini','\\Windows\\system.ini','..\\outside']){
+     const p=spawnSync(releaseExe,[root,candidate],{encoding:'utf8',timeout:8000});
+     assert.notEqual(p.status,0,'Rejected path '+candidate);
+    }
+   });
    await t.test('baseline reads original record',()=>{
     const p=read('jobs\\Linux\\record-001.json');
     assert.equal(p.status,0,p.stderr);
