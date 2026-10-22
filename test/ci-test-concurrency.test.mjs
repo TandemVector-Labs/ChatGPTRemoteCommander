@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { boundNodeTestConcurrency, parseQualificationArgs, prioritizeSensitiveQualificationCommands, isolateWindowsLeaseRegression, isolateWindowsTimingSensitiveRegressions, isolateWindowsProcessTreeRegression, isolateWindowsAgentHttpRegression, isolateWindowsTransferMeshHttpRegression, isolateWindowsWorkflowPlanRegression, isolateWindowsAsyncHttpRegression, markIsolatedQualificationPhases } from '../tools/run-bounded-test-script.mjs';
+import { boundNodeTestConcurrency, parseQualificationArgs, prioritizeSensitiveQualificationCommands, isolateWindowsLeaseRegression, isolateWindowsTimingSensitiveRegressions, isolateWindowsProcessTreeRegression, isolateWindowsAgentHttpRegression, isolateWindowsTransferMeshHttpRegression, isolateWindowsWorkflowPlanRegression, isolateWindowsAsyncHttpRegression, isolateWindowsAdaptiveTeamRegression, markIsolatedQualificationPhases } from '../tools/run-bounded-test-script.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const read=rel=>fs.readFileSync(path.join(root,rel),'utf8');
@@ -369,6 +369,33 @@ test('R173 V025W diagnostic uses distinct scope, hashed synthetic spec and artif
         'only sanitized diagnostic receipt may be uploaded: '+wf);
     }
   }finally{fs.rmSync(tmp,{recursive:true,force:true});}
+});
+
+test('Windows qualification isolates strict adaptive team and preserves MCP Tasks cold-start fixture',()=>{
+  const pkg=JSON.parse(read('package.json'));
+  let command=prioritizeSensitiveQualificationCommands(boundNodeTestConcurrency(pkg.scripts.test,1).command);
+  for(const fn of [
+    isolateWindowsAgentHttpRegression,isolateWindowsTimingSensitiveRegressions,
+    isolateWindowsProcessTreeRegression,isolateWindowsTransferMeshHttpRegression,
+    isolateWindowsLeaseRegression,isolateWindowsWorkflowPlanRegression,
+    isolateWindowsAsyncHttpRegression
+  ]) command=fn(command);
+  const file='test/project-adaptive.test.mjs';
+  const actual=isolateWindowsAdaptiveTeamRegression(command);
+  const head='node --test --test-concurrency=1 '+file+' && ';
+  assert.equal(actual,head+command.split(' && ').filter(part=>part!==head.slice(0,-4)).join(' && '),'move existing standalone fixture to head without changing coverage');
+  assert.equal(actual.split(file).length-1,1,'no dropped or duplicated adaptive tests');
+  assert.throws(()=>isolateWindowsAdaptiveTeamRegression(command.replace(' '+file,'')),/CI_ADAPTIVE_TEAM_CARDINALITY/);
+  assert.throws(()=>isolateWindowsAdaptiveTeamRegression(head+command),/CI_ADAPTIVE_TEAM_CARDINALITY/);
+  assert.ok(markIsolatedQualificationPhases(actual).length<7500,'Windows phase command remains bounded');
+  const strict=read(file);
+  assert.ok(strict.includes("team reserves all calls before workers and executes only the coordinator proposal', { timeout: 6000 }"),
+    'six-second team deadline remains unchanged');
+  const mcp=read('test/mcp-tasks-extension.test.mjs');
+  assert.ok(mcp.includes('const readyDeadline=Date.now()+20_000'),'bounded cold-start allowance is explicit');
+  assert.ok(mcp.includes("assert.equal(healthy,true,stderr)"),'live Health acceptance remains required');
+  assert.ok(mcp.includes("assert.equal(discover.status,200)"),'real Tasks protocol checks remain active');
+  assert.ok(read('tools/run-bounded-test-script.mjs').includes('command=isolateWindowsAdaptiveTeamRegression(command);'));
 });
 
 test('Windows R157 isolates exact async HTTP operation fixture without widening its strict response budget',()=>{
