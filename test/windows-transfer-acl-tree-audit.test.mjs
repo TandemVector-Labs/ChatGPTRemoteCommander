@@ -7,6 +7,10 @@ import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 
 const script=fileURLToPath(new URL('../tools/security/inspect-windows-transfer-acl-tree.ps1',import.meta.url));
+const tempBase=process.platform==='win32'
+ ? (process.env.PROGRAMDATA||process.env.ProgramData||'C:\ProgramData')
+ : os.tmpdir();
+const makeSandbox=(prefix)=>fs.mkdtempSync(path.join(tempBase,prefix));
 const run=(root,max=256)=>{
  const out=spawnSync('pwsh',['-NoProfile','-NonInteractive','-File',script,'-Root',root,'-MaxEntries',String(max)],
    {encoding:'utf8',timeout:10000});
@@ -35,7 +39,7 @@ const grant=(file,rights)=>{
 };
 test('bounded Windows ACL tree audit finds read-only and mutating descendant grants without file reads',
  {skip:process.platform!=='win32'},()=>{
- const sandbox=fs.mkdtempSync(path.join(os.tmpdir(),'rc-tree-acl-'));
+ const sandbox=makeSandbox('rc-tree-acl-');
  const root=path.join(sandbox,'secured-root');
  try{
   configure(sandbox);fs.mkdirSync(root);configure(root);
@@ -74,7 +78,7 @@ test('bounded Windows ACL tree audit finds read-only and mutating descendant gra
 
 test('parent mutation permission prevents falsely admitting a protected subtree',
  {skip:process.platform!=='win32'},()=>{
- const sandbox=fs.mkdtempSync(path.join(os.tmpdir(),'rc-parent-acl-'));
+ const sandbox=makeSandbox('rc-parent-acl-');
  const root=path.join(sandbox,'secure-root');
  try{
   configure(sandbox);
@@ -97,7 +101,7 @@ test('parent mutation permission prevents falsely admitting a protected subtree'
 
 test('redirected ancestor is rejected before its target is enumerated',
  {skip:process.platform!=='win32'},t=>{
- const root=fs.mkdtempSync(path.join(os.tmpdir(),'rc-acl-redirect-'));
+ const root=makeSandbox('rc-acl-redirect-');
  try {
   const external=path.join(root,'external');
   const inner=path.join(external,'inner');
@@ -118,4 +122,27 @@ test('redirected ancestor is rejected before its target is enumerated',
   assert.equal(report.report.inspectedEntries,0);
   assert.equal(fs.readFileSync(path.join(inner,'unread.txt'),'utf8'),'NEVER_READ');
  }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+test('higher ancestor DELETE_CHILD blocks replacement of a protected intermediate parent',
+ {skip:process.platform!=='win32'},()=>{
+ const outer=makeSandbox('rc-higher-acl-');
+ const parent=path.join(outer,'protected-parent');
+ const root=path.join(parent,'secure-root');
+ try{
+  configure(outer);
+  fs.mkdirSync(parent);configure(parent);
+  fs.mkdirSync(root);configure(root);
+  const before=run(root);
+  assert.equal(before.status,0,JSON.stringify(before.report));
+  assert.equal(before.report.parentMutationAceCount,0);
+  assert.equal(before.report.higherAncestorDeleteChildAceCount,0);
+  assert.equal(before.report.higherAncestorsChecked,true);
+  grant(outer,'DC');
+  const after=run(root);
+  assert.equal(after.status,2,JSON.stringify(after.report));
+  assert.equal(after.report.parentMutationAceCount,0);
+  assert.equal(after.report.unapprovedAllowAceCount,0);
+  assert.ok(after.report.higherAncestorDeleteChildAceCount>0,
+   'DELETE_CHILD on a higher ancestor can replace a protected intermediate parent');
+ }finally{fs.rmSync(outer,{recursive:true,force:true});}
 });

@@ -19,6 +19,9 @@ $report=[ordered]@{
   rootInheritanceProtected=$false
   parentAclChecked=$false
   parentMutationAceCount=0
+  higherAncestorsChecked=$false
+  higherAncestorDeleteChildAceCount=0
+  inspectedHigherAncestorDirectories=0
   inheritedScopeCount=0
   ownersOutsideAllowedCount=0
   unapprovedAllowAceCount=0
@@ -90,6 +93,30 @@ try {
       }
     }
   }
+  # Check the higher ancestors as well: DELETE_CHILD on a grandparent can
+  # replace an otherwise protected direct parent and defeat root containment.
+  # Distinguish higher-ancestor DELETE_CHILD from ordinary create-only rights.
+  if($report.reparseEntryCount -eq 0){
+    $higher=[IO.Path]::GetDirectoryName($parentDir.TrimEnd('\','/'))
+    while($higher) {
+      $higherAcl=Get-Acl -LiteralPath $higher -ErrorAction Stop
+      $report.inspectedHigherAncestorDirectories++
+      foreach($ace in $higherAcl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){
+        if($ace.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow){continue}
+        if($allowed -ccontains $ace.IdentityReference.Value){continue}
+        if(($ace.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0){continue}
+        if(([long]$ace.FileSystemRights -band
+            [long][Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles) -ne 0){
+          $report.higherAncestorDeleteChildAceCount++
+        }
+      }
+      if([IO.Path]::GetFullPath($higher).TrimEnd('\','/') -ieq $driveRoot.TrimEnd('\','/')){break}
+      $next=[IO.Path]::GetDirectoryName($higher.TrimEnd('\','/'))
+      if(-not $next -or $next -ieq $higher){throw 'HIGHER_ANCESTOR_UNAVAILABLE'}
+      $higher=$next
+    }
+    $report.higherAncestorsChecked=$true
+  }
   # If any ancestor is redirected, stop BEFORE enumerating anything under it.
   if($report.reparseEntryCount -eq 0){
     $queue=[Collections.Generic.Stack[string]]::new()
@@ -131,6 +158,8 @@ try {
     -not $report.rootInheritanceProtected -or
     $report.unapprovedAllowAceCount -gt 0 -or
     $report.parentMutationAceCount -gt 0 -or
+    -not $report.higherAncestorsChecked -or
+    $report.higherAncestorDeleteChildAceCount -gt 0 -or
     $report.ownersOutsideAllowedCount -gt 0 -or
     $report.reparseEntryCount -gt 0)
   $report.status=if($unsafeObserved){'REVIEW_REQUIRED'}
