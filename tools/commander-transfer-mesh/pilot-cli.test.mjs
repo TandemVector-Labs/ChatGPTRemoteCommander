@@ -266,3 +266,82 @@ test('managed staging symlink rejects outgoing transfer before touching external
   }finally{fs.rmSync(outside,{recursive:true,force:true});}
  });
 });
+
+test('receive refuses partial symlink swapped after preflight before opening for resume',t=>{
+ withFixtures((src,dst)=>{
+  const data=Buffer.from('PREFIX_ALLOWABLE_DATA_'.repeat(14)),id='part-swap-001';
+  send(src,id,data);mirror(src,dst,id);
+  const dest=path.join(dst,'inbox');fs.mkdirSync(dest);
+  const part=path.join(dest,'.ctmesh-'+id+'.part');
+  const outside=path.join(dst,'outside-must-not-change.bin');
+  const original=data.subarray(0,6);
+  fs.writeFileSync(part,original);fs.writeFileSync(outside,original);
+  const probe=path.join(dst,'symlink-probe');
+  try{fs.symlinkSync(outside,probe,'file');fs.unlinkSync(probe);}
+  catch(e){if(['EPERM','EACCES','ENOTSUP'].includes(e.code)){t.skip('Symlink creation not available');return;}throw e;}
+  const hook=path.join(dst,'partial-swap-hook.cjs');
+  fs.writeFileSync(hook,[
+   "const fs=require('node:fs');",
+   "const prior=fs.openSync;",
+   "let swapped=false;",
+   "fs.openSync=function(file,flags,...rest){",
+   " if(!swapped&&String(file)===process.env.RC_PART&&(flags==='r+'||(typeof flags==='number'&&(flags&3)===2))){",
+   "  swapped=true;fs.renameSync(file,file+'.checked');",
+   "  fs.symlinkSync(process.env.RC_OUTSIDE,file,'file');",
+   " }",
+   " return prior.call(this,file,flags,...rest);",
+   "};"
+  ].join('\n'));
+  const result=spawnSync(process.execPath,['--require',hook,cli,'receive','--peer','PC','--id',id,'--dest',dest],{
+   encoding:'utf8',timeout:6000,env:{...process.env,COMMANDER_TRANSFER_HOME:dst,RC_PART:part,RC_OUTSIDE:outside}});
+  assert.deepEqual(fs.readFileSync(outside),original,
+   'Post-preflight symlink must not permit writing outside the destination staging root: '+result.stderr);
+  assert.notEqual(result.status,0,'Unsafe substituted partial must fail closed');
+ });
+});
+
+test('send refuses post-check source symlink substitution instead of transferring outside bytes',t=>{
+ withFixtures((src)=>{
+  const source=path.join(src,'sample.bin'),outside=path.join(src,'outside-secret.bin');
+  const safe=Buffer.from('ALLOWED_PAYLOAD_000000'),secret=Buffer.from('SECRET!_PAYLOAD_000000');
+  assert.equal(safe.length,secret.length);
+  fs.writeFileSync(source,safe);
+  fs.writeFileSync(outside,secret);
+  const st=fs.statSync(source);
+  fs.utimesSync(outside,st.atime,st.mtime);
+  const probe=path.join(src,'symlink-test-probe');
+  try{fs.symlinkSync(outside,probe,'file');fs.unlinkSync(probe);}
+  catch(e){if(['EPERM','EACCES','ENOTSUP'].includes(e.code)){t.skip('Symlink creation unavailable');return;}throw e;}
+  const hook=path.join(src,'swap-source.cjs');
+  fs.writeFileSync(hook,[
+   "const fs=require('node:fs');",
+   "const original=fs.copyFileSync,opened=fs.openSync;",
+   "let once=false;",
+   "fs.copyFileSync=function(from,...args){",
+   " if(!once&&String(from)===process.env.RC_SOURCE){",
+   " once=true;fs.renameSync(from,from+'.checked');",
+   " fs.symlinkSync(process.env.RC_OUTSIDE,from,'file');",
+   " }",
+   " return original.call(this,from,...args);",
+   "};",
+   "fs.openSync=function(file,flags,...args){",
+   " if(!once&&String(file)===process.env.RC_SOURCE){",
+   "  once=true;fs.renameSync(file,file+'.checked');",
+   "  fs.symlinkSync(process.env.RC_OUTSIDE,file,'file');",
+   " }",
+   " return opened.call(this,file,flags,...args);",
+   "};"
+  ].join('\n'));
+  const id='source-swap-001';
+  const r=spawnSync(process.execPath,['--require',hook,cli,'send','--peer','Linux','--path',source,'--id',id],{
+   encoding:'utf8',timeout:8000,env:{...process.env,COMMANDER_TRANSFER_HOME:src,
+    RC_SOURCE:source,RC_OUTSIDE:outside}});
+  const staged=path.join(src,'pairs','Linux','transfers',id,'payload.bin');
+  assert.notEqual(r.status,0,'Send must refuse a changed source rather than expose out-of-root bytes: '+r.stdout);
+  if(fs.existsSync(staged))assert.notDeepEqual(fs.readFileSync(staged),secret);
+  const pending=path.join(src,'staging','Linux',id+'.part');
+  if(fs.existsSync(pending))assert.notDeepEqual(fs.readFileSync(pending),secret,
+   'Secret outside the prechecked source must never be copied into staging even when send rejects');
+  assert.deepEqual(fs.readFileSync(outside),secret);
+ });
+});
