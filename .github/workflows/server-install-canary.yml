@@ -88,7 +88,8 @@ jobs:
             GOD13emad/ChatGPTRemoteCommander|TandemVector-Labs/ChatGPTRemoteCommander) ;;
             *) echo CI_SERVER_SOURCE_REPOSITORY_DENIED >&2; exit 68 ;;
           esac
-          docker run --rm             -e RC_SOURCE_REF="$RC_SOURCE_REF"             -e RC_EXPECTED_COMMIT="$RC_EXPECTED_COMMIT"             -e REMOTE_COMMANDER_REPO_URL="https://github.com/${{ github.repository }}.git"             -v "$GITHUB_WORKSPACE:/src:ro"             ubuntu:24.04 bash -lc '
+          REMOTE_COMMANDER_REPO_URL="https://github.com/$GITHUB_REPOSITORY.git"
+          docker run --rm             -e RC_SOURCE_REF="$RC_SOURCE_REF"             -e RC_EXPECTED_COMMIT="$RC_EXPECTED_COMMIT"             -e REMOTE_COMMANDER_REPO_URL="$REMOTE_COMMANDER_REPO_URL"             -v "$GITHUB_WORKSPACE:/src:ro"             ubuntu:24.04 bash -lc '
               set -euo pipefail
               bash /src/server-install-linux.sh                 --source-ref "$RC_SOURCE_REF"                 --expected-commit "$RC_EXPECTED_COMMIT"                 --install-dir /opt/chatgpt-remote-commander/app                 --no-start
               test "$(git -C /opt/chatgpt-remote-commander/app rev-parse HEAD)" = "$RC_EXPECTED_COMMIT"
