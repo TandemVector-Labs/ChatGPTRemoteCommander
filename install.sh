@@ -355,6 +355,7 @@ write_local_config() {
       --allowed-program git --allowed-program node --allowed-program npm
       --allowed-program npx --allowed-program python3 --allowed-program python
       --allowed-program dotnet --allowed-program cmake --allowed-program ninja)
+    [[ "$CUSTOM_NO_START" == 1 ]] && args+=(--delivery-root "$state_root/delivery")
   fi
   local cap
   [[ "$CUSTOM_NO_START" == 1 ]] || args+=(--provider-root "$state_root")

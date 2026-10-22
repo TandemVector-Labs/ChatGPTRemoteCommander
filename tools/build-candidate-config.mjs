@@ -28,6 +28,7 @@ function parse(argv){
     else if(a==='--provider-root')o.providerRoot=v;
     else if(a==='--browser-executable')o.browserExecutable=v;
     else if(a==='--browser-profile-root')o.browserProfileRoot=v;
+    else if(a==='--delivery-root')o.deliveryRoot=v;
     else if(a==='--delivery-directory')o.deliveryDirectory=v;
     else if(a==='--delivery-scope')o.deliveryScope=v;
     else throw new Error('CANDIDATE_CONFIG_ARGUMENT');
@@ -87,7 +88,7 @@ if (a.deliveryDirectory && a.deliveryScope) {
 } else {
   const scope=stableDeliveryScope(config,a.profileId);
   config.durableDelivery={...(config.durableDelivery??{}),
-    directory:path.join(os.homedir(),'.chatgpt-remote-commander','delivery','profiles',scope),
+    directory:path.join(a.deliveryRoot ? path.resolve(a.deliveryRoot) : path.join(os.homedir(),'.chatgpt-remote-commander','delivery'),'profiles',scope),
     scope};
 }
 const text=JSON.stringify(config,null,2)+'\n';

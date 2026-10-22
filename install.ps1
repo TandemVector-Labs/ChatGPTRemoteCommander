@@ -17,6 +17,23 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $Repo = 'https://github.com/GOD13emad/ChatGPTRemoteCommander.git'
+$SourceOverride = [Environment]::GetEnvironmentVariable('REMOTE_COMMANDER_REPO_URL','Process')
+if (-not [string]::IsNullOrWhiteSpace($SourceOverride)) {
+  $Repo = $SourceOverride
+  if ($Repo -cnotin @('https://github.com/GOD13emad/ChatGPTRemoteCommander.git','https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git')) {
+    throw 'RC_SOURCE_REPO_DENIED'
+  }
+  if ($SourceOverride -eq 'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git' -and
+      ($ExpectedCommit -notmatch '^[0-9a-fA-F]{40}$' -or $SourceRef -notmatch '^[A-Za-z0-9._/-]{1,128}$')) {
+    throw 'ORGANIZATION_SOURCE_REQUIRES_PINNED_COMMIT'
+  }
+  if (($SourceRepository -eq 'organization' -or
+       [Environment]::GetEnvironmentVariable('RC_GITHUB_CI_FORK_SOURCE','Process') -eq '1') -and
+      $SourceOverride -ne 'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git') {
+    throw 'RC_SOURCE_REPO_CONFLICT'
+  }
+}
+
 # Optional explicit organization preview; default is the original upstream.
 # Never authorize unpinned organization source for an end-user installer.
 if ($SourceRepository -eq 'organization') {
@@ -36,6 +53,12 @@ if ([Environment]::GetEnvironmentVariable('RC_GITHUB_CI_FORK_SOURCE','Process') 
     throw 'CI_FORK_SOURCE_CONTEXT_DENIED'
   }
   $Repo = 'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git'
+}
+
+# An explicitly provided allowlisted source can be used by audited
+# installation canaries, never as an unpinned organization source.
+if (-not [string]::IsNullOrWhiteSpace($SourceOverride)) {
+  $Repo = $SourceOverride
 }
 
 if ($PowerMode -and $StandardMode) {

@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { spawn, spawnSync } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
+import {isVerifiedSyntheticNotionBearer,isVerifiedCurrentSyntheticNotionBearer} from '../tools/security-audit-history.mjs';
 
 function git(args, options = {}) {
   const result = spawnSync('git', args, {
@@ -18,35 +19,37 @@ const patterns = [
   ['GitHub token', new RegExp('gh' + '[pousr]_' + '[A-Za-z0-9]{20,}', 'i')],
   ['Developer Windows path', /C:\\Users\\[^\\\r\n]+\\source\\repos\\ChatGPTRemoteCommander/i]
 ];
-// The source commit below contains one demonstrably synthetic bearer header in a
-// Notion OAuth fixture. Preserve the committed evidence; do not rewrite published Git
-// history or silence the bearer rule globally. Scope the exception to one exact byte
-// sequence and one test path. Original commit is recorded only as provenance;
-// shallow release clones can present the same file as a different root commit.
-const FIXTURE_PATH = 'test/notion-mcp-engine.test.mjs';
-const FIXTURE_ORIGIN = '7b28ae4ffbfc3094c70647fd1ad8c4c491ba7bf5';
-const FIXTURE_BEARER = 'Bearer ' + 'FIXTURE_PRIVATE_ACCESS';
-function scrubFixture(value) { return value.split(FIXTURE_BEARER).join('Bearer [KNOWN-SYNTHETIC-FIXTURE]'); }
 const tunnelPattern = patterns.find(([type]) => type === 'Tunnel identifier')[1];
 if (!tunnelPattern.test('tunnel' + '_' + '0123456789abcdef'.repeat(2)) || tunnelPattern.test('tunnel_control_plane_fresh') || tunnelPattern.test('TUNNEL_HEALTH_UNKNOWN_LISTENER')) {
   throw new Error('Tunnel identifier audit pattern regression');
 }
 // Scan complete Git history without buffering the entire potentially multi-GB patch.
 // Lines are bounded; anything above the bound fails closed instead of being skipped.
-function makeHistoryScanner(rules) {
+function makeHistoryScanner(rules, shallowBoundaryCommits = new Set()) {
   const hits = new Set();
-  let pending = '', preceding = '', commit = null, diffPath = null;
+  let pending = '', preceding = '', currentCommit = null, currentFile = null;
   const limit = 16 * 1024 * 1024;
   function scanLine(line) {
-    const commitMatch = /^commit ([0-9a-f]{40})/.exec(line);
-    if (commitMatch) { commit = commitMatch[1]; diffPath = null; }
-    const diffMatch = /^diff --git a\/(.+) b\/(.+)\r?\n?$/.exec(line);
-    if (diffMatch) diffPath = diffMatch[2].trim();
-    const acceptedSynthetic = diffPath === FIXTURE_PATH;
-    const sample = preceding + (acceptedSynthetic ? scrubFixture(line) : line);
+    // Git emits immutable commit boundaries and per-file diff headers.
+    // Keep provenance while streaming; never buffer full history or raw hits.
+    const commit = /^commit ([0-9a-f]{40})(?:\r?\n|$)/.exec(line);
+    if (commit) { currentCommit = commit[1]; currentFile = '(commit metadata)'; }
+    const changedFile = /^diff --git a\/(.+?) b\/(.+?)\r?\n?$/.exec(line);
+    if (changedFile) {
+      const candidate = changedFile[2];
+      currentFile = /^[a-zA-Z0-9._/-]{1,128}$/.test(candidate)
+        ? candidate : '(nonstandard path)';
+    }
+    const sample = preceding + line;
     for (const [name, pattern] of rules) {
-      pattern.lastIndex = 0;
-      if (pattern.test(sample)) hits.add(name);
+      const flags = pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g';
+      const finder = new RegExp(pattern.source, flags);
+      for (const match of sample.matchAll(finder)) {
+        if (isVerifiedSyntheticNotionBearer(name, match[0], {commit:currentCommit,file:currentFile}) ||
+            (shallowBoundaryCommits.has(currentCommit) &&
+              isVerifiedCurrentSyntheticNotionBearer(name, match[0], currentFile))) continue;
+        hits.add(name);
+      }
     }
     preceding = sample.slice(-512);
   }
@@ -75,38 +78,66 @@ const probed = boundaryProbe.finish();
 if (!probed.has('Tunnel identifier') || !probed.has('Bearer token literal')) {
   throw new Error('SECURITY_AUDIT_STREAM_SCANNER_REGRESSION');
 }
-// Regression guard: one historical fixture is exempt, but an unrelated bearer
-// (even in the same file/commit) must always be detected.
-const syntheticProbe = makeHistoryScanner(patterns);
-syntheticProbe.write('commit ' + FIXTURE_ORIGIN + '\n');
-syntheticProbe.write('diff --git a/' + FIXTURE_PATH + ' b/' + FIXTURE_PATH + '\n');
-syntheticProbe.write('+Authorization: ' + FIXTURE_BEARER + '\n');
-if (syntheticProbe.finish().has('Bearer token literal')) throw new Error('SECURITY_AUDIT_SYNTHETIC_EXCEPTION_FAILED');
-const strictProbe = makeHistoryScanner(patterns);
-strictProbe.write('commit ' + FIXTURE_ORIGIN + '\n');
-strictProbe.write('diff --git a/' + FIXTURE_PATH + ' b/' + FIXTURE_PATH + '\n');
-strictProbe.write('+Authorization: Bearer ' + 'notasyntheticfixturelongtokenz12345' + '\n');
-if (!strictProbe.finish().has('Bearer token literal')) throw new Error('SECURITY_AUDIT_SYNTHETIC_EXCEPTION_OVERBROAD');
-// Shallow release clones reassign the introducing file diff to their shallow HEAD.
-// The exact fixture remains exempt there; a different file never gets this exemption.
-const shallowProbe = makeHistoryScanner(patterns);
-shallowProbe.write('commit ' + 'f'.repeat(40) + '\n');
-shallowProbe.write('diff --git a/' + FIXTURE_PATH + ' b/' + FIXTURE_PATH + '\n');
-shallowProbe.write('+Authorization: ' + FIXTURE_BEARER + '\n');
-if (shallowProbe.finish().has('Bearer token literal')) throw new Error('SECURITY_AUDIT_SHALLOW_FIXTURE_FAILED');
-const foreignFileProbe = makeHistoryScanner(patterns);
-foreignFileProbe.write('commit ' + FIXTURE_ORIGIN + '\n');
-foreignFileProbe.write('diff --git a/src/other.mjs b/src/other.mjs\n');
-foreignFileProbe.write('+Authorization: ' + FIXTURE_BEARER + '\n');
-if (!foreignFileProbe.finish().has('Bearer token literal')) throw new Error('SECURITY_AUDIT_CROSS_FILE_EXCEPTION_OVERBROAD');
+// Reject forged fixture provenance, even for an identical fixture bearer.
+for (const origin of [
+  {commit:'f'.repeat(40),file:'test/notion-mcp-engine.test.mjs'},
+  {commit:'7b28ae4ffbfc3094c70647fd1ad8c4c491ba7bf5',file:'src/other.mjs'}
+]) {
+  if (isVerifiedSyntheticNotionBearer('Bearer token literal',
+    'Bearer ' + 'FIXTURE_PRIVATE_ACCESS', origin)) {
+    throw new Error('SECURITY_AUDIT_SYNTHETIC_PROVENANCE_OVERBROAD');
+  }
+}
+
+// Current-file exemption is exact token+path only, never an entire file.
+if (!isVerifiedCurrentSyntheticNotionBearer('Bearer token literal',
+  'Bearer ' + 'FIXTURE_PRIVATE_ACCESS','test/notion-mcp-engine.test.mjs') ||
+  isVerifiedCurrentSyntheticNotionBearer('Bearer token literal',
+    'Bearer ' + 'notasyntheticfixturelongtokenz12345','test/notion-mcp-engine.test.mjs') ||
+  isVerifiedCurrentSyntheticNotionBearer('Bearer token literal',
+    'Bearer ' + 'FIXTURE_PRIVATE_ACCESS','src/other.mjs')) {
+  throw new Error('SECURITY_AUDIT_CURRENT_FIXTURE_BOUNDARY_REGRESSION');
+}
+
+// Only a real Git shallow-boundary SHA can extend the exact history fixture
+// exception; unrelated files/tokens or a nonboundary commit are detected.
+const syntheticHeader='Bearer ' + 'FIXTURE_PRIVATE_ACCESS';
+const shallowSHA='f'.repeat(40);
+const makeProbe=(file,header,allow)=> {
+  const scanner=makeHistoryScanner(patterns,allow?new Set([shallowSHA]):new Set());
+  scanner.write('commit '+shallowSHA+'\n');
+  scanner.write('diff --git a/'+file+' b/'+file+'\n');
+  scanner.write('+Authorization: '+header+'\n');
+  return scanner.finish().has('Bearer token literal');
+};
+if (makeProbe('test/notion-mcp-engine.test.mjs',syntheticHeader,true) ||
+    !makeProbe('test/notion-mcp-engine.test.mjs',syntheticHeader,false) ||
+    !makeProbe('src/other.mjs',syntheticHeader,true) ||
+    !makeProbe('test/notion-mcp-engine.test.mjs','Bearer ' + 'notasyntheticfixturelongtokenz12345',true)) {
+  throw new Error('SECURITY_AUDIT_SHALLOW_BOUNDARY_SCOPE_REGRESSION');
+}
+
 async function scanCompleteHistory() {
+  // A depth-one clone represents its artificial Git shallow boundary as a
+  // root commit. Use only actual .git/shallow identities, never any arbitrary
+  // commit or whole file, to accept the exact non-secret Notion test fixture.
+  const shallowBoundaryCommits = new Set();
+  if (git(['rev-parse','--is-shallow-repository']).trim() === 'true') {
+    const shallowPath = git(['rev-parse','--git-path','shallow']).trim();
+    const shallowText = await readFile(shallowPath,'utf8');
+    for (const sha of shallowText.split(/\r?\n/).filter(Boolean)) {
+      if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error('SECURITY_AUDIT_BAD_SHALLOW_COMMIT');
+      shallowBoundaryCommits.add(sha);
+    }
+    if (!shallowBoundaryCommits.size) throw new Error('SECURITY_AUDIT_EMPTY_SHALLOW_BOUNDARY');
+  }
   const args = ['log', '--all', '-p', '--no-color', '--no-ext-diff'];
   const child = spawn('git', args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   const closed = new Promise((resolve, reject) => {
     child.once('error', reject);
     child.once('close', (code, signal) => resolve({ code, signal }));
   });
-  const scanner = makeHistoryScanner(patterns);
+  const scanner = makeHistoryScanner(patterns,shallowBoundaryCommits);
   const decoder = new StringDecoder('utf8');
   let stderr = '', bytes = 0;
   const errors = (async () => {
@@ -137,10 +168,13 @@ const tracked = git(['ls-files', '-z']).split('\0').filter(Boolean);
 for (const file of tracked) {
   let text;
   try { text = await readFile(file, 'utf8'); } catch { continue; }
-  const content = file === FIXTURE_PATH ? scrubFixture(text) : text;
   for (const [type, pattern] of patterns) {
-    pattern.lastIndex = 0;
-    if (pattern.test(content)) findings.push({ scope: 'CURRENT', type, location: file });
+    const flags = pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g';
+    const scanner = new RegExp(pattern.source, flags);
+    for (const match of text.matchAll(scanner)) {
+      if (isVerifiedCurrentSyntheticNotionBearer(type,match[0],file)) continue;
+      findings.push({ scope: 'CURRENT', type, location: file });
+    }
   }
 }
 

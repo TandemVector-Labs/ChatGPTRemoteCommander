@@ -24,7 +24,17 @@ foreach($requestedProfile in $TargetProfile){
 }
 $TargetProfile=@($TargetProfile|Select-Object -Unique)
 
-$Repo='https://github.com/GOD13emad/ChatGPTRemoteCommander.git'
+$Repo=[Environment]::GetEnvironmentVariable('REMOTE_COMMANDER_REPO_URL','Process')
+if([string]::IsNullOrWhiteSpace($Repo)){$Repo='https://github.com/GOD13emad/ChatGPTRemoteCommander.git'}
+if($Repo -cnotin @('https://github.com/GOD13emad/ChatGPTRemoteCommander.git','https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git')){throw 'RC_SOURCE_REPO_DENIED'}
+
+# Organization source cannot be selected through the environment for an
+# unpinned runtime update; standard upstream default behavior is unchanged.
+if($Repo -eq 'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git' -and
+   ($ExpectedCommit -notmatch '^[0-9a-fA-F]{40}$' -or $SourceRef -notmatch '^[A-Za-z0-9._/-]{1,128}$')){
+  throw 'ORGANIZATION_SOURCE_REQUIRES_PINNED_COMMIT'
+}
+
 $StateRoot=Join-Path $env:LOCALAPPDATA 'ChatGPTRemoteCommander'
 $PauseFile=Join-Path $StateRoot 'maintenance\auto-update-paused.json'
 if(-not $Force -and (Test-Path -LiteralPath $PauseFile -PathType Leaf)){
