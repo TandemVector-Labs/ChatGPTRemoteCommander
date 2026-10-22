@@ -326,6 +326,44 @@ test('R470 Node24 spec reporter failure is classified and sanitized with no raw 
   }finally{fs.rmSync(tmp,{recursive:true,force:true});}
 });
 
+test('V025W R470 captures a check-stage qualification failure with a checked gate selector and no secrets',t=>{
+  if(process.platform!=='win32')return t.skip('Windows PowerShell test; static gate tests run cross-platform');
+  const sha='604ed6a8a0e0f95197fabcc92d93537142017a0b';
+  const secret='ghp_R470_CHECK_STAGE_NEVER_STORE';
+  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'r470-check-stage-'));
+  try{
+    const logs=path.join(tmp,'STATE','ChatGPTRemoteCommander','update-logs');
+    fs.mkdirSync(logs,{recursive:true});
+    const prefix='qualification-output-qualification-';
+    fs.writeFileSync(path.join(logs,prefix+'check-'+sha.slice(0,12)+'-failure.stdout.log'),
+      ['TAP version 13','not ok 7 - isolated baseline check stopped','# tests 7','# fail 1',
+       'Authorization: Bearer '+secret].join('\n'),'utf8');
+    fs.writeFileSync(path.join(logs,prefix+'test-'+sha.slice(0,12)+'-unrelated.stdout.log'),
+      ['TAP version 13','not ok 9 - unrelated TEST stage','# fail 1'].join('\n'),'utf8');
+    const script=path.join(root,'tools','diagnose-updater-gate-r470.ps1');
+    const args=['-NoProfile','-NonInteractive','-File',script,'-Root',tmp,'-ExpectedCommit',sha,
+      '-Scope','READ_ONLY_HOSTED_V025W_ROLLBACK_QUALIFICATION_FAILURE','-Gate','check'];
+    const result=spawnSync('pwsh.exe',args,{encoding:'utf8',timeout:15000});
+    assert.equal(result.status,0,result.stderr||result.stdout);
+    const raw=fs.readFileSync(path.join(tmp,'DIAGNOSTIC_R470.json'),'utf8');
+    assert.ok(!raw.includes(secret));
+    assert.ok(!raw.includes(tmp));
+    assert.ok(!raw.includes('unrelated TEST stage'));
+    const report=JSON.parse(raw);
+    assert.equal(report.gate,'check');
+    assert.equal(report.matchingLogCount,1);
+    assert.equal(report.status,'TAP_SUMMARY_EXTRACTED');
+    assert.equal(report.failureTests[0].index,7);
+    assert.equal(report.rawLogIncluded,false);
+    assert.equal(report.secretsIncluded,false);
+    assert.equal(report.absolutePathsIncluded,false);
+    const rollback=read('test/release-rollback-windows-v01025.ps1');
+    assert.ok(rollback.includes('(?<gate>check|test)'));
+    assert.ok(rollback.includes('-Gate $gate'));
+    assert.ok(rollback.includes('$report.gate -cne $gate'));
+  }finally{fs.rmSync(tmp,{recursive:true,force:true});}
+});
+
 test('R173 V025W diagnostic uses distinct scope, hashed synthetic spec and artifact without leaking logs',t=>{
   if(process.platform!=='win32')return t.skip('requires native Windows PowerShell');
   const sha='604ed6a8a0e0f95197fabcc92d93537142017a0b';

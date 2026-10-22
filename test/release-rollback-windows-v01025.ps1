@@ -63,11 +63,12 @@ function Update([string]$Name,[string]$Sha){
     try{
       $lines=Get-Content -LiteralPath $stdout -ErrorAction Stop
       $diagnosticCommit=if($Name -eq 'PROMOTE'){$ExpectedCommit}else{$Baseline}
-      $rx='^GATE_OUTPUT_FILES runId=(qualification-test-'+$diagnosticCommit.Substring(0,12)+'-[0-9a-f]{32}) stdout=([^\r\n]+?) stderr='
+      $rx='^GATE_OUTPUT_FILES runId=(qualification-(?<gate>check|test)-'+$diagnosticCommit.Substring(0,12)+'-[0-9a-f]{32}) stdout=([^\r\n]+?) stderr='
       $matches=@($lines|Where-Object {$_ -match $rx})
       if($matches.Count -ne 1){throw 'NO_UNIQUE_TEST_OUTPUT'}
       $null=$matches[0] -match $rx
-      $id=$Matches[1];$given=[IO.Path]::GetFullPath($Matches[2])
+      $gate=[string]$Matches['gate']
+      $id=$Matches[1];$given=[IO.Path]::GetFullPath($Matches[3])
       $inner=Join-Path $Root ('STATE\ChatGPTRemoteCommander\update-logs\qualification-output-'+$id+'.stdout.log')
       if($given -cne [IO.Path]::GetFullPath($inner)){throw 'WRONG_LOG_PATH'}
       $size=(Get-Item -LiteralPath $inner -ErrorAction Stop).Length
@@ -98,10 +99,10 @@ function Update([string]$Name,[string]$Sha){
       $reportPath=Join-Path $Root 'DIAGNOSTIC_R470.json'
       if(-not(Test-Path -LiteralPath $diagnose -PathType Leaf) -or
          (Test-Path -LiteralPath $reportPath)){throw 'V025W_R470_PRESTATE_REFUSED'}
-      & pwsh.exe -NoLogo -NoProfile -NonInteractive -File $diagnose -Root $Root -ExpectedCommit $diagnosticCommit -Scope 'READ_ONLY_HOSTED_V025W_ROLLBACK_QUALIFICATION_FAILURE'
+      & pwsh.exe -NoLogo -NoProfile -NonInteractive -File $diagnose -Root $Root -ExpectedCommit $diagnosticCommit -Scope 'READ_ONLY_HOSTED_V025W_ROLLBACK_QUALIFICATION_FAILURE' -Gate $gate
       if($LASTEXITCODE -ne 0){throw 'V025W_R470_PARSE_FAILED'}
       $report=Get-Content -LiteralPath $reportPath -Raw -ErrorAction Stop|ConvertFrom-Json
-      if($report.commit -cne $diagnosticCommit -or
+      if($report.gate -cne $gate -or $report.commit -cne $diagnosticCommit -or
          $report.scope -cne 'READ_ONLY_HOSTED_V025W_ROLLBACK_QUALIFICATION_FAILURE' -or
          $report.sourceSha256 -cne $sha.ToLowerInvariant() -or
          $report.matchingLogCount -ne 1 -or $report.rawLogIncluded -ne $false -or
