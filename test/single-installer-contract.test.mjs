@@ -117,7 +117,7 @@ test('browser component is compile-time optional until a standalone Browser inst
   assert.ok(iss.includes('#define BrowserSetupName ExtractFileName(BrowserSetup)'));
   assert.ok(iss.includes('Name: "browser"; Description: "Remote Commander Browser"'));
   assert.ok(iss.includes('Source: "{#BrowserSetup}"; DestName: "{#BrowserSetupName}"'));
-  assert.ok(iss.includes('Filename: "{tmp}\\{#BrowserSetupName}"'));
+  assert.equal(iss.includes('Filename: "{tmp}\\{#BrowserSetupName}"'),false,'nested Browser must check exit');
 });
 
 test('product icon is a standards-compliant multi-image ICO asset',()=>{
@@ -164,4 +164,38 @@ test('organization preview bootstrap is explicit, exact-commit pinned, and canno
   assert.ok(builder.includes('ORGANIZATION_SOURCE_REQUIRES_PINNED_COMMIT'));
   assert.ok(iss.includes('#define MySourceRepository "upstream"'));
   assert.equal(iss.split('-SourceRepository "{#MySourceRepository}"').length - 1,2);
+});
+
+
+test('selected nested Browser failure is checked before writing installation metadata',()=>{
+  const iss=read('installer/RemoteCommander.iss');
+  const run=iss.slice(iss.indexOf('[Run]'),iss.indexOf('[Code]'));
+  const code=iss.slice(iss.indexOf('procedure CurStepChanged('));
+  assert.ok(!run.includes('BrowserSetupName'));
+  assert.ok(code.includes("if WizardIsComponentSelected('browser') then"));
+  assert.ok(code.includes("ExtractTemporaryFile('{#BrowserSetupName}')"));
+  assert.ok(code.includes("if not Exec(ExpandConstant('{tmp}\\{#BrowserSetupName}')"));
+  assert.ok(code.includes('ewWaitUntilTerminated, BrowserExitCode)'));
+  assert.ok(code.includes("Log('BROWSER_INSTALL_LAUNCH_FAILED')"));
+  assert.ok(code.includes('if BrowserExitCode <> 0 then'));
+  assert.ok(iss.includes('function GetCustomSetupExitCode: Integer;'));
+  assert.ok(iss.includes('if BrowserSetupFailed then Result := 4'));
+  assert.equal((code.match(/BrowserSetupFailed := True;/g)??[]).length,2);
+  assert.ok(code.includes('if not WizardSilent then'));
+  assert.ok(!code.includes("RaiseException('BROWSER_INSTALL_EXIT_NONZERO_'"));
+  assert.ok(code.includes("Log('BROWSER_INSTALL_EXIT_NONZERO_'"));
+  assert.ok(code.indexOf('BROWSER_INSTALL_EXIT_NONZERO_') <
+    code.indexOf("SaveStringToFile(ExpandConstant('{app}\\product-install.json')"));
+});
+
+
+test('Browser selection cannot auto-open Commander before Browser post-install succeeds',()=>{
+  const iss=read('installer/RemoteCommander.iss');
+  const run=iss.slice(iss.indexOf('[Run]'),iss.indexOf('[Code]'));
+  assert.ok(run.includes('Check: ShouldAutoLaunchCommander'));
+  assert.ok(iss.includes('function ShouldAutoLaunchCommander: Boolean;'));
+  assert.ok(iss.includes("Result := not WizardIsComponentSelected('browser')"));
+  assert.ok(iss.includes('#ifdef BrowserSetup'));
+  assert.ok(iss.includes("'/VERYSILENT /SUPPRESSMSGBOXES /NORESTART'"));
+  assert.ok(iss.includes('if not WizardSilent then'));
 });
