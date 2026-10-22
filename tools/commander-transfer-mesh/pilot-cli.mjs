@@ -329,13 +329,23 @@ try{
      fs.mkdirSync(staging,{recursive:true});
      assertManagedStaging(peer,id);
      const temp=path.join(staging,id+'.part');
-     fs.copyFileSync(file,temp,fs.constants.COPYFILE_EXCL);
-     const after=fs.statSync(file);
-     if(after.size!==st.size||after.mtimeMs!==st.mtimeMs)fail('Source changed while copying');
-     const sha256=hash(temp);
-     fs.renameSync(temp,p.payload); // copy into observed folder only once complete
+     // Linux: hold both managed parents through the exclusive copy, hash and
+     // publication rename. A symlink-swapped staging ancestor cannot direct a
+     // copy outside the operator-selected root between the final preflight
+     // and the actual fs.copyFileSync/fs.renameSync calls.
+     const sha256=withLinuxPinnedManagedPath(temp,pinnedTemp=>
+      withLinuxPinnedManagedPath(p.payload,pinnedPayload=>{
+       fs.copyFileSync(file,pinnedTemp,fs.constants.COPYFILE_EXCL);
+       const after=fs.statSync(file);
+       if(after.size!==st.size||after.mtimeMs!==st.mtimeMs)
+        fail('Source changed while copying');
+       const digest=hash(pinnedTemp);
+       fs.renameSync(pinnedTemp,pinnedPayload);
+       return digest;
+      }));
      const manifest={schema:'ctmesh-v1',id,from:self,to:peer,name,bytes:st.size,sha256,createdAt:new Date().toISOString()};
-     fs.writeFileSync(p.manifest,JSON.stringify(manifest)+'\n',{flag:'wx',mode:0o600});
+     withLinuxPinnedManagedPath(p.manifest,pinnedManifest=>
+      fs.writeFileSync(pinnedManifest,JSON.stringify(manifest)+'\n',{flag:'wx',mode:0o600}));
      json({status:'QUEUED',...manifest});
    }else if(cmd==='status'||cmd==='receive'){
      const id=arg('id');if(!id)fail('Provide --id');
