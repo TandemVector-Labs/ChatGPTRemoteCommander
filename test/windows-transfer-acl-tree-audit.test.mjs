@@ -146,3 +146,27 @@ test('higher ancestor DELETE_CHILD blocks replacement of a protected intermediat
    'DELETE_CHILD on a higher ancestor can replace a protected intermediate parent');
  }finally{fs.rmSync(outer,{recursive:true,force:true});}
 });
+
+test('DELETE on a higher ancestor rejects false-positive safe subtree without DELETE_CHILD',
+ {skip:process.platform!=='win32'},()=>{
+ const outer=makeSandbox('rc-higher-object-delete-');
+ const parent=path.join(outer,'protected-parent');
+ const root=path.join(parent,'secure-root');
+ try{
+  configure(outer);
+  fs.mkdirSync(parent);configure(parent);
+  fs.mkdirSync(root);configure(root);
+  const before=run(root);
+  assert.equal(before.status,0,JSON.stringify(before.report));
+  assert.equal(before.report.higherAncestorControlAceCount,0);
+  grant(outer,'D');
+  const unsafe=run(root);
+  assert.equal(unsafe.status,2,JSON.stringify(unsafe.report));
+  assert.equal(unsafe.report.status,'REVIEW_REQUIRED');
+  assert.equal(unsafe.report.parentMutationAceCount,0);
+  assert.equal(unsafe.report.higherAncestorDeleteChildAceCount,0);
+  assert.equal(unsafe.report.unapprovedAllowAceCount,0);
+  assert.ok(unsafe.report.higherAncestorControlAceCount>0,
+    'Object DELETE on an intermediate ancestor can expose namespace replacement');
+ }finally{fs.rmSync(outer,{recursive:true,force:true});}
+});

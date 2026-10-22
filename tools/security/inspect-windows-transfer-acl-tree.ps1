@@ -21,6 +21,7 @@ $report=[ordered]@{
   parentMutationAceCount=0
   higherAncestorsChecked=$false
   higherAncestorDeleteChildAceCount=0
+  higherAncestorControlAceCount=0
   inspectedHigherAncestorDirectories=0
   inheritedScopeCount=0
   ownersOutsideAllowedCount=0
@@ -95,9 +96,14 @@ try {
   }
   # Check the higher ancestors as well: DELETE_CHILD on a grandparent can
   # replace an otherwise protected direct parent and defeat root containment.
-  # Distinguish higher-ancestor DELETE_CHILD from ordinary create-only rights.
+  # DELETE/WRITE_DAC/WRITE_OWNER on a higher ancestor can also permit
+  # renaming that ancestor (directly or after changing its ACL).
+  # Distinguish those rights from ordinary create-only rights.
   if($report.reparseEntryCount -eq 0){
     $higher=[IO.Path]::GetDirectoryName($parentDir.TrimEnd('\','/'))
+    $higherControlRights=([Security.AccessControl.FileSystemRights]::Delete -bor
+      [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+      [Security.AccessControl.FileSystemRights]::TakeOwnership)
     while($higher) {
       $higherAcl=Get-Acl -LiteralPath $higher -ErrorAction Stop
       $report.inspectedHigherAncestorDirectories++
@@ -108,6 +114,9 @@ try {
         if(([long]$ace.FileSystemRights -band
             [long][Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles) -ne 0){
           $report.higherAncestorDeleteChildAceCount++
+        }
+        if(([long]$ace.FileSystemRights -band [long]$higherControlRights) -ne 0){
+          $report.higherAncestorControlAceCount++
         }
       }
       if([IO.Path]::GetFullPath($higher).TrimEnd('\','/') -ieq $driveRoot.TrimEnd('\','/')){break}
@@ -160,6 +169,7 @@ try {
     $report.parentMutationAceCount -gt 0 -or
     -not $report.higherAncestorsChecked -or
     $report.higherAncestorDeleteChildAceCount -gt 0 -or
+    $report.higherAncestorControlAceCount -gt 0 -or
     $report.ownersOutsideAllowedCount -gt 0 -or
     $report.reparseEntryCount -gt 0)
   $report.status=if($unsafeObserved){'REVIEW_REQUIRED'}
