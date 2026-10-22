@@ -257,3 +257,72 @@ test('enqueue admission rejects an oversized existing queue journal before parsi
   assert.equal(fs.statSync(record).size>131072,true);
  }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
+
+test('enqueue rejects a swapped node identity symlink instead of adopting forged peer authority',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-node-swap-'));
+ try{
+  const srcDir=path.join(root,'source');fs.mkdirSync(srcDir);
+  const source=path.join(srcDir,'input.dat');fs.writeFileSync(source,'INPUT');
+  const node=path.join(root,'node.json'),outside=path.join(root,'outside-node.json');
+  fs.writeFileSync(node,JSON.stringify({alias:'PC'}));
+  fs.writeFileSync(outside,JSON.stringify({alias:'EmadServer'}));
+  const probe=path.join(root,'probe');
+  try{fs.symlinkSync(outside,probe,'file');fs.unlinkSync(probe);}
+  catch(e){if(['EPERM','EACCES','ENOTSUP'].includes(e.code)){t.skip('Symlink unavailable');return;}throw e;}
+  const hook=path.join(root,'node-hook.cjs');
+  fs.writeFileSync(hook,[
+   "const fs=require('node:fs');",
+   "const rd=fs.readFileSync,open=fs.openSync;",
+   "let used=false;",
+   "function swap(file){if(!used&&String(file)===process.env.RC_NODE){",
+   "used=true;fs.renameSync(file,file+'.checked');",
+   "fs.symlinkSync(process.env.RC_EXTERNAL,file,'file');",
+   "}}",
+   "fs.readFileSync=function(file,...args){swap(file);return rd.call(this,file,...args);};",
+   "fs.openSync=function(file,...args){swap(file);return open.call(this,file,...args);};"
+  ].join('\n'));
+  const r=spawnSync(process.execPath,[cli,'enqueue','--peer','Linux','--id','node-swap-001',
+    '--path',source,'--source-root',srcDir],{encoding:'utf8',timeout:6000,
+    env:{...process.env,NODE_OPTIONS:'--require '+hook,COMMANDER_TRANSFER_HOME:root,
+      RC_NODE:node,RC_EXTERNAL:outside}});
+  assert.notEqual(r.status,0,'Swapped local identity must fail before admission: '+r.stdout);
+  assert.match(r.stderr,/UNTRUSTED_JOB_RECORD|ELOOP|TRANSFER_MANAGED_PATH_UNSAFE/);
+  assert.equal(fs.readFileSync(outside,'utf8'),JSON.stringify({alias:'EmadServer'}));
+  assert.equal(fs.existsSync(path.join(root,'jobs','Linux','node-swap-001.json')),false);
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('job-status rejects a substituted stale-worker lock symlink after safePaths preflight',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-lock-swap-'));
+ try{
+  const jobs=path.join(root,'jobs','Linux'),id='lock-swap-001';
+  fs.mkdirSync(jobs,{recursive:true});
+  const record=path.join(jobs,id+'.json');
+  fs.writeFileSync(record,JSON.stringify({schema:'ctmesh-durable-v1',id,peer:'Linux',
+    bytes:3,status:'QUEUED',createdAt:new Date(Date.now()-90000).toISOString()}));
+  const lock=path.join(jobs,id+'.lock'),outside=path.join(root,'outside-lock.json');
+  fs.writeFileSync(lock,JSON.stringify({pid:0}));
+  fs.writeFileSync(outside,JSON.stringify({pid:process.pid}));
+  const probe=path.join(root,'probe');
+  try{fs.symlinkSync(outside,probe,'file');fs.unlinkSync(probe);}
+  catch(e){if(['EPERM','EACCES','ENOTSUP'].includes(e.code)){t.skip('Symlink unavailable');return;}throw e;}
+  const hook=path.join(root,'lock-hook.cjs');
+  fs.writeFileSync(hook,[
+   "const fs=require('node:fs');",
+   "const rd=fs.readFileSync,open=fs.openSync;",
+   "let used=false;",
+   "function swap(file){if(!used&&String(file)===process.env.RC_LOCK){",
+   "used=true;fs.renameSync(file,file+'.checked');",
+   "fs.symlinkSync(process.env.RC_EXTERNAL,file,'file');",
+   "}}",
+   "fs.readFileSync=function(file,...args){swap(file);return rd.call(this,file,...args);};",
+   "fs.openSync=function(file,...args){swap(file);return open.call(this,file,...args);};"
+  ].join('\n'));
+  const r=spawnSync(process.execPath,[cli,'job-status','--peer','Linux','--id',id],{
+    encoding:'utf8',timeout:6000,env:{...process.env,NODE_OPTIONS:'--require '+hook,
+      COMMANDER_TRANSFER_HOME:root,RC_LOCK:lock,RC_EXTERNAL:outside}});
+  assert.notEqual(r.status,0,'Swapped worker lock must fail closed: '+r.stdout);
+  assert.match(r.stderr,/UNTRUSTED_JOB_RECORD|ELOOP|TRANSFER_MANAGED_PATH_UNSAFE/);
+  assert.equal(fs.readFileSync(outside,'utf8'),JSON.stringify({pid:process.pid}));
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
