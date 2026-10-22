@@ -66,9 +66,37 @@ function assertManagedStaging(peer,id){
  assertManagedEntry(path.join(peerDir,id+'.part'),false);
 }
 const json=(o)=>process.stdout.write(JSON.stringify(o)+'\n');
-function hash(file){let h=crypto.createHash('sha256'),b=Buffer.allocUnsafe(1048576),fd=fs.openSync(file,'r');
- try{for(;;){const n=fs.readSync(fd,b,0,b.length,null);if(!n)break;h.update(b.subarray(0,n));}}
- finally{fs.closeSync(fd);}return h.digest('hex');}
+// A same-digest symlink is still an untrusted source: bind each hash to the
+// regular file actually opened, rejecting a swapped final path component.
+// This protects the final component on O_NOFOLLOW platforms; a separate
+// protected parent directory is still required to exclude ancestor races.
+function hash(file){
+ const unsafe=()=>fail('Untrusted hashed file');
+ const before=fs.lstatSync(file);
+ if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1)unsafe();
+ const flags=fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW??0)|(fs.constants.O_NONBLOCK??0);
+ const fd=fs.openSync(file,flags);
+ try{
+  const opened=fs.fstatSync(fd),named=fs.lstatSync(file);
+  const same=(a,b)=>a.dev===b.dev&&a.ino===b.ino&&a.size===b.size;
+  if(!opened.isFile()||opened.nlink!==1||
+     !named.isFile()||named.isSymbolicLink()||named.nlink!==1||
+     !same(before,opened)||!same(opened,named))unsafe();
+  const h=crypto.createHash('sha256'),buf=Buffer.allocUnsafe(1048576);
+  for(;;){
+   const n=fs.readSync(fd,buf,0,buf.length,null);
+   if(!n)break;
+   h.update(buf.subarray(0,n));
+  }
+  const after=fs.fstatSync(fd),namedAfter=fs.lstatSync(file);
+  if(!after.isFile()||after.nlink!==1||!namedAfter.isFile()||
+     namedAfter.isSymbolicLink()||namedAfter.nlink!==1||
+     !same(opened,after)||!same(opened,namedAfter)||
+     after.mtimeMs!==opened.mtimeMs||after.ctimeMs!==opened.ctimeMs||
+     namedAfter.mtimeMs!==opened.mtimeMs||namedAfter.ctimeMs!==opened.ctimeMs)unsafe();
+  return h.digest('hex');
+ }finally{fs.closeSync(fd);}
+}
 function transferPaths(peer,self,id){
  if(!validAlias.test(peer)||peer===self)fail('Unknown or self peer');
  if(!validId.test(id))fail('Invalid transfer ID');
