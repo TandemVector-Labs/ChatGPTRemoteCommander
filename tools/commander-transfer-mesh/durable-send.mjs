@@ -175,9 +175,32 @@ function launch(p){
  return child.pid;
 }
 function hash(file){
- const sha=crypto.createHash('sha256'),fd=fs.openSync(file,'r'),buf=Buffer.allocUnsafe(4*1024*1024);
- try{for(let n;(n=fs.readSync(fd,buf,0,buf.length,null))>0;)sha.update(buf.subarray(0,n));}finally{fs.closeSync(fd);}
- return sha.digest('hex');
+ // Hash the same regular file observed before and after descriptor open.
+ // A preflight pathname check alone does not pin a published payload/source.
+ const before=fs.lstatSync(file);
+ assertion(before.isFile()&&!before.isSymbolicLink()&&before.nlink===1,'UNTRUSTED_HASH_FILE');
+ const flags=fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW??0)|(fs.constants.O_NONBLOCK??0);
+ const fd=fs.openSync(file,flags);
+ try{
+  const opened=fs.fstatSync(fd),named=fs.lstatSync(file);
+  assertion(opened.isFile()&&opened.nlink===1&&
+    opened.dev===before.dev&&opened.ino===before.ino&&opened.size===before.size&&
+    opened.mtimeMs===before.mtimeMs&&opened.ctimeMs===before.ctimeMs&&
+    named.isFile()&&!named.isSymbolicLink()&&named.nlink===1&&
+    named.dev===opened.dev&&named.ino===opened.ino,
+    'UNTRUSTED_HASH_FILE');
+  const sha=crypto.createHash('sha256'),buf=Buffer.allocUnsafe(4*1024*1024);
+  for(let n;(n=fs.readSync(fd,buf,0,buf.length,null))>0;)sha.update(buf.subarray(0,n));
+  const after=fs.fstatSync(fd),namedAfter=fs.lstatSync(file);
+  assertion(after.dev===opened.dev&&after.ino===opened.ino&&after.size===opened.size&&
+    after.mtimeMs===opened.mtimeMs&&after.ctimeMs===opened.ctimeMs&&
+    namedAfter.isFile()&&!namedAfter.isSymbolicLink()&&namedAfter.nlink===1&&
+    namedAfter.dev===opened.dev&&namedAfter.ino===opened.ino&&
+    namedAfter.size===opened.size&&namedAfter.mtimeMs===opened.mtimeMs&&
+    namedAfter.ctimeMs===opened.ctimeMs,
+    'UNTRUSTED_HASH_FILE');
+  return sha.digest('hex');
+ }finally{fs.closeSync(fd);}
 }
 function noExistingArtifact(p){assertion(!fs.existsSync(p.destination),'TRANSFER_ALREADY_PUBLISHED');}
 function copyJob(p,j){
