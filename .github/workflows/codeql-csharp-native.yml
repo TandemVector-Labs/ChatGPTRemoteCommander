@@ -58,6 +58,17 @@ jobs:
               driver=run.get('tool',{}).get('driver',{})
               if 'CodeQL' not in driver.get('name',''):
                   raise SystemExit('WRONG_SARIF_ANALYZER')
+              # Zero findings cannot count as a clean scan on an empty database.
+              source_paths=[a.get('location',{}).get('uri','') for a in run.get('artifacts',[])]
+              if not any(p.endswith('tools/security/windows-native-dirfd-prototype/Program.cs')
+                         for p in source_paths):
+                  raise SystemExit('CSHARP_READER_SOURCE_NOT_EXTRACTED')
+              metrics=run.get('properties',{}).get('metricResults',[])
+              extracted_loc=sum(int(m.get('value',0)) for m in metrics
+                                if m.get('ruleId')=='cs/summary/lines-of-code')
+              if extracted_loc<20:
+                  raise SystemExit('CSHARP_EXTRACTED_SOURCE_TOO_SMALL')
+              print('CSHARP_CODEQL_EXTRACTED_PROGRAM',True,'LINES_OF_CODE',extracted_loc)
               rules=driver.get('rules',[])
               for item in run.get('results',[]):
                   idx=item.get('ruleIndex')
