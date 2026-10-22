@@ -199,3 +199,61 @@ test('job-status refuses an oversized journal without reading or parsing it',()=
   assert.equal(fs.statSync(record).size,131073);
  }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
+
+test('enqueue admission rejects a queued journal swapped for an external symlink after directory listing',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-queue-swap-'));
+ try{
+  const sourceDir=path.join(root,'source'),jobDir=path.join(root,'jobs','Linux');
+  fs.mkdirSync(sourceDir);fs.mkdirSync(jobDir,{recursive:true});
+  const source=path.join(sourceDir,'input.bin');fs.writeFileSync(source,'abc');
+  fs.writeFileSync(path.join(root,'node.json'),JSON.stringify({alias:'PC'}));
+  const record=path.join(jobDir,'existing-001.json');
+  const queued={schema:'ctmesh-durable-v1',id:'existing-001',peer:'Linux',status:'QUEUED',bytes:4};
+  const external=path.join(root,'synthetic-outside.json');
+  fs.writeFileSync(record,JSON.stringify(queued));
+  fs.writeFileSync(external,JSON.stringify({...queued,status:'PUBLISHED'}));
+  const probe=path.join(root,'probe-symlink');
+  try{fs.symlinkSync(external,probe,'file');fs.unlinkSync(probe);}
+  catch(e){if(['EPERM','EACCES','ENOTSUP'].includes(e.code)){t.skip('Symlink creation unavailable');return;}throw e;}
+  const hook=path.join(root,'swap-hook.cjs');
+  fs.writeFileSync(hook,[
+   "const fs=require('node:fs');",
+   "const read=fs.readFileSync,open=fs.openSync;",
+   "let swapped=false;",
+   "function swap(file){if(!swapped&&String(file)===process.env.RC_RECORD){",
+   " swapped=true;fs.renameSync(file,file+'.checked');",
+   " fs.symlinkSync(process.env.RC_EXTERNAL,file,'file');",
+   "}}",
+   "fs.readFileSync=function(file,...args){swap(file);return read.call(this,file,...args);};",
+   "fs.openSync=function(file,...args){swap(file);return open.call(this,file,...args);};"
+  ].join('\n'));
+  const r=spawnSync(process.execPath,[cli,'enqueue','--peer','Linux',
+   '--id','new-queue-002','--path',source,'--source-root',sourceDir,
+   '--max-source-bytes','4','--max-pending-bytes','4'],{
+    encoding:'utf8',timeout:6500,env:{...process.env,COMMANDER_TRANSFER_HOME:root,
+    NODE_OPTIONS:'--require '+hook,RC_RECORD:record,RC_EXTERNAL:external}
+   });
+  assert.notEqual(r.status,0,'Enqueue must not accept a swapped queue entry: '+r.stdout);
+  assert.match(r.stderr,/QUEUE_RECORD_UNSAFE|UNTRUSTED_JOB_RECORD|ELOOP/);
+  assert.equal(fs.readFileSync(external,'utf8'),JSON.stringify({...queued,status:'PUBLISHED'}));
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('enqueue admission rejects an oversized existing queue journal before parsing',()=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-queue-bound-'));
+ try{
+  const sourceDir=path.join(root,'source'),jobDir=path.join(root,'jobs','Linux');
+  fs.mkdirSync(sourceDir);fs.mkdirSync(jobDir,{recursive:true});
+  const source=path.join(sourceDir,'input.bin');fs.writeFileSync(source,'abc');
+  fs.writeFileSync(path.join(root,'node.json'),JSON.stringify({alias:'PC'}));
+  const record=path.join(jobDir,'existing-001.json');
+  fs.writeFileSync(record,JSON.stringify({schema:'ctmesh-durable-v1',status:'PUBLISHED',bytes:0})+
+   ' '.repeat(131073));
+  const r=spawnSync(process.execPath,[cli,'enqueue','--peer','Linux',
+    '--id','new-queue-002','--path',source,'--source-root',sourceDir],{
+      encoding:'utf8',timeout:6500,env:{...process.env,COMMANDER_TRANSFER_HOME:root}});
+  assert.notEqual(r.status,0,'Oversized existing journal must not be accepted: '+r.stdout);
+  assert.match(r.stderr,/QUEUE_RECORD_UNSAFE|UNTRUSTED_JOB_RECORD/);
+  assert.equal(fs.statSync(record).size>131072,true);
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
