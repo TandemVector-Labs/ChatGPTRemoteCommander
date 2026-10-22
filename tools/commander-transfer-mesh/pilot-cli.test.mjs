@@ -266,3 +266,41 @@ test('managed staging symlink rejects outgoing transfer before touching external
   }finally{fs.rmSync(outside,{recursive:true,force:true});}
  });
 });
+
+test('send never stages a replaced outside source even if it later rejects the transfer',t=>{
+ withFixtures(src=>{
+  const source=path.join(src,'selected.bin'),outside=path.join(src,'outside.bin');
+  const safe=Buffer.from('ALLOWED_TRANSFER_BYTES_A'),secret=Buffer.from('SECRET!_TRANSFER_BYTES_A');
+  assert.equal(safe.length,secret.length);
+  fs.writeFileSync(source,safe);fs.writeFileSync(outside,secret);
+  const s=fs.statSync(source);fs.utimesSync(outside,s.atime,s.mtime);
+  const probe=path.join(src,'probe-symlink');
+  try{fs.symlinkSync(outside,probe,'file');fs.unlinkSync(probe);}
+  catch(e){if(['EPERM','EACCES','ENOTSUP'].includes(e.code)){t.skip('Symlink unavailable');return;}throw e;}
+  const hook=path.join(src,'precopy-swap.cjs');
+  fs.writeFileSync(hook,[
+    "const fs=require('node:fs');",
+    "const copy=fs.copyFileSync,open=fs.openSync;",
+    "let once=false;",
+    "function swap(file){if(!once&&String(file)===process.env.RC_SELECTED){",
+    " once=true;fs.renameSync(file,file+'.checked');fs.symlinkSync(process.env.RC_OUTSIDE,file,'file');",
+    "}}",
+    "fs.copyFileSync=function(source,...rest){swap(source);return copy.call(this,source,...rest);};",
+    "fs.openSync=function(file,flags,...rest){",
+    " if(String(file)===process.env.RC_SELECTED&&((flags==='r')||(typeof flags==='number'&&(flags&3)===0)))swap(file);",
+    " return open.call(this,file,flags,...rest);",
+    "};"
+  ].join('\n'));
+  const id='source-swap-001';
+  const r=spawnSync(process.execPath,['--require',hook,cli,'send','--peer','Linux','--path',source,'--id',id],{
+    encoding:'utf8',timeout:7000,
+    env:{...process.env,COMMANDER_TRANSFER_HOME:src,RC_SELECTED:source,RC_OUTSIDE:outside}});
+  const partial=path.join(src,'staging','Linux',id+'.part');
+  const published=path.join(src,'pairs','Linux','transfers',id,'payload.bin');
+  assert.notEqual(r.status,0,'A replaced source must fail closed: '+r.stdout);
+  if(fs.existsSync(partial))assert.notDeepEqual(fs.readFileSync(partial),secret,
+    'Outside bytes must never enter staged partial even if final commit is rejected');
+  if(fs.existsSync(published))assert.notDeepEqual(fs.readFileSync(published),secret);
+  assert.deepEqual(fs.readFileSync(outside),secret);
+ });
+});

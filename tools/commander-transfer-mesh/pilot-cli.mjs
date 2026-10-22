@@ -69,6 +69,45 @@ const json=(o)=>process.stdout.write(JSON.stringify(o)+'\n');
 function hash(file){let h=crypto.createHash('sha256'),b=Buffer.allocUnsafe(1048576),fd=fs.openSync(file,'r');
  try{for(;;){const n=fs.readSync(fd,b,0,b.length,null);if(!n)break;h.update(b.subarray(0,n));}}
  finally{fs.closeSync(fd);}return h.digest('hex');}
+// Copy only from the already approved regular-file inode, never a re-resolved
+// pathname. A post-check symlink replacement must not reach staging even if a
+// later size/mtime verification would reject publication.
+function copyPinnedSource(source,temp,before){
+ const flags=fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW??0)|(fs.constants.O_NONBLOCK??0);
+ const input=fs.openSync(source,flags);
+ let output;
+ try{
+  const opened=fs.fstatSync(input),named=fs.lstatSync(source);
+  const same=(a,b)=>a.dev===b.dev&&a.ino===b.ino&&a.size===b.size&&
+    a.mtimeMs===b.mtimeMs&&a.ctimeMs===b.ctimeMs;
+  if(!opened.isFile()||opened.nlink!==1||!named.isFile()||
+     named.isSymbolicLink()||named.nlink!==1||
+     !same(before,opened)||!same(opened,named))
+   fail('Source changed before safe copy');
+  output=fs.openSync(temp,'wx',0o600);
+  const block=Buffer.allocUnsafe(1024*1024);
+  for(let offset=0;offset<opened.size;){
+   const want=Math.min(block.length,opened.size-offset);
+   const count=fs.readSync(input,block,0,want,offset);
+   if(count<=0)fail('Source changed while copying');
+   for(let written=0;written<count;){
+    const n=fs.writeSync(output,block,written,count-written,offset+written);
+    if(n<=0)fail('Staging write failed');
+    written+=n;
+   }
+   offset+=count;
+  }
+  const after=fs.fstatSync(input),namedAfter=fs.lstatSync(source);
+  if(!same(opened,after)||!namedAfter.isFile()||namedAfter.isSymbolicLink()||
+     namedAfter.nlink!==1||!same(opened,namedAfter))
+   fail('Source changed while copying');
+  fs.fsyncSync(output);
+ }finally{
+  if(output!==undefined)fs.closeSync(output);
+  fs.closeSync(input);
+ }
+}
+
 function transferPaths(peer,self,id){
  if(!validAlias.test(peer)||peer===self)fail('Unknown or self peer');
  if(!validId.test(id))fail('Invalid transfer ID');
@@ -221,7 +260,7 @@ try{
      fs.mkdirSync(staging,{recursive:true});
      assertManagedStaging(peer,id);
      const temp=path.join(staging,id+'.part');
-     fs.copyFileSync(file,temp,fs.constants.COPYFILE_EXCL);
+     copyPinnedSource(file,temp,st);
      const after=fs.statSync(file);
      if(after.size!==st.size||after.mtimeMs!==st.mtimeMs)fail('Source changed while copying');
      const sha256=hash(temp);
