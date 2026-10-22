@@ -80,9 +80,6 @@ Type: files; Name: "{group}\Remote Commander Operations Monitor.lnk"
 Type: files; Name: "{group}\Remote Commander Admin Runtime.lnk"
 
 [Run]
-#ifdef BrowserSetup
-Filename: "{tmp}\{#BrowserSetupName}"; Parameters: "/VERYSILENT /NORESTART"; Components: browser; StatusMsg: "Installing Remote Commander Browser..."; Flags: waituntilterminated
-#endif
 Filename: "{app}\RemoteCommander.exe"; Description: "Open Remote Commander"; Flags: nowait postinstall skipifsilent
 
 [Code]
@@ -266,8 +263,27 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   QueueDir, QueuePath, Normalized, Mode, Manifest: String;
+#ifdef BrowserSetup
+  BrowserExitCode: Integer;
+#endif
 begin
   if CurStep <> ssPostInstall then Exit;
+
+#ifdef BrowserSetup
+  // Nested Browser installation must be checked before writing success metadata.
+  // The previous [Run] entry waited but never examined its process exit code.
+  if WizardIsComponentSelected('browser') then
+  begin
+    ExtractTemporaryFile('{#BrowserSetupName}');
+    WizardForm.StatusLabel.Caption := 'Installing selected Remote Commander Browser...';
+    if not Exec(ExpandConstant('{tmp}\{#BrowserSetupName}'),
+      '/VERYSILENT /NORESTART', '', SW_HIDE, ewWaitUntilTerminated, BrowserExitCode) then
+      RaiseException('BROWSER_INSTALL_LAUNCH_FAILED');
+    if BrowserExitCode <> 0 then
+      RaiseException('BROWSER_INSTALL_EXIT_NONZERO_' + IntToStr(BrowserExitCode));
+  end;
+#endif
+
 
   if not NormalizeProfiles(ProfilePage.Values[0], Normalized) then
     RaiseException('Profile list became invalid during installation.');
