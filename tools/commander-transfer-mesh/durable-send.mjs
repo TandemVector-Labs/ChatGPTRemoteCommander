@@ -70,15 +70,37 @@ function safePaths(peer,id){
   assertManagedEntry(file,false);
  return {jobDir,stageDir,record,lock,part,destination};
 }
+// On Linux, open each managed ancestor relative to the previous held
+// directory descriptor. /proc/self/fd pins the directory object even after a
+// pathname rename. O_DIRECTORY|O_NOFOLLOW rejects substituted symlink parents.
+// This is a Linux-only data-plane mitigation; Windows needs native handle-
+// relative NtCreateFile + protected ACLs, not a path-based approximation.
+function withLinuxPinnedPath(file,read){
+ if(process.platform!=='linux'||!within(file,root))return read(file);
+ const rel=path.relative(root,file),parts=rel.split(path.sep);
+ assertion(parts.length>=1&&parts.every(x=>x&&x!=='.'&&x!=='..'),'UNTRUSTED_MANAGED_ANCESTOR');
+ const flags=fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_NOFOLLOW;
+ const fds=[];
+ try{
+  fds.push(fs.openSync(root,flags));
+  for(const part of parts.slice(0,-1)){
+   const next=fs.openSync('/proc/self/fd/'+fds[fds.length-1]+'/'+part,flags);
+   assertion(fs.fstatSync(next).isDirectory(),'UNTRUSTED_MANAGED_ANCESTOR');
+   fds.push(next);
+  }
+  return read('/proc/self/fd/'+fds[fds.length-1]+'/'+parts.at(-1));
+ }finally{for(let i=fds.length-1;i>=0;i--)fs.closeSync(fds[i]);}
+}
 // Do not reopen a preflight-checked journal via a pathname. A peer that can
 // replace a managed record between lstat and read must not forge job status.
 // Keep the journal bounded and attach bytes to a stable regular-file descriptor.
 function recordRead(p){
- const before=fs.lstatSync(p.record);
+ return withLinuxPinnedPath(p.record,(name)=>{
+ const before=fs.lstatSync(name);
  assertion(before.isFile()&&!before.isSymbolicLink()&&before.nlink===1&&
    before.size>=1&&before.size<=131072,'UNTRUSTED_JOB_RECORD');
  const flags=fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW??0)|(fs.constants.O_NONBLOCK??0);
- const fd=fs.openSync(p.record,flags);
+ const fd=fs.openSync(name,flags);
  try{
   const opened=fs.fstatSync(fd);
   assertion(opened.isFile()&&opened.nlink===1&&opened.size===before.size&&
@@ -91,7 +113,7 @@ function recordRead(p){
    assertion(n>0,'UNTRUSTED_JOB_RECORD');
    at+=n;
   }
-  const after=fs.fstatSync(fd),named=fs.lstatSync(p.record);
+  const after=fs.fstatSync(fd),named=fs.lstatSync(name);
   assertion(after.dev===opened.dev&&after.ino===opened.ino&&after.size===opened.size&&
     after.mtimeMs===opened.mtimeMs&&after.ctimeMs===opened.ctimeMs&&
     named.isFile()&&!named.isSymbolicLink()&&named.nlink===1&&
@@ -99,7 +121,7 @@ function recordRead(p){
     named.mtimeMs===opened.mtimeMs&&named.ctimeMs===opened.ctimeMs,
     'UNTRUSTED_JOB_RECORD');
   return JSON.parse(bytes.toString('utf8'));
- }finally{fs.closeSync(fd);}
+ }finally{fs.closeSync(fd);} });
 }
 function atomicRename(from,to){
  let last;
