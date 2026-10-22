@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import {spawn,spawnSync} from 'node:child_process';
@@ -53,6 +54,62 @@ test('Windows native handle-relative read prototype: pinned parents, no reparse,
     const p=read('jobs\\Linux\\record-001.json');
     assert.equal(p.status,0,p.stderr);
     assert.equal(Buffer.from(p.stdout.trim(),'base64').toString('utf8'),queued);
+   });
+   await t.test('Node job-status integrates with opt-in SHA-pinned native reader, rejects wrong pin',()=>{
+    const id='native-integrated-001',rec=path.join(original,id+'.json');
+    const j={schema:'ctmesh-durable-v1',id,peer:'Linux',status:'PUBLISHED',bytes:3,
+     createdAt:new Date().toISOString()};
+    fs.writeFileSync(rec,JSON.stringify(j));
+    const cli=path.resolve(path.dirname(project),'../../commander-transfer-mesh/durable-send.mjs');
+    const digest=crypto.createHash('sha256').update(fs.readFileSync(releaseExe)).digest('hex');
+    const environment={...process.env,COMMANDER_TRANSFER_HOME:root,
+      COMMANDER_TRANSFER_NATIVE_READER:releaseExe,COMMANDER_TRANSFER_NATIVE_READER_SHA256:digest};
+    const args=[cli,'job-status','--peer','Linux','--id',id];
+    const valid=spawnSync(process.execPath,args,{encoding:'utf8',timeout:12000,env:environment});
+    assert.equal(valid.status,0,valid.stderr);
+    assert.equal(JSON.parse(valid.stdout).status,'PUBLISHED');
+    const denied=spawnSync(process.execPath,args,{encoding:'utf8',timeout:12000,
+      env:{...environment,COMMANDER_TRANSFER_NATIVE_READER_SHA256:'0'.repeat(64)}});
+    assert.notEqual(denied.status,0,'Wrong SHA must fail closed');
+    assert.match(denied.stderr,/NATIVE_READER_DIGEST_MISMATCH/);
+    const missing=spawnSync(process.execPath,args,{encoding:'utf8',timeout:12000,
+      env:{...environment,COMMANDER_TRANSFER_NATIVE_READER_SHA256:''}});
+    assert.notEqual(missing.status,0,'Incomplete helper configuration must fail closed');
+    assert.match(missing.stderr,/NATIVE_READER_CONFIGURATION_INVALID/);
+   });
+   await t.test('Node job-status refuses ancestor swapped immediately before invoking pinned helper',()=>{
+    const id='native-swap-001',rec=path.join(original,id+'.json'),outsideRec=path.join(external,id+'.json');
+    const j={schema:'ctmesh-durable-v1',id,peer:'Linux',status:'QUEUED',bytes:3,
+      createdAt:new Date().toISOString()};
+    fs.writeFileSync(rec,JSON.stringify(j));
+    fs.writeFileSync(outsideRec,JSON.stringify({...j,status:'PUBLISHED'}));
+    const cli=path.resolve(path.dirname(project),'../../commander-transfer-mesh/durable-send.mjs');
+    const digest=crypto.createHash('sha256').update(fs.readFileSync(releaseExe)).digest('hex');
+    const hook=path.join(work,'native-ancestor-hook.cjs'),marker=path.join(work,'native-swapped.marker');
+    fs.writeFileSync(hook,[
+      "const cp=require('node:child_process'),fs=require('node:fs'),mod=require('node:module');",
+      "const old=cp.spawnSync;let once=false;",
+      "cp.spawnSync=function(file,...args){",
+      "if(!once&&file===process.env.COMMANDER_TRANSFER_NATIVE_READER){once=true;",
+      "fs.renameSync(process.env.RC_JOB,process.env.RC_JOB+'.saved');",
+      "fs.symlinkSync(process.env.RC_OUTSIDE,process.env.RC_JOB,'junction');",
+      "fs.writeFileSync(process.env.RC_MARKER,'SWAPPED');",
+      "}return old.call(this,file,...args);};mod.syncBuiltinESMExports();"
+    ].join('\n'));
+    const environment={...process.env,COMMANDER_TRANSFER_HOME:root,
+      COMMANDER_TRANSFER_NATIVE_READER:releaseExe,COMMANDER_TRANSFER_NATIVE_READER_SHA256:digest,
+      NODE_OPTIONS:'--require '+hook,RC_JOB:original,RC_OUTSIDE:external,RC_MARKER:marker};
+    try{
+      const p=spawnSync(process.execPath,[cli,'job-status','--peer','Linux','--id',id],
+       {encoding:'utf8',timeout:12000,env:environment});
+      assert.equal(fs.existsSync(marker),true,'Attack hook must really execute');
+      assert.notEqual(p.status,0,'Forged external PUBLISHED may not be consumed');
+      assert.match(p.stderr,/UNTRUSTED_JOB_RECORD/);
+      assert.equal(fs.readFileSync(outsideRec,'utf8'),JSON.stringify({...j,status:'PUBLISHED'}));
+    }finally{
+      if(fs.existsSync(original)&&fs.lstatSync(original).isSymbolicLink())fs.unlinkSync(original);
+      if(fs.existsSync(original+'.saved'))fs.renameSync(original+'.saved',original);
+    }
    });
    await t.test('ancestor rename and junction substitution cannot redirect a held directory handle',async st=>{
     const marker=path.join(work,'ready.marker');
