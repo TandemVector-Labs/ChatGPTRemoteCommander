@@ -1,6 +1,7 @@
 param(
   [string]$VersionOverride = '',
   [string]$SourceRef = '',
+  [ValidateSet('upstream','organization')][string]$SourceRepository = 'upstream',
   [string]$ExpectedCommit = '',
   [string]$BrowserInstaller = '',
   [switch]$AllowDirty
@@ -22,6 +23,15 @@ if(-not $SourceRef){
   if(-not $SourceRef){throw 'SourceRef is required for a detached HEAD.'}
 }
 if($SourceRef -notmatch '^[A-Za-z0-9._/-]{1,128}$'){throw "Invalid SourceRef: $SourceRef"}
+if($SourceRepository -eq 'organization') {
+  if($ExpectedCommit -notmatch '^[0-9a-f]{40}$'){throw 'ORGANIZATION_SOURCE_REQUIRES_PINNED_COMMIT'}
+  # Never compile a "working" preview if the actual runtime installer cannot fetch its ref.
+  $origin='https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git'
+  $advertised=@(& git -c credential.interactive=never ls-remote --exit-code --heads $origin $SourceRef 2>$null)
+  if($LASTEXITCODE -ne 0 -or $advertised.Count -ne 1){throw 'ORGANIZATION_SOURCE_REF_NOT_ADVERTISED'}
+  $advertisedSha=($advertised[0] -split '\s+')[0].ToLowerInvariant()
+  if($advertisedSha -ne $ExpectedCommit){throw 'ORGANIZATION_SOURCE_REF_SHA_MISMATCH'}
+}
 
 if(-not $AllowDirty){
   $untracked=@(& git.exe -C $Root ls-files --others --exclude-standard)
@@ -67,7 +77,8 @@ if(-not $Iscc){throw 'Inno Setup 6 compiler (ISCC.exe) is required to build the 
 $args=@(
   ('/DMyVersion='+$Version),
   ('/DMyCommit='+$ExpectedCommit),
-  ('/DMySourceRef='+$SourceRef)
+  ('/DMySourceRef='+$SourceRef),
+  ('/DMySourceRepository='+$SourceRepository)
 )
 $BrowserSha=$null
 if($BrowserInstaller){
@@ -90,6 +101,7 @@ $result=[ordered]@{
   status='REMOTE_COMMANDER_SETUP_BUILD_PASS'
   version=$Version
   sourceRef=$SourceRef
+  sourceRepository=$SourceRepository
   commit=$ExpectedCommit
   setup=$Setup
   sha256=$Sha

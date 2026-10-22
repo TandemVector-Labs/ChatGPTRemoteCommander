@@ -146,3 +146,22 @@ test('native Desktop upgrade preserves authorized existing Core tier instead of 
   assert.ok(install.includes('Invoke-ExistingSafeUpdate'),
     'existing Core still routes through the qualified updater');
 });
+
+test('organization preview bootstrap is explicit, exact-commit pinned, and cannot upgrade existing owner Core',()=>{
+  const iss=read('installer/RemoteCommander.iss'), builder=read('installer/build-setup.ps1');
+  const core=read('install.ps1'), server=read('server-install-windows.ps1');
+  for(const file of [core,server]){
+    assert.ok(file.includes("[ValidateSet('upstream','organization')][string]$SourceRepository = 'upstream'"));
+    assert.ok(file.includes('ORGANIZATION_SOURCE_REQUIRES_PINNED_COMMIT'));
+    assert.ok(file.includes("$Repo = 'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git'"));
+  }
+  assert.ok(core.includes('ORGANIZATION_PREVIEW_EXISTING_INSTALL_DENIED'));
+  assert.ok(iss.includes('if ExistingCore and (\'{#MySourceRepository}\' = \'organization\') then'));
+  assert.ok(builder.includes('ORGANIZATION_SOURCE_REF_NOT_ADVERTISED'));
+  assert.ok(builder.includes('ORGANIZATION_SOURCE_REF_SHA_MISMATCH'));
+  assert.ok(server.includes("'-SourceRepository',$SourceRepository"));
+  assert.ok(builder.includes("'/DMySourceRepository='+$SourceRepository"));
+  assert.ok(builder.includes('ORGANIZATION_SOURCE_REQUIRES_PINNED_COMMIT'));
+  assert.ok(iss.includes('#define MySourceRepository "upstream"'));
+  assert.equal(iss.split('-SourceRepository "{#MySourceRepository}"').length - 1,2);
+});
