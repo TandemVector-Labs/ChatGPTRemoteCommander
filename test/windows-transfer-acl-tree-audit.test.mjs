@@ -7,9 +7,10 @@ import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 
 const script=fileURLToPath(new URL('../tools/security/inspect-windows-transfer-acl-tree.ps1',import.meta.url));
-const run=(root,max=256)=>{
- const out=spawnSync('pwsh',['-NoProfile','-NonInteractive','-File',script,'-Root',root,'-MaxEntries',String(max)],
-   {encoding:'utf8',timeout:10000});
+const run=(root,max=256,expectedOwnerSid)=>{
+ const argv=['-NoProfile','-NonInteractive','-File',script,'-Root',root,'-MaxEntries',String(max)];
+ if(expectedOwnerSid)argv.push('-ExpectedOwnerSid',expectedOwnerSid);
+ const out=spawnSync('pwsh',argv,{encoding:'utf8',timeout:10000});
  assert.equal(out.error,undefined,String(out.error));
  assert.ok(out.stdout.trim(),out.stderr);
  return {status:out.status,report:JSON.parse(out.stdout)};
@@ -93,5 +94,36 @@ test('redirected ancestor is rejected before its target is enumerated',
   assert.ok(report.report.reparseEntryCount>=1);
   assert.equal(report.report.inspectedEntries,0);
   assert.equal(fs.readFileSync(path.join(inner,'unread.txt'),'utf8'),'NEVER_READ');
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+test('bounded audit uses a pinned owner SID rather than its SYSTEM observer identity',
+ {skip:process.platform!=='win32'},t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'rc-acl-pinned-owner-'));
+ try{
+  configure(root);
+  const ownerSid='S-1-5-32-544'; // synthetic Administrators owner, not SYSTEM
+  const ps=[
+   "$ErrorActionPreference='Stop'",
+   "$r='"+root.replaceAll("'","''")+"'",
+   '$a=Get-Acl -LiteralPath $r',
+   "$a.SetOwner([Security.Principal.SecurityIdentifier]::new('"+ownerSid+"'))",
+   'Set-Acl -LiteralPath $r -AclObject $a'
+  ].join(';');
+  const changed=spawnSync('pwsh',['-NoProfile','-NonInteractive','-Command',ps],
+   {encoding:'utf8',timeout:10000});
+  if(changed.status!==0){t.skip('Synthetic owner change unavailable');return;}
+  const defaultAudit=run(root);
+  assert.equal(defaultAudit.status,2,JSON.stringify(defaultAudit.report));
+  assert.equal(defaultAudit.report.rootOwnerIsObserver,false);
+  assert.equal(defaultAudit.report.rootOwnerIsExpected,false);
+  const verified=run(root,256,ownerSid);
+  assert.equal(verified.status,0,JSON.stringify(verified.report));
+  assert.equal(verified.report.rootOwnerIsExpected,true);
+  assert.equal(verified.report.rootOwnerIsObserver,false);
+  assert.equal(run(root,256,'S-1-5-19').status,2);
+  grant(root,'R');
+  const read=run(root,256,ownerSid);
+  assert.equal(read.status,2,JSON.stringify(read.report));
+  assert.ok(read.report.unapprovedReadAceCount>0);
  }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
