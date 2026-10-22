@@ -85,6 +85,39 @@ test('untrusted peer and malformed transfer ID rejected',()=>{
   }
  });
 });
+test('incoming payload cannot be swapped to external symlink just before hash opens it',t=>{
+ withFixtures((src,dst)=>{
+  const id='hash-race-payload-001',data=Buffer.from('same payload but external authority');
+  send(src,id,data);
+  const folder=mirror(src,dst,id),payload=path.join(folder,'payload.bin');
+  const external=path.join(dst,'outside-hash-race.bin');
+  fs.writeFileSync(external,data);
+  // Validate the host can create file links before attempting the adversarial case.
+  const trial=path.join(dst,'symlink-capability-check');
+  try{fs.symlinkSync(external,trial,'file');fs.unlinkSync(trial);}
+  catch(e){if(['EPERM','EACCES','ENOTSUP'].includes(e.code)){t.skip('File symlinks unavailable');return;}throw e;}
+  const marker=path.join(dst,'race-fired.marker'),preload=path.join(dst,'hash-race-preload.cjs');
+  fs.writeFileSync(preload,[
+   "const fs=require('node:fs'),mod=require('node:module');",
+   "const old=fs.openSync;let once=false;",
+   "fs.openSync=function(file,...rest){",
+   "if(!once&&String(file)===process.env.RC_PAYLOAD){once=true;",
+   "fs.renameSync(file,file+'.original');",
+   "fs.symlinkSync(process.env.RC_EXTERNAL,file,'file');",
+   "fs.writeFileSync(process.env.RC_MARKER,'ATTACK_ACTUALLY_FIRED');",
+   "}return old.call(this,file,...rest);};",
+   "mod.syncBuiltinESMExports();"
+  ].join('\n'));
+  const result=spawnSync(process.execPath,['--require',preload,cli,'status',
+    '--peer','PC','--id',id],{encoding:'utf8',timeout:15000,env:{...process.env,
+    COMMANDER_TRANSFER_HOME:dst,RC_PAYLOAD:payload,RC_EXTERNAL:external,RC_MARKER:marker}});
+  assert.equal(fs.existsSync(marker),true,'Attack hook must fire');
+  assert.notEqual(result.status,0,'External symlink with same digest must never authorize payload');
+  assert.match(result.stderr,/Untrusted hashed file|ELOOP|Unsafe source/);
+  assert.deepEqual(fs.readFileSync(external),data);
+ });
+});
+
 test('symlink input cannot be transferred as a regular file',(t)=>{
  withFixtures((src)=>{
   const file=path.join(src,'secret.bin'),link=path.join(src,'link.bin');
