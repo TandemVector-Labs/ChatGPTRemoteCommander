@@ -26,7 +26,16 @@ test('limits fail closed before queue admission and do not leave admission locks
   const queued=JSON.parse(call(root,...args,'--max-source-bytes','32768','--max-pending-bytes','32768','--max-active-jobs','1'));
   assert.equal(queued.status,'QUEUED');
   let state;for(let i=0;i<200;i++){
-   state=JSON.parse(call(root,'job-status','--peer','Linux','--id','quota-test-001'));
+   // Journal replacement is atomic: an in-flight status read may correctly
+   // fail closed on the inode/metadata race. Retry that explicit transient
+   // error, but never treat an unverified record as a successful status.
+   try{
+    state=JSON.parse(call(root,'job-status','--peer','Linux','--id','quota-test-001'));
+   }catch(e){
+    if(!/CTMESH_DURABLE_ERROR:UNTRUSTED_JOB_RECORD/.test(String(e.stderr)))throw e;
+    await new Promise(r=>setTimeout(r,30));
+    continue;
+   }
    if(state.status==='PUBLISHED'||state.status==='FAILED')break;
    await new Promise(r=>setTimeout(r,30));
   }

@@ -257,3 +257,142 @@ test('enqueue admission rejects an oversized existing queue journal before parsi
   assert.equal(fs.statSync(record).size>131072,true);
  }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
+
+test('enqueue rejects a swapped node identity symlink instead of adopting forged peer authority',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-node-swap-'));
+ try{
+  const srcDir=path.join(root,'source');fs.mkdirSync(srcDir);
+  const source=path.join(srcDir,'input.dat');fs.writeFileSync(source,'INPUT');
+  const node=path.join(root,'node.json'),outside=path.join(root,'outside-node.json');
+  fs.writeFileSync(node,JSON.stringify({alias:'PC'}));
+  fs.writeFileSync(outside,JSON.stringify({alias:'EmadServer'}));
+  const probe=path.join(root,'probe');
+  try{fs.symlinkSync(outside,probe,'file');fs.unlinkSync(probe);}
+  catch(e){if(['EPERM','EACCES','ENOTSUP'].includes(e.code)){t.skip('Symlink unavailable');return;}throw e;}
+  const hook=path.join(root,'node-hook.cjs');
+  fs.writeFileSync(hook,[
+   "const fs=require('node:fs');",
+   "const rd=fs.readFileSync,open=fs.openSync;",
+   "let used=false;",
+   "function swap(file){if(!used&&String(file)===process.env.RC_NODE){",
+   "used=true;fs.renameSync(file,file+'.checked');",
+   "fs.symlinkSync(process.env.RC_EXTERNAL,file,'file');",
+   "}}",
+   "fs.readFileSync=function(file,...args){swap(file);return rd.call(this,file,...args);};",
+   "fs.openSync=function(file,...args){swap(file);return open.call(this,file,...args);};"
+  ].join('\n'));
+  const r=spawnSync(process.execPath,[cli,'enqueue','--peer','Linux','--id','node-swap-001',
+    '--path',source,'--source-root',srcDir],{encoding:'utf8',timeout:6000,
+    env:{...process.env,NODE_OPTIONS:'--require '+hook,COMMANDER_TRANSFER_HOME:root,
+      RC_NODE:node,RC_EXTERNAL:outside}});
+  assert.notEqual(r.status,0,'Swapped local identity must fail before admission: '+r.stdout);
+  assert.match(r.stderr,/UNTRUSTED_JOB_RECORD|ELOOP|TRANSFER_MANAGED_PATH_UNSAFE/);
+  assert.equal(fs.readFileSync(outside,'utf8'),JSON.stringify({alias:'EmadServer'}));
+  assert.equal(fs.existsSync(path.join(root,'jobs','Linux','node-swap-001.json')),false);
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('job-status rejects a substituted stale-worker lock symlink after safePaths preflight',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-lock-swap-'));
+ try{
+  const jobs=path.join(root,'jobs','Linux'),id='lock-swap-001';
+  fs.mkdirSync(jobs,{recursive:true});
+  const record=path.join(jobs,id+'.json');
+  fs.writeFileSync(record,JSON.stringify({schema:'ctmesh-durable-v1',id,peer:'Linux',
+    bytes:3,status:'QUEUED',createdAt:new Date(Date.now()-90000).toISOString()}));
+  const lock=path.join(jobs,id+'.lock'),outside=path.join(root,'outside-lock.json');
+  fs.writeFileSync(lock,JSON.stringify({pid:0}));
+  fs.writeFileSync(outside,JSON.stringify({pid:process.pid}));
+  const probe=path.join(root,'probe');
+  try{fs.symlinkSync(outside,probe,'file');fs.unlinkSync(probe);}
+  catch(e){if(['EPERM','EACCES','ENOTSUP'].includes(e.code)){t.skip('Symlink unavailable');return;}throw e;}
+  const hook=path.join(root,'lock-hook.cjs');
+  fs.writeFileSync(hook,[
+   "const fs=require('node:fs');",
+   "const rd=fs.readFileSync,open=fs.openSync;",
+   "let used=false;",
+   "function swap(file){if(!used&&String(file)===process.env.RC_LOCK){",
+   "used=true;fs.renameSync(file,file+'.checked');",
+   "fs.symlinkSync(process.env.RC_EXTERNAL,file,'file');",
+   "}}",
+   "fs.readFileSync=function(file,...args){swap(file);return rd.call(this,file,...args);};",
+   "fs.openSync=function(file,...args){swap(file);return open.call(this,file,...args);};"
+  ].join('\n'));
+  const r=spawnSync(process.execPath,[cli,'job-status','--peer','Linux','--id',id],{
+    encoding:'utf8',timeout:6000,env:{...process.env,NODE_OPTIONS:'--require '+hook,
+      COMMANDER_TRANSFER_HOME:root,RC_LOCK:lock,RC_EXTERNAL:outside}});
+  assert.notEqual(r.status,0,'Swapped worker lock must fail closed: '+r.stdout);
+  assert.match(r.stderr,/UNTRUSTED_JOB_RECORD|ELOOP|TRANSFER_MANAGED_PATH_UNSAFE/);
+  assert.equal(fs.readFileSync(outside,'utf8'),JSON.stringify({pid:process.pid}));
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('publish recovery never consumes a swapped external manifest symlink',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-manifest-swap-'));
+ try{
+  const id='manifest-race-001', peer='Linux';
+  const dir=path.join(root,'pairs',peer,'transfers',id);
+  const jobs=path.join(root,'jobs',peer),sourceDir=path.join(root,'source');
+  fs.mkdirSync(dir,{recursive:true});fs.mkdirSync(jobs,{recursive:true});fs.mkdirSync(sourceDir);
+  const source=path.join(sourceDir,'sample.bin'),data=Buffer.from('EXPECTED_BYTES');
+  fs.writeFileSync(source,data);fs.writeFileSync(path.join(dir,'payload.bin'),data);
+  const st=fs.statSync(source),createdAt='2026-10-22T00:00:00.000Z';
+  const j={schema:'ctmesh-durable-v1',id,peer,from:'PC',path:source,sourceRoot:sourceDir,
+   name:'sample.bin',bytes:st.size,mtimeMs:st.mtimeMs,ino:st.ino,dev:st.dev,
+   copiedBytes:0,status:'INTERRUPTED',createdAt};
+  fs.writeFileSync(path.join(jobs,id+'.json'),JSON.stringify(j));
+  const manifest=path.join(dir,'manifest.json'),outside=path.join(root,'outside-manifest.json');
+  const expected={schema:'ctmesh-v1',id,from:'PC',to:peer,name:'sample.bin',
+   bytes:st.size,sha256:crypto.createHash('sha256').update(data).digest('hex'),createdAt};
+  fs.writeFileSync(manifest,'{"schema":"ctmesh-test-nonmatching"}\n');
+  fs.writeFileSync(outside,JSON.stringify(expected));
+  const probe=path.join(root,'probe');
+  try{fs.symlinkSync(outside,probe,'file');fs.unlinkSync(probe);}
+  catch(e){if(['EPERM','EACCES','ENOTSUP'].includes(e.code)){t.skip('Symlinks unavailable');return;}throw e;}
+  const hook=path.join(root,'manifest-hook.cjs');
+  fs.writeFileSync(hook,[
+   "const fs=require('node:fs');",
+   "const oldRead=fs.readFileSync,oldOpen=fs.openSync;",
+   "let swapped=false;",
+   "function swap(file){if(!swapped&&String(file)===process.env.RC_MANIFEST){",
+   "swapped=true;fs.renameSync(file,file+'.checked');",
+   "fs.symlinkSync(process.env.RC_OUTSIDE,file,'file');}}",
+   "fs.readFileSync=function(file,...args){swap(file);return oldRead.call(this,file,...args);};",
+   "fs.openSync=function(file,...args){swap(file);return oldOpen.call(this,file,...args);};"
+  ].join('\n'));
+  const r=spawnSync(process.execPath,[cli,'work','--peer',peer,'--id',id],{
+   encoding:'utf8',timeout:6500,env:{...process.env,COMMANDER_TRANSFER_HOME:root,
+    NODE_OPTIONS:'--require '+hook,RC_MANIFEST:manifest,RC_OUTSIDE:outside}});
+  assert.equal(r.status,0,r.stderr);
+  const state=JSON.parse(fs.readFileSync(path.join(jobs,id+'.json'),'utf8'));
+  assert.equal(state.status,'FAILED','Recovered worker must refuse swapped external manifest');
+  assert.equal(fs.readFileSync(outside,'utf8'),JSON.stringify(expected));
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('publish recovery refuses an oversized existing manifest before parsing',()=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-manifest-size-'));
+ try{
+  const id='manifest-large-001',peer='Linux';
+  const dir=path.join(root,'pairs',peer,'transfers',id),jobs=path.join(root,'jobs',peer),
+   sourceDir=path.join(root,'source');
+  fs.mkdirSync(dir,{recursive:true});fs.mkdirSync(jobs,{recursive:true});fs.mkdirSync(sourceDir);
+  const source=path.join(sourceDir,'sample.bin'),data=Buffer.from('EXPECTED_BYTES');
+  fs.writeFileSync(source,data);fs.writeFileSync(path.join(dir,'payload.bin'),data);
+  const st=fs.statSync(source),createdAt='2026-10-22T00:00:00.000Z';
+  const j={schema:'ctmesh-durable-v1',id,peer,from:'PC',path:source,sourceRoot:sourceDir,
+   name:'sample.bin',bytes:st.size,mtimeMs:st.mtimeMs,ino:st.ino,dev:st.dev,
+   copiedBytes:0,status:'INTERRUPTED',createdAt};
+  fs.writeFileSync(path.join(jobs,id+'.json'),JSON.stringify(j));
+  const expected={schema:'ctmesh-v1',id,from:'PC',to:peer,name:'sample.bin',
+   bytes:st.size,sha256:crypto.createHash('sha256').update(data).digest('hex'),createdAt};
+  const manifest=path.join(dir,'manifest.json');
+  fs.writeFileSync(manifest,JSON.stringify(expected)+' '.repeat(131073));
+  const r=spawnSync(process.execPath,[cli,'work','--peer',peer,'--id',id],{
+   encoding:'utf8',timeout:6500,env:{...process.env,COMMANDER_TRANSFER_HOME:root}});
+  assert.equal(r.status,0,r.stderr);
+  const state=JSON.parse(fs.readFileSync(path.join(jobs,id+'.json'),'utf8'));
+  assert.equal(state.status,'FAILED','Recovered worker must refuse oversized existing manifest');
+  assert.ok(fs.statSync(manifest).size>131072);
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
