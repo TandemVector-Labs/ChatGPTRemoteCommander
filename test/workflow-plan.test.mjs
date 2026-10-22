@@ -104,6 +104,32 @@ test('two processes with the same source revision commit exactly one different e
   assert.equal(f.store.get('sample').state.revision,2);assert.equal(f.store.get('sample').state.planExtensions.length,1);
 });
 
+test('vanishing SQLite rollback journal is tolerated during concurrent store startup',t=>{
+  const f=fixture(t);
+  const journal=path.join(f.options.directory,'workflows.sqlite-journal');
+  const realLstat=fs.lstatSync;
+  const realExists=fs.existsSync;
+  let transientJournalChecks=0;
+  // Force the historical existsSync/lstatSync time-of-check/time-of-use race.
+  // A successful startup must not rely on the journal remaining present.
+  t.mock.method(fs,'existsSync',(candidate,...rest)=>
+    candidate===journal?true:realExists(candidate,...rest));
+  t.mock.method(fs,'lstatSync',(candidate,...rest)=>{
+    if(candidate===journal){
+      transientJournalChecks++;
+      const error=new Error('SQLite completed and removed rollback journal');
+      error.code='ENOENT';
+      throw error;
+    }
+    return realLstat(candidate,...rest);
+  });
+  const reopened=new WorkflowStore(f.options);
+  try {
+    assert.ok(transientJournalChecks>0,'transient SQLite journal must be inspected');
+    assert.equal(reopened.get('sample').state.revision,1);
+  } finally {reopened.close();}
+});
+
 test('two processes replaying one operation commit once and receive identical receipts',async t=>{
   const f=fixture(t),request=f.request();const results=await Promise.all([runChild(f.options,request),runChild(f.options,request)]);
   for(const r of results)assert.equal(r.code,0,r.out+r.err);

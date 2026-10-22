@@ -73,6 +73,24 @@ class SafeMonitorTests(unittest.TestCase):
         before=m.WORKFLOWS.stat().st_mtime_ns
         self.assertEqual(m.workflows(),[{"id":"probe","revision":3,"state":"WAITING"}])
         self.assertEqual(m.WORKFLOWS.stat().st_mtime_ns,before)
+    def test_disappearing_workflow_store_fails_closed(self):
+        class VanishingStore:
+            def lstat(self):
+                raise FileNotFoundError("synthetic workflow file disappearance")
+        m.WORKFLOWS = VanishingStore()
+        self.assertEqual(m.workflows(), [])
+
+    def test_workflow_store_symlink_still_rejected(self):
+        actual = self.root / "real.sqlite"
+        c = sqlite3.connect(actual)
+        c.execute("CREATE TABLE workflows (id TEXT, revision INTEGER, snapshot TEXT)")
+        c.execute("INSERT INTO workflows VALUES (?,?,?)",
+                  ("fixture", 1, json.dumps({"lifecycleState": "WAITING"})))
+        c.commit()
+        c.close()
+        m.WORKFLOWS.symlink_to(actual)
+        self.assertEqual(m.workflows(), [])
+
     def test_rejects_spoofed_workflow_identifiers(self):
         c=sqlite3.connect(m.WORKFLOWS)
         c.execute("CREATE TABLE workflows (id TEXT, revision INTEGER, snapshot TEXT)")

@@ -116,12 +116,11 @@ def profiles():
 def workflows(limit=300):
     # Read only the existing owner-state database; SQLite query_only prevents
     # implicit schema migration, scheduling, revision writes or task execution.
-    if not WORKFLOWS.is_file() or WORKFLOWS.is_symlink():
-        return []
-    if WORKFLOWS.stat().st_uid != os.getuid():
-        return []
     records = []
     try:
+        st = WORKFLOWS.lstat()
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+            return []
         import urllib.parse
         uri = "file:" + urllib.parse.quote(str(WORKFLOWS), safe="/") + "?mode=ro"
         c = sqlite3.connect(uri, uri=True, timeout=0.4)
