@@ -75,8 +75,16 @@ static class Native
 class Program {
  static int Main(string[] args) {
   try {
-   if(args.Length<2)throw new ArgumentException("Usage: RootAbsolute RelFile [marker]");
+#if CTMESH_TEST_RACE
+   if(args.Length is not (2 or 3))throw new ArgumentException("Usage: RootAbsolute RelFile [test-marker]");
+#else
+   // Production binaries must never expose deterministic test pause hooks.
+   if(args.Length!=2)throw new ArgumentException("Usage: RootAbsolute RelFile");
+#endif
+   if(!Path.IsPathFullyQualified(args[0])||args[0].StartsWith(@"\\"))throw new ArgumentException("DRIVE_ROOT_ONLY");
    string root=Path.GetFullPath(args[0]), rel=args[1];
+   if(string.IsNullOrEmpty(rel)||Path.IsPathRooted(rel)||rel.Contains(':')||rel.StartsWith('\')||rel.StartsWith('/'))
+       throw new ArgumentException("RELATIVE_COMPONENTS_ONLY");
    if(root.Length<3||!char.IsLetter(root[0])||root[1]!=':'||root[2]!='\\'||root.StartsWith(@"\\"))
        throw new ArgumentException("DRIVE_ROOT_ONLY");
    var parts=root[3..].Split('\\',StringSplitOptions.RemoveEmptyEntries)
@@ -88,10 +96,13 @@ class Program {
      for(int i=0;i<parts.Length-1;i++){
       var dir=Native.OpenChild(parent,parts[i],true);
       held.Add(dir);parent=dir;
-      if(args.Length>=3&&parts[i].Equals("Linux",StringComparison.OrdinalIgnoreCase)){
+#if CTMESH_TEST_RACE
+      // Never compiled into the ordinary Release binary. Test-only race hook.
+      if(args.Length==3&&parts[i].Equals("Linux",StringComparison.OrdinalIgnoreCase)){
        File.WriteAllText(args[2],"PINNED");
        Thread.Sleep(550);
       }
+#endif
      }
      using var h=Native.OpenChild(parent,parts[^1],false);
      using var stream=new FileStream(h,FileAccess.Read);
