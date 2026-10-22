@@ -81,7 +81,8 @@ for (const mode of ['standard', 'power']) test(`Linux custom no-start ${mode} re
     const config = JSON.parse(fs.readFileSync(path.join(f.target, 'config.local.json')));
     const privateRoot = path.join(f.target, 'var/isolated') + path.sep;
     for (const location of repeat ? [] : [config.runtimeState, config.auditLog, config.powerMode.backupRoot,
-      ...(config.durableWorkflows?.enabled ? [config.durableWorkflows.directory] : [])]) {
+      ...(config.durableWorkflows?.enabled ? [config.durableWorkflows.directory] : []),
+      config.durableDelivery.directory]) {
       assert.equal(typeof location, 'string');
       assert.ok(location.startsWith(privateRoot), `state must stay local to custom installation: ${location}`);
     }
