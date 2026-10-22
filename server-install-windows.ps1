@@ -1,6 +1,7 @@
 param(
   [string]$SourceRef = 'v0.10.24',
   [string]$ExpectedCommit = '',
+  [ValidateSet('upstream','organization')][string]$SourceRepository = 'upstream',
   [ValidateSet('Power','Standard')][string]$AccessMode = 'Power',
   [ValidateSet('Auto','On','Off')][string]$GuiControl = 'Auto',
   [string]$InstallDir = '',
@@ -18,6 +19,14 @@ $script:BootstrapGitHubToken = [Environment]::GetEnvironmentVariable('RC_GITHUB_
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $Repo = 'https://github.com/GOD13emad/ChatGPTRemoteCommander.git'
+# Optional explicit organization preview; default is the original upstream.
+# Never authorize unpinned organization source for an end-user installer.
+if ($SourceRepository -eq 'organization') {
+  if ($ExpectedCommit -notmatch '^[0-9a-fA-F]{40}$' -or $SourceRef -notmatch '^[A-Za-z0-9._/-]{1,128}$') {
+    throw 'ORGANIZATION_SOURCE_REQUIRES_PINNED_COMMIT'
+  }
+  $Repo = 'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git'
+}
 # The organization-fork source is allowed only for a SHA-pinned GitHub-hosted
 # same-repository installer canary. Normal installs use the upstream origin.
 # This is not an arbitrary repository URL override or a publication permit.
@@ -315,7 +324,7 @@ try {
 
   $installer = Join-Path $stage 'install.ps1'
   if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw 'Staged install.ps1 is missing.' }
-  $args = @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$installer,'-SourceRef',$SourceRef,'-ExpectedCommit',$resolved)
+  $args = @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$installer,'-SourceRef',$SourceRef,'-ExpectedCommit',$resolved,'-SourceRepository',$SourceRepository)
   if ($AccessMode -eq 'Power') { $args += '-PowerMode' } else { $args += '-StandardMode' }
   if ($InstallDir) { $args += @('-InstallDir',$InstallDir) }
   if (-not $NoStartServer) { $args += '-StartServer' }

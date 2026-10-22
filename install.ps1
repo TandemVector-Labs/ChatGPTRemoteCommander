@@ -11,11 +11,20 @@ param(
   [switch]$SkipTunnelClient,
   [string]$TunnelClientVersion = '0.0.15',
   [string]$SourceRef = 'v0.10.24',
-  [string]$ExpectedCommit = ''
+  [string]$ExpectedCommit = '',
+  [ValidateSet('upstream','organization')][string]$SourceRepository = 'upstream'
 )
 $ErrorActionPreference = 'Stop'
 
 $Repo = 'https://github.com/GOD13emad/ChatGPTRemoteCommander.git'
+# Optional explicit organization preview; default is the original upstream.
+# Never authorize unpinned organization source for an end-user installer.
+if ($SourceRepository -eq 'organization') {
+  if ($ExpectedCommit -notmatch '^[0-9a-fA-F]{40}$' -or $SourceRef -notmatch '^[A-Za-z0-9._/-]{1,128}$') {
+    throw 'ORGANIZATION_SOURCE_REQUIRES_PINNED_COMMIT'
+  }
+  $Repo = 'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git'
+}
 # The organization-fork source is allowed only for a SHA-pinned GitHub-hosted
 # same-repository installer canary. Normal installs use the upstream origin.
 # This is not an arbitrary repository URL override or a publication permit.
@@ -134,6 +143,7 @@ function Ensure-Prerequisites {
 }
 
 function Invoke-ExistingSafeUpdate {
+  if ($SourceRepository -eq 'organization') { throw 'ORGANIZATION_PREVIEW_EXISTING_INSTALL_DENIED' }
   $temp = Join-Path $env:TEMP ("ChatGPTRemoteCommander-updater-" + $PID + "-" + [guid]::NewGuid().ToString('N'))
   New-Item -ItemType Directory -Path $temp | Out-Null
   try {
@@ -184,6 +194,7 @@ function Install-Source {
   New-Item -ItemType Directory -Force -Path $parent | Out-Null
 
   if (Test-Path -LiteralPath (Join-Path $InstallDir '.git')) {
+    if ($SourceRepository -eq 'organization') { throw 'ORGANIZATION_PREVIEW_EXISTING_INSTALL_DENIED' }
     $dirty = & git.exe -C $InstallDir status --porcelain --untracked-files=no
     if ($LASTEXITCODE -ne 0) {
       throw 'git status failed'

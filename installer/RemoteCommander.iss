@@ -7,6 +7,9 @@
 #ifndef MySourceRef
   #define MySourceRef "v0.10.18"
 #endif
+#ifndef MySourceRepository
+  #define MySourceRepository "upstream"
+#endif
 #ifndef DesktopPayload
   #define DesktopPayload "..\dist\desktop\remote-commander-windows-x64"
 #endif
@@ -227,13 +230,17 @@ begin
     // a previously owner-authorized FULL_POWER profile to Standard.
     ExistingCoreGit := ExpandConstant('{localappdata}\ChatGPTRemoteCommander\app\.git');
     ExistingCore := DirExists(ExistingCoreGit) or FileExists(ExistingCoreGit);
+    // Never perform machine prerequisites for a preview that will be refused
+    // because it would modify the owner's existing production Core.
+    if ExistingCore and ('{#MySourceRepository}' = 'organization') then
+      RaiseException('ORGANIZATION_PREVIEW_EXISTING_INSTALL_DENIED');
     EnsurePowerShell7;
 
     ExtractTemporaryFile('server-install-windows.ps1');
     PrereqScript := ExpandConstant('{tmp}\server-install-windows.ps1');
     Params :=
       '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + PrereqScript + '"' +
-      ' -SourceRef "{#MySourceRef}" -ExpectedCommit "{#MyCommit}" -PrerequisitesOnly';
+      ' -SourceRef "{#MySourceRef}" -ExpectedCommit "{#MyCommit}" -SourceRepository "{#MySourceRepository}" -PrerequisitesOnly';
     WizardForm.StatusLabel.Caption := 'Verifying machine prerequisites...';
     if not ShellExec('runas', PwshPath, Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
       RaiseException('Could not elevate prerequisite installation.');
@@ -244,7 +251,7 @@ begin
     CoreScript := ExpandConstant('{tmp}\install.ps1');
     Params :=
       '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + CoreScript + '"' +
-      ' -StartServer -SourceRef "{#MySourceRef}" -ExpectedCommit "{#MyCommit}"';
+      ' -StartServer -SourceRef "{#MySourceRef}" -ExpectedCommit "{#MyCommit}" -SourceRepository "{#MySourceRepository}"';
     if not ExistingCore then Params := Params + ' -StandardMode';
     WizardForm.StatusLabel.Caption := 'Installing and verifying Remote Commander core for this user...';
     if not Exec(PwshPath, Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
