@@ -8,6 +8,8 @@ import { spawn, spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { validateHardwareSelftestEndpoint } from '../tools/hardware-selftest-endpoint.mjs';
+// Ensure the cross-session owner/lock contract executes in the canonical CI suite.
+import './windows-updater-cross-session-lock.test.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const read=f=>fs.readFileSync(path.join(root,f),'utf8');
@@ -188,7 +190,7 @@ test('R-fleet unattended Stable check preserves newer persisted active route whe
 test('auto updater is candidate-first, hardware-gated and commit-point aware',()=>{
   const s=read('auto-update-windows.ps1');
   for(const marker of [
-    'Local\\ChatGPTRemoteCommanderAutoUpdater',
+    '[IO.FileShare]::None',
     "Run-Gate $stage.Dir 'check'",
     "Run-Gate $stage.Dir 'test'",
     "Run-Gate $stage.Dir 'audit'",

@@ -1,6 +1,8 @@
 """Linux user-local GUI installation, rollback and no-live-effects tests."""
 import importlib.util
+import io
 import os
+from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 import tempfile
 import unittest
@@ -38,6 +40,65 @@ class LocalControlCenterPackageTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "STAGING_DESTINATION_EXISTS"):
             installer.stage(self.source, dest, self.target)
 
+    def test_owner_home_environment_cannot_escape_or_follow_symlinks(self):
+        fixed = self.root / ".local" / "share"
+        fixed.parent.mkdir(mode=0o700)
+        fixed.mkdir(mode=0o700)
+        custom = self.root / "safe-xdg"
+        custom.mkdir(mode=0o700)
+        with patch.object(installer, "_system_owner_home", return_value=self.root):
+            with patch.dict(os.environ, {"XDG_DATA_HOME": str(fixed)}):
+                self.assertEqual(installer._validated_xdg_data_home(), fixed)
+            with patch.dict(os.environ, {"XDG_DATA_HOME": str(custom)}):
+                with self.assertRaisesRegex(RuntimeError, "UNSUPPORTED_XDG_DATA_HOME"):
+                    installer._validated_xdg_data_home()
+            with patch.dict(os.environ, {"XDG_DATA_HOME": "/etc"}):
+                with self.assertRaisesRegex(RuntimeError, "UNSUPPORTED_XDG_DATA_HOME"):
+                    installer._validated_xdg_data_home()
+            with patch.dict(os.environ, {"XDG_DATA_HOME": "relative/hijack"}):
+                with self.assertRaisesRegex(RuntimeError, "XDG_DATA_HOME_MUST_BE_ABSOLUTE"):
+                    installer._validated_xdg_data_home()
+            link = self.root / "link"
+            link.symlink_to(fixed, target_is_directory=True)
+            with patch.dict(os.environ, {"XDG_DATA_HOME": str(link)}):
+                with self.assertRaisesRegex(RuntimeError, "UNSUPPORTED_XDG_DATA_HOME"):
+                    installer._validated_xdg_data_home()
+
+    def test_fixed_default_xdg_ancestors_must_not_be_symlinks(self):
+        dotlocal = self.root / ".local"
+        dotlocal.mkdir(mode=0o700)
+        (dotlocal / "share").mkdir(mode=0o700)
+        with patch.object(installer, "_system_owner_home", return_value=self.root):
+            with patch.dict(os.environ, {"XDG_DATA_HOME": ""}):
+                self.assertEqual(installer._validated_xdg_data_home(), dotlocal / "share")
+                safe = self.root / "safe"
+                dotlocal.rename(safe)
+                dotlocal.symlink_to(safe, target_is_directory=True)
+                with self.assertRaisesRegex(RuntimeError, "UNTRUSTED_XDG_ANCESTOR"):
+                    installer._validated_xdg_data_home()
+
+    def test_owner_generated_stage_has_no_user_path_source(self):
+        stdout = io.StringIO()
+        with patch.object(installer, "_validated_xdg_data_home", return_value=self.home):
+            with patch("sys.argv", ["install_user.py", "--stage"]):
+                with redirect_stdout(stdout):
+                    installer.main()
+        result = stdout.getvalue().strip()
+        self.assertTrue(result.startswith("LINUX_CONTROL_CENTER_STAGE_PASS "))
+        target = Path(result.split(" ", 1)[1])
+        self.assertEqual(target.parent, self.home)
+        self.assertTrue(target.name.startswith(".rc-cc-review-"))
+        self.assertEqual(sorted(x.name for x in target.iterdir()),
+                         sorted([*installer.FILES, installer.DESKTOP_NAME]))
+        self.assertFalse(self.target.exists())
+        self.assertFalse(self.launcher.exists())
+        # A legacy external --stage-dir path is rejected, not silently used.
+        with patch("sys.argv", ["install_user.py", "--stage-dir", "/etc/unsafe"]):
+            with redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as stopped:
+                    installer.main()
+        self.assertEqual(stopped.exception.code, 2)
+
     def test_install_then_retry_is_idempotent(self):
         self.assertEqual(installer.install(source=self.source, data_home=self.home),
                          "LINUX_CONTROL_CENTER_INSTALL_PASS")
@@ -46,6 +107,22 @@ class LocalControlCenterPackageTests(unittest.TestCase):
         self.assertEqual(installer.install(source=self.source, data_home=self.home),
                          "LINUX_CONTROL_CENTER_ALREADY_CURRENT")
         self.assertEqual(len(list(self.home.glob(".rc-cc-backup-*"))), 0)
+        self.assertEqual(len(list(self.home.glob(".rc-cc-stage-*"))), 0)
+
+    def test_reserved_stage_and_random_launcher_ignore_predictable_stale_symlink(self):
+        # Earlier release candidates used a public predictable ".staged" path.
+        # It must no longer act as a launcher write target or a blocker.
+        self.launcher.parent.mkdir(mode=0o700)
+        stale = self.launcher.parent / (installer.DESKTOP_NAME + ".staged")
+        unrelated = self.root / "unrelated-private-file"
+        unrelated.write_text("retain")
+        stale.symlink_to(unrelated)
+        with patch.object(Path, "rmdir", side_effect=AssertionError("reservation was released")):
+            receipt = installer.install(source=self.source, data_home=self.home)
+        self.assertEqual(receipt, "LINUX_CONTROL_CENTER_INSTALL_PASS")
+        self.assertEqual(unrelated.read_text(), "retain")
+        self.assertTrue(stale.is_symlink())
+        self.assertEqual(len(list(self.launcher.parent.glob(".rc-cc-launcher-*"))), 0)
         self.assertEqual(len(list(self.home.glob(".rc-cc-stage-*"))), 0)
 
     def test_existing_user_data_kept_as_backup(self):

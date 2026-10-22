@@ -28,11 +28,18 @@ test('isolated native Bash guard and installed-only admission', {
 }, t => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rc-cc-updater-'));
   t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
-  const run = (noPromote, sourceRoot = tmp) => spawnSync('bash', ['-euo', 'pipefail', '-c',
-    'log(){ printf "%s\\n" "$1"; }; ' + helper + '\nupgrade_optional_linux_control_center "$1"', 'bash', sourceRoot], {
-    encoding: 'utf8', timeout: 5000, env: { ...process.env, NO_PROMOTE: String(noPromote),
-      XDG_DATA_HOME: tmp }, windowsHide: true
-  });
+  // Avoid constructing a bash -c command from source text. The isolated test
+  // fixture is a regular 0600 file; the only dynamic value is a positional argv.
+  const scriptFile = path.join(tmp, 'updater-fixture.sh');
+  fs.writeFileSync(scriptFile,
+    '#!/bin/bash\nlog(){ printf "%s\\n" "$1"; }\n' + helper +
+    '\nupgrade_optional_linux_control_center "$1"\n', { mode: 0o600 });
+  const run = (noPromote, sourceRoot = tmp) => spawnSync('bash',
+    ['-euo', 'pipefail', scriptFile, sourceRoot], {
+      shell: false, encoding: 'utf8', timeout: 5000,
+      env: { ...process.env, NO_PROMOTE: String(noPromote), XDG_DATA_HOME: tmp },
+      windowsHide: true
+    });
   let r = run(1);
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /LINUX_CONTROL_CENTER_UPGRADE_SKIP_NOPROMOTE/);

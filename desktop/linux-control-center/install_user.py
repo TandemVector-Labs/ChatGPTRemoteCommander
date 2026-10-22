@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """User-local, transactional Linux Control Center packaging (no Core/service changes).
 
---stage-dir produces an inert package for admission tests.
+--stage produces an inert package under an auto-generated, owner-private directory.
 --install upgrades this user's existing Control Center, or installs one when
 explicitly invoked. Caller must never treat packaging as release approval.
 """
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import pwd
 from pathlib import Path
 import shutil
 import stat
@@ -32,6 +33,47 @@ def _private_dir(folder: Path) -> None:
         raise RuntimeError("UNSAFE_DESTINATION_PERMISSIONS")
 
 
+def _system_owner_home() -> Path:
+    """Use OS uid identity, not a caller-supplied HOME environment variable."""
+    home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    if home.is_symlink() or not home.is_dir() or home.stat().st_uid != os.getuid():
+        raise RuntimeError("UNTRUSTED_HOME")
+    return home.resolve(strict=True)
+
+
+def _validated_xdg_data_home() -> Path:
+    """XDG override may only select a canonical owner-home descendant.
+
+    A hostile environment may not redirect an updater into system paths,
+    another user's directory, or a symlink-redirected tree.
+    """
+    owner = _system_owner_home()
+    override = os.environ.get("XDG_DATA_HOME")
+    # Stable updater packages target the fixed account-owned installation root.
+    # An arbitrary XDG_DATA_HOME (even beneath the home directory) changes the
+    # identity of the production application, inviting unreviewed path writes.
+    # Fail closed rather than silently installing into a different location.
+    fixed = owner / ".local" / "share"
+    # Reject symlinks and writable ancestors even when XDG_DATA_HOME is unset.
+    # Only the OS uid may mutate the existing install tree.
+    for component in (owner / ".local", fixed):
+        if component.is_symlink():
+            raise RuntimeError("UNTRUSTED_XDG_ANCESTOR")
+        if component.exists():
+            info = component.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+                raise RuntimeError("UNTRUSTED_XDG_ANCESTOR")
+    if not override:
+        return fixed
+    if not os.path.isabs(override):
+        raise RuntimeError("XDG_DATA_HOME_MUST_BE_ABSOLUTE")
+    requested = Path(os.path.abspath(override))
+    real = Path(os.path.realpath(override))
+    if requested != real or real != fixed:
+        raise RuntimeError("UNSUPPORTED_XDG_DATA_HOME")
+    return fixed
+
+
 def desktop_entry(target: Path) -> str:
     script = target / "control_center.py"
     # Desktop Entry Exec quoting: double-quote paths that contain spaces or metacharacters.
@@ -49,14 +91,21 @@ def desktop_entry(target: Path) -> str:
     )
 
 
-def stage(source: Path, destination: Path, final_target: Path) -> None:
-    if destination.exists() or destination.is_symlink():
+def stage(source: Path, destination: Path, final_target: Path, *, reserved: bool = False) -> None:
+    # A private tempfile.mkdtemp reservation cannot be stolen between
+    # allocation and staging. Public/normal callers still require absence.
+    if reserved:
+        _private_dir(destination)
+        if any(destination.iterdir()):
+            raise RuntimeError("STAGING_DESTINATION_NOT_EMPTY")
+    elif destination.exists() or destination.is_symlink():
         raise RuntimeError("STAGING_DESTINATION_EXISTS")
     _private_dir(destination.parent)
     for name in FILES:
         if not _regular_owned(source / name):
             raise RuntimeError("SOURCE_NOT_TRUSTED")
-    destination.mkdir(mode=0o700)
+    if not reserved:
+        destination.mkdir(mode=0o700)
     try:
         for name in FILES:
             content = (source / name).read_bytes()
@@ -103,36 +152,39 @@ def install(*, source: Path, data_home: Path) -> str:
         for name in FILES
     ) and launcher.read_text(encoding="utf-8") == desktop_entry(target):
         return "LINUX_CONTROL_CENTER_ALREADY_CURRENT"
+    # Keep the randomly allocated directory reserved while populating it.
+    # A rmdir + recreate sequence offers a name-replacement race.
     stage_path = Path(tempfile.mkdtemp(prefix=".rc-cc-stage-", dir=data_home))
-    stage_path.rmdir()
-    stage(source, stage_path, target)
+    stage(source, stage_path, target, reserved=True)
     backup = None
-    launcher_temp = launcher_dir / (DESKTOP_NAME + ".staged")
-    if launcher_temp.exists() or launcher_temp.is_symlink():
-        shutil.rmtree(stage_path)
-        raise RuntimeError("DESKTOP_ENTRY_STAGING_CONFLICT")
+    launcher_temp = None
     try:
-        launcher_temp.write_text((stage_path / DESKTOP_NAME).read_text(encoding="utf-8"), encoding="utf-8")
+        # Create exclusively with an unguessable name; no predictable ".staged"
+        # file that another process can replace with a symlink.
+        fd, tmpname = tempfile.mkstemp(prefix=".rc-cc-launcher-", dir=launcher_dir)
+        launcher_temp = Path(tmpname)
+        with os.fdopen(fd, "w", encoding="utf-8") as outf:
+            outf.write((stage_path / DESKTOP_NAME).read_text(encoding="utf-8"))
         launcher_temp.chmod(0o600)
         if target.exists():
+            # Linux atomically renames a directory over an existing empty
+            # directory. Keep the destination reserved instead of rmdir.
             backup = Path(tempfile.mkdtemp(prefix=".rc-cc-backup-", dir=data_home))
-            backup.rmdir()
             target.rename(backup)
         stage_path.rename(target)
         os.replace(launcher_temp, launcher)
     except BaseException:
-        launcher_temp.unlink(missing_ok=True)
+        if launcher_temp is not None:
+            launcher_temp.unlink(missing_ok=True)
         if backup is not None and backup.exists():
             if target.exists():
                 # Restore previous GUI when entry replacement failed.
                 failed = Path(tempfile.mkdtemp(prefix=".rc-cc-failed-", dir=data_home))
-                failed.rmdir()
                 target.rename(failed)
             backup.rename(target)
         elif target.exists():
             # A new installation failed before its launcher could be installed.
             failed = Path(tempfile.mkdtemp(prefix=".rc-cc-failed-", dir=data_home))
-            failed.rmdir()
             target.rename(failed)
         if stage_path.exists():
             shutil.rmtree(stage_path)
@@ -144,17 +196,18 @@ def install(*, source: Path, data_home: Path) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Owner-local Control Center package")
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--stage-dir", type=Path)
+    group.add_argument("--stage", action="store_true")
     group.add_argument("--install", action="store_true")
     args = parser.parse_args()
     source = Path(__file__).resolve().parent
-    data_home = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))).resolve()
+    data_home = _validated_xdg_data_home()
     if args.install:
         print(install(source=source, data_home=data_home))
     else:
-        dest = args.stage_dir.absolute()
-        stage(source, dest, data_home / "remote-commander-control-center")
-        print("LINUX_CONTROL_CENTER_STAGE_PASS")
+        _private_dir(data_home)
+        dest = Path(tempfile.mkdtemp(prefix=".rc-cc-review-", dir=data_home))
+        stage(source, dest, data_home / "remote-commander-control-center", reserved=True)
+        print("LINUX_CONTROL_CENTER_STAGE_PASS " + str(dest))
 
 
 if __name__ == "__main__":

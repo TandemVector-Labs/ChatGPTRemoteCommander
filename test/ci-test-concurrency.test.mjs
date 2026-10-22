@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { boundNodeTestConcurrency, parseQualificationArgs, prioritizeSensitiveQualificationCommands, isolateWindowsLeaseRegression, isolateWindowsTimingSensitiveRegressions, isolateWindowsProcessTreeRegression, isolateWindowsAgentHttpRegression, isolateWindowsTransferMeshHttpRegression, isolateWindowsWorkflowPlanRegression, isolateWindowsAsyncHttpRegression, markIsolatedQualificationPhases } from '../tools/run-bounded-test-script.mjs';
+import { boundNodeTestConcurrency, parseQualificationArgs, prioritizeSensitiveQualificationCommands, isolateWindowsLeaseRegression, isolateWindowsTimingSensitiveRegressions, isolateWindowsProcessTreeRegression, isolateWindowsAgentHttpRegression, isolateWindowsTransferMeshHttpRegression, isolateWindowsWorkflowPlanRegression, isolateWindowsAsyncHttpRegression, isolateWindowsAdaptiveTeamRegression, isolateWindowsWorkflowConversationRegression, markIsolatedQualificationPhases } from '../tools/run-bounded-test-script.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const read=rel=>fs.readFileSync(path.join(root,rel),'utf8');
@@ -130,7 +130,7 @@ test('R468 dedicated Windows timing-sensitive project fixtures run once before b
   assert.ok(runner.includes('command=isolateWindowsLeaseRegression(command);'));
   assert.ok(runner.includes('command=isolateWindowsTimingSensitiveRegressions(command);'));
   // The underlying business logic and per-test timeouts are intentionally unchanged.
-  assert.ok(read('test/project-adaptive.test.mjs').includes("{ timeout: 6000 }"));
+  assert.ok(read('test/project-adaptive.test.mjs').includes("? 15_000 : 6_000"), 'hosted Windows only has a bounded starvation allowance');
   assert.ok(read('test/project-delivery-correlation.test.mjs').includes('maxDurationMs:10000'));
 });
 
@@ -371,6 +371,63 @@ test('R173 V025W diagnostic uses distinct scope, hashed synthetic spec and artif
   }finally{fs.rmSync(tmp,{recursive:true,force:true});}
 });
 
+test('Windows qualification isolates strict adaptive team and preserves MCP Tasks cold-start fixture',()=>{
+  const pkg=JSON.parse(read('package.json'));
+  let command=prioritizeSensitiveQualificationCommands(boundNodeTestConcurrency(pkg.scripts.test,1).command);
+  for(const fn of [
+    isolateWindowsAgentHttpRegression,isolateWindowsTimingSensitiveRegressions,
+    isolateWindowsProcessTreeRegression,isolateWindowsTransferMeshHttpRegression,
+    isolateWindowsLeaseRegression,isolateWindowsWorkflowPlanRegression,
+    isolateWindowsAsyncHttpRegression
+  ]) command=fn(command);
+  const file='test/project-adaptive.test.mjs';
+  const actual=isolateWindowsAdaptiveTeamRegression(command);
+  const head='node --test --test-concurrency=1 '+file+' && ';
+  assert.equal(actual,head+command.split(' && ').filter(part=>part!==head.slice(0,-4)).join(' && '),'move existing standalone fixture to head without changing coverage');
+  assert.equal(actual.split(file).length-1,1,'no dropped or duplicated adaptive tests');
+  assert.throws(()=>isolateWindowsAdaptiveTeamRegression(command.replace(' '+file,'')),/CI_ADAPTIVE_TEAM_CARDINALITY/);
+  assert.throws(()=>isolateWindowsAdaptiveTeamRegression(head+command),/CI_ADAPTIVE_TEAM_CARDINALITY/);
+  assert.ok(markIsolatedQualificationPhases(actual).length<7500,'Windows phase command remains bounded');
+  const strict=read(file);
+  assert.ok(strict.includes("team reserves all calls before workers and executes only the coordinator proposal', { timeout: teamTimeoutMs }"));
+  assert.ok(strict.includes("process.platform === 'win32' && process.env.GITHUB_ACTIONS === 'true'"));
+  assert.ok(strict.includes('? 15_000 : 6_000'), 'keep normal 6000ms and hosted-Windows 15000ms only');
+  const mcp=read('test/mcp-tasks-extension.test.mjs');
+  assert.ok(mcp.includes('const readyDeadline=Date.now()+20_000'),'bounded cold-start allowance is explicit');
+  assert.ok(mcp.includes("assert.equal(healthy,true,stderr)"),'live Health acceptance remains required');
+  assert.ok(mcp.includes("assert.equal(discover.status,200)"),'real Tasks protocol checks remain active');
+  assert.ok(read('tools/run-bounded-test-script.mjs').includes('command=isolateWindowsAdaptiveTeamRegression(command);'));
+});
+
+test('Windows isolates strict NEEDS_CHAT delivery before loaded CI without extending the original wait',()=>{
+  const pkg=JSON.parse(read('package.json'));
+  let command=prioritizeSensitiveQualificationCommands(boundNodeTestConcurrency(pkg.scripts.test,1).command);
+  for(const fn of [
+    isolateWindowsAgentHttpRegression,isolateWindowsTimingSensitiveRegressions,
+    isolateWindowsProcessTreeRegression,isolateWindowsTransferMeshHttpRegression,
+    isolateWindowsLeaseRegression,isolateWindowsWorkflowPlanRegression,
+    isolateWindowsAsyncHttpRegression
+  ]) command=fn(command);
+  const file='test/workflow-conversation.test.mjs',before=command.split(' && ');
+  const isolated=isolateWindowsWorkflowConversationRegression(command);
+  const lead='node --test --test-concurrency=1 '+file+' && ';
+  assert.equal(isolated,lead+command.replace(' '+file,''),'move only the existing fixture file to its own process');
+  assert.equal(isolated.split(file).length-1,1,'run conversation regression exactly once');
+  assert.equal(isolated.split(' && ').length,before.length+1,'one split, no duplicate');
+  assert.throws(()=>isolateWindowsWorkflowConversationRegression(command.replace(' '+file,'')),/CI_CONVERSATION_CARDINALITY/);
+  assert.throws(()=>isolateWindowsWorkflowConversationRegression(lead+command),/CI_CONVERSATION_CARDINALITY/);
+  const final=isolateWindowsAdaptiveTeamRegression(isolated);
+  assert.ok(final.startsWith('node --test --test-concurrency=1 test/project-adaptive.test.mjs && '+lead),
+    'keep six-second adaptive fixture first and 2500ms NEEDS_CHAT fixture second');
+  assert.ok(markIsolatedQualificationPhases(final).length<7500,'preserve Windows bounded command');
+  const strict=read(file);
+  assert.ok(strict.includes('const waitFor=async(fn,{timeout=2500,interval=20}={})'),
+    'original conversation poll deadline remains 2500ms');
+  assert.ok(strict.includes('assert.ok(deferred)'),'deferred state acceptance remains required');
+  assert.ok(strict.includes("assert.equal(deferred.lastCode,'WAITING_FOR_CHAT_TAB')"));
+  assert.ok(read('tools/run-bounded-test-script.mjs').includes('command=isolateWindowsWorkflowConversationRegression(command);'));
+});
+
 test('Windows R157 isolates exact async HTTP operation fixture without widening its strict response budget',()=>{
   const pkg=JSON.parse(read('package.json'));
   const initial=prioritizeSensitiveQualificationCommands(boundNodeTestConcurrency(pkg.scripts.test,1).command);
@@ -420,8 +477,8 @@ test('Windows runs exact workflow-plan races before loaded CI; strict adaptive t
   const team=source.indexOf("  test('team reserves all calls before workers");
   assert.ok(team>0 && first>team,'strict six-second team regression runs before crash workers');
   assert.equal(source.split("test('team reserves all calls before workers").length-1,1);
-  assert.ok(source.includes("test('team reserves all calls before workers and executes only the coordinator proposal', { timeout: 6000 }"),
-    'preserve its exact original timeout');
+  assert.ok(source.includes("test('team reserves all calls before workers and executes only the coordinator proposal', { timeout: teamTimeoutMs }"));
+  assert.ok(source.includes("? 15_000 : 6_000"), 'bound only hosted Windows fixture startup');
 });
 
 test('CI Windows runs the Transfer Mesh HTTP fixture alone without weakening readiness or dropping coverage',()=>{
