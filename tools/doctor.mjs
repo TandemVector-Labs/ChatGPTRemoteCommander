@@ -11,16 +11,35 @@ const DEFAULT_TIMEOUT_MS = 5000;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 
 export function validateEndpoint(value) {
+  if (typeof value !== 'string' || value.length > 256 || value.includes('\\')) {
+    throw new Error('doctor endpoint must use a canonical URL');
+  }
   const url = new URL(value);
-  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('doctor endpoint must use http or https');
   if (url.username || url.password) throw new Error('doctor endpoint must not contain credentials');
   if (url.search || url.hash) throw new Error('doctor endpoint must not contain query or fragment');
-  const host = url.hostname.toLowerCase();
-  if (!['127.0.0.1', 'localhost', '::1', '[::1]'].includes(host)) {
-    throw new Error('doctor endpoint must be loopback-only');
+  if (!['127.0.0.1', '[::1]'].includes(url.hostname)) {
+    throw new Error('doctor endpoint must be numeric loopback-only');
   }
-  if (!url.pathname.endsWith('/mcp')) throw new Error('doctor endpoint path must end with /mcp');
+  if (url.protocol !== 'http:') throw new Error('doctor endpoint must use http');
+  if (url.pathname !== '/mcp') throw new Error('doctor endpoint path must be exactly /mcp');
+  const port = Number(url.port);
+  if (!Number.isSafeInteger(port) || port < 1024 || port > 65535) {
+    throw new Error('doctor endpoint must include a nonprivileged explicit port');
+  }
+  if (url.href !== value) throw new Error('doctor endpoint must use a canonical URL');
   return url;
+}
+
+function validateRequestTarget(value) {
+  const url = value instanceof URL ? value : new URL(value);
+  if (url.pathname !== '/mcp' && url.pathname !== '/health') {
+    throw new Error('doctor request target must be /mcp or /health');
+  }
+  const base = validateEndpoint(url.origin + '/mcp');
+  if (url.href !== base.origin + url.pathname) {
+    throw new Error('doctor request target must be canonical');
+  }
+  return url.href;
 }
 
 export function parseArgs(argv) {
@@ -54,7 +73,8 @@ async function requestJson(url, init, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(url, { ...init, signal: controller.signal, redirect: 'error' });
+    const target = validateRequestTarget(url);
+    const response = await fetch(target, { ...init, signal: controller.signal, redirect: 'error' });
     const text = await readBounded(response);
     if (!response.ok) throw new Error(`HTTP ${response.status}: ${text.slice(0, 300)}`);
     return text ? JSON.parse(text) : null;

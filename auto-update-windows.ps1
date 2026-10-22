@@ -35,6 +35,44 @@ if(-not $Force -and (Test-Path -LiteralPath $PauseFile -PathType Leaf)){
 }
 if([string]::IsNullOrWhiteSpace($InstallDir)){ $InstallDir=Join-Path $StateRoot 'app' }
 $InstallDir=[IO.Path]::GetFullPath($InstallDir)
+# The updater's credentials/routes and PauseFile belong to StateRoot. A
+# SYSTEM supervisor may point at an interactive user's app, but may not use
+# SYSTEMPROFILE's independent state to bypass that owner's explicit hold.
+$installParent=[IO.Path]::GetFullPath((Split-Path -Parent $InstallDir))
+if([IO.Path]::GetFileName($InstallDir) -ieq 'app' -and
+   [IO.Path]::GetFileName($installParent) -ieq 'ChatGPTRemoteCommander' -and
+   -not [string]::Equals($installParent,[IO.Path]::GetFullPath($StateRoot),[StringComparison]::OrdinalIgnoreCase)){
+  Write-Output 'AUTO_UPDATE_OWNER_STATE_ROOT_MISMATCH'
+  exit 0
+}
+# For a normal Windows profile-local install, LOCALAPPDATA is not proof
+# of identity: a SYSTEM process can inherit the interactive owner's env.
+# Resolve the profile SID from the OS profile registry and fail closed when
+# the running token is not the owner. No credentials or profile files read.
+if([IO.Path]::GetFileName($InstallDir) -ieq 'app' -and
+   [IO.Path]::GetFileName($installParent) -ieq 'ChatGPTRemoteCommander'){
+  $localDataDir=Split-Path -Parent $installParent
+  $appDataDir=Split-Path -Parent $localDataDir
+  if([IO.Path]::GetFileName($localDataDir) -ieq 'Local' -and
+     [IO.Path]::GetFileName($appDataDir) -ieq 'AppData'){
+    $ownerProfile=[IO.Path]::GetFullPath((Split-Path -Parent $appDataDir)).TrimEnd('\')
+    $ownerSid=$null
+    foreach($key in Get-ChildItem -LiteralPath 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList' -ErrorAction Stop){
+      $entry=Get-ItemProperty -LiteralPath $key.PSPath -Name ProfileImagePath -ErrorAction SilentlyContinue
+      if(-not $entry){continue}
+      $profilePath=[Environment]::ExpandEnvironmentVariables([string]$entry.ProfileImagePath)
+      if([string]::Equals([IO.Path]::GetFullPath($profilePath).TrimEnd('\'),$ownerProfile,[StringComparison]::OrdinalIgnoreCase)){
+        $ownerSid=[string]$key.PSChildName
+        break
+      }
+    }
+    if(-not $ownerSid){throw 'AUTO_UPDATE_OWNER_PROFILE_UNVERIFIED'}
+    if([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne $ownerSid){
+      Write-Output 'AUTO_UPDATE_WRONG_ACCOUNT_SESSION'
+      exit 0
+    }
+  }
+}
 $ReleaseRoot=Join-Path $StateRoot 'releases'
 $RoutingRoot=Join-Path $StateRoot 'routing'
 $RuntimeRoot=Join-Path $StateRoot 'runtimes'
@@ -957,9 +995,27 @@ if($SelfTest){
   exit 0
 }
 
-$created=$false
-$mutex=[Threading.Mutex]::new($false,'Local\ChatGPTRemoteCommanderAutoUpdater',[ref]$created)
-if(-not $created){Log 'AUTO_UPDATE_ALREADY_RUNNING';exit 0}
+# A session-local mutex does not coordinate SYSTEM/session-0 with the
+# interactive owner/session-1. Serialize on the actual installed app path
+# using a kernel-enforced exclusive file handle shared across sessions.
+# No pause bypass, forced upgrade, timer creation or credential sharing.
+$updateLockPath=Join-Path (Split-Path -Parent $InstallDir) '.rc-auto-update.lock'
+$updateLockStream=$null
+try{
+  if(-not(Test-Path -LiteralPath $InstallDir -PathType Container)){throw 'AUTO_UPDATE_LOCK_INSTALL_DIR_MISSING'}
+  if(Test-Path -LiteralPath $updateLockPath){
+    if(([IO.File]::GetAttributes($updateLockPath) -band [IO.FileAttributes]::ReparsePoint)-ne 0){
+      throw 'AUTO_UPDATE_LOCK_REPARSE_POINT'
+    }
+  }
+  $updateLockStream=[IO.File]::Open($updateLockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+}catch [IO.IOException]{
+  Log 'AUTO_UPDATE_ALREADY_RUNNING_OR_LOCK_UNAVAILABLE'
+  exit 0
+}catch{
+  Log ('AUTO_UPDATE_LOCK_FAIL_CLOSED type='+$_.Exception.GetType().Name)
+  throw
+}
 
 $candidates=@();$currentCandidate=$null;$routeBackups=@{};$initialDirect=@{};$cutoverCommitted=$false;$report=[ordered]@{startedAt=(Get-Date).ToUniversalTime().ToString('o');status='RUNNING';gates=@();profiles=@()}
 try{
@@ -969,6 +1025,27 @@ try{
   $stage=Stage-Release $ref
   $report.ref=$ref;$report.commit=$stage.Commit;$report.version=$stage.Version
   $script:QualificationCommit=$stage.Commit
+  # R-fleet: An accepted newer route is a durable version authority even when
+  # the canonical MCP is temporarily unavailable during a restart. An unattended
+  # Stable check must not silently replace a newer approved preview with Stable.
+  # An explicit -Force remains the deliberate rollback escape hatch.
+  if(-not $Force){
+    $persistedRoutePath=Get-RoutePath 'default'
+    if(Test-Path -LiteralPath $persistedRoutePath -PathType Leaf){
+      $persistedRoute=Read-Json $persistedRoutePath
+      $persistedVersion=[string]$persistedRoute.active.version
+      if(-not $persistedVersion){throw 'AUTO_UPDATE_PERSISTED_ROUTE_VERSION_MISSING'}
+      if(Test-VersionGreater $persistedVersion $stage.Version){
+        $report.status='NEWER_CURRENT'
+        $report.currentVersion=$persistedVersion
+        $report.authoritySource='PERSISTED_ROUTE'
+        $report.completedAt=(Get-Date).ToUniversalTime().ToString('o')
+        Atomic-Json $ResultFile $report
+        Log "AUTO_UPDATE_NEWER_PERSISTED_ROUTE current=$persistedVersion target=$($stage.Version)"
+        exit 0
+      }
+    }
+  }
   $currentStatus=$null
   try{$currentStatus=Invoke-Mcp 47831 'system_status'}catch{}
   if(-not $Force -and $currentStatus -and (Test-VersionGreater ([string]$currentStatus.version) $stage.Version)){
@@ -1312,6 +1389,5 @@ try{
   }
   throw
 }finally{
-  try{$mutex.ReleaseMutex()}catch{}
-  $mutex.Dispose()
+  if($null-ne $updateLockStream){$updateLockStream.Dispose()}
 }

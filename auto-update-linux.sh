@@ -489,6 +489,39 @@ install_linux_gui_backend(){
   log "LINUX_GUI_BACKEND_SYNCED project=$project"
 }
 
+# A separately installed Control Center is not automatically updated by
+# Core's git checkout. Only upgrade an existing owner-local GUI after
+# accepted Core promotion. Preserve an independently tested rollback copy.
+# A GUI defer is reported separately; it cannot falsely mark the GUI as ready
+# or take the healthy Core offline.
+upgrade_optional_linux_control_center(){
+  local project="$1" data_root="${XDG_DATA_HOME:-$HOME/.local/share}" launcher installer result
+  [[ "$NO_PROMOTE" != 1 ]] || { log 'LINUX_CONTROL_CENTER_UPGRADE_SKIP_NOPROMOTE'; return 0; }
+  launcher="$data_root/applications/io.github.god13emad.RemoteCommander.ControlCenter.desktop"
+  installer="$project/desktop/linux-control-center/install_user.py"
+  [[ -f "$launcher" && -d "$data_root/remote-commander-control-center" ]] || {
+    log 'LINUX_CONTROL_CENTER_UPGRADE_SKIP_NOT_INSTALLED'
+    return 0
+  }
+  [[ -f "$installer" && ! -L "$installer" ]] || {
+    log 'LINUX_CONTROL_CENTER_UPGRADE_DEFER_PACKAGE_MISSING'
+    return 0
+  }
+  if ! command -v python3 >/dev/null 2>&1; then
+    log 'LINUX_CONTROL_CENTER_UPGRADE_DEFER_PYTHON_MISSING'
+    return 0
+  fi
+  if ! result="$(python3 -B "$installer" --install 2>/dev/null)"; then
+    log 'LINUX_CONTROL_CENTER_UPGRADE_DEFER_INSTALL_FAILED'
+    return 0
+  fi
+  case "$result" in
+    LINUX_CONTROL_CENTER_INSTALL_PASS|LINUX_CONTROL_CENTER_ALREADY_CURRENT)
+      log "LINUX_CONTROL_CENTER_UPGRADE_PASS status=$result" ;;
+    *) log 'LINUX_CONTROL_CENTER_UPGRADE_DEFER_RECEIPT_INVALID' ;;
+  esac
+}
+
 sync_work_plugin_projection(){
   local project="$1" version="$2" commit="$3"
   local template="$project/plugin-template"
@@ -720,6 +753,7 @@ if [[ "$FORCE" != 1 && -f "$ROUTE" ]]; then
       [[ -z "$LIVE_WF" ]] || node "$STAGE_DIR/tools/finalize-workflow-schema.mjs" --directory "$LIVE_WF"
       promote_control "$COMMIT" "$REF"
       install_linux_gui_backend "$STAGE_DIR" "$ACTIVE_CFG"
+      upgrade_optional_linux_control_center "$STAGE_DIR"
       sync_work_plugin_projection "$STAGE_DIR" "$VERSION" "$COMMIT"
       cleanup_releases || log 'AUTO_UPDATE_CLEANUP_PENDING_AFTER_MAINTENANCE'
       write_update_result maintenance_pass "$VERSION" "$COMMIT" "$REF"
@@ -733,6 +767,7 @@ if [[ "$FORCE" != 1 && -f "$ROUTE" ]]; then
         exit 0
       fi
     fi
+    upgrade_optional_linux_control_center "$STAGE_DIR"
     log "AUTO_UPDATE_CURRENT version=$VERSION"
     exit 0
   fi
@@ -914,6 +949,7 @@ fi
 node "$STAGE_DIR/tools/finalize-workflow-schema.mjs" --directory "$LIVE_WF"
 install_linux_gui_backend "$STAGE_DIR" "$FINAL_CFG"
 promote_control "$COMMIT" "$REF"
+upgrade_optional_linux_control_center "$STAGE_DIR"
 sync_work_plugin_projection "$STAGE_DIR" "$VERSION" "$COMMIT"
 cleanup_releases || log 'AUTO_UPDATE_CLEANUP_PENDING_AFTER_PROMOTION'
 write_update_result pass "$VERSION" "$COMMIT" "$REF"

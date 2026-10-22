@@ -23,7 +23,7 @@ hasAll(install, [
 
 const updater = read('auto-update-windows.ps1');
 hasAll(updater, [
-  "Local\\ChatGPTRemoteCommanderAutoUpdater",
+  "[IO.FileShare]::None",
   "workflow-shadow",
   "CANDIDATE_DOCTOR_FAIL",
   "Verify-Canonical",

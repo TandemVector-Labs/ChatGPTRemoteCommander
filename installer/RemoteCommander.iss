@@ -7,6 +7,9 @@
 #ifndef MySourceRef
   #define MySourceRef "v0.10.18"
 #endif
+#ifndef MySourceRepository
+  #define MySourceRepository "upstream"
+#endif
 #ifndef DesktopPayload
   #define DesktopPayload "..\dist\desktop\remote-commander-windows-x64"
 #endif
@@ -16,7 +19,10 @@ AppId={{7AB894C6-897D-43B7-B83A-24E1A8DF66A2}
 AppName=Remote Commander
 AppVersion={#MyVersion}
 AppVerName=Remote Commander {#MyVersion}
-AppPublisher=Remote Commander
+AppPublisher=TandemVector Labs
+AppPublisherURL=https://github.com/Usefull-Skills
+AppSupportURL=https://github.com/GOD13emad/ChatGPTRemoteCommander/issues
+; AppPublisher is installer metadata, not an Authenticode-trusted publisher identity.
 DefaultDirName={localappdata}\Programs\Remote Commander
 DefaultGroupName=Remote Commander
 DisableProgramGroupPage=yes
@@ -74,15 +80,36 @@ Type: files; Name: "{group}\Remote Commander Operations Monitor.lnk"
 Type: files; Name: "{group}\Remote Commander Admin Runtime.lnk"
 
 [Run]
-#ifdef BrowserSetup
-Filename: "{tmp}\{#BrowserSetupName}"; Parameters: "/VERYSILENT /NORESTART"; Components: browser; StatusMsg: "Installing Remote Commander Browser..."; Flags: waituntilterminated
-#endif
-Filename: "{app}\RemoteCommander.exe"; Description: "Open Remote Commander"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\RemoteCommander.exe"; Description: "Open Remote Commander"; Flags: nowait postinstall skipifsilent; Check: ShouldAutoLaunchCommander
 
 [Code]
 var
   ProfilePage: TInputQueryWizardPage;
   PwshPath: String;
+#ifdef BrowserSetup
+  BrowserSetupFailed: Boolean;
+#endif
+
+#ifdef BrowserSetup
+// Inno invokes this only if Setup otherwise completed successfully.
+// An exception from ssPostInstall by itself can leave Setup exit code 0.
+function GetCustomSetupExitCode: Integer;
+begin
+  if BrowserSetupFailed then Result := 4
+  else Result := 0;
+end;
+#endif
+
+// Inno's [Run] executes before ssPostInstall Browser return-code qualification.
+ // If Browser is selected, avoid starting the Control Center before the
+ // nested setup has completed; the user can open it from the installed shortcut.
+function ShouldAutoLaunchCommander: Boolean;
+begin
+  Result := True;
+#ifdef BrowserSetup
+  Result := not WizardIsComponentSelected('browser');
+#endif
+end;
 
 function JsonBool(Value: Boolean): String;
 begin
@@ -213,18 +240,28 @@ end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
-  PrereqScript, CoreScript, Params: String;
+  PrereqScript, CoreScript, Params, ExistingCoreGit: String;
+  ExistingCore: Boolean;
   ResultCode: Integer;
 begin
   Result := '';
   try
+    // Existing per-user Git installation is an access-policy authority.
+    // An ordinary Desktop/Control Center upgrade must not silently switch
+    // a previously owner-authorized FULL_POWER profile to Standard.
+    ExistingCoreGit := ExpandConstant('{localappdata}\ChatGPTRemoteCommander\app\.git');
+    ExistingCore := DirExists(ExistingCoreGit) or FileExists(ExistingCoreGit);
+    // Never perform machine prerequisites for a preview that will be refused
+    // because it would modify the owner's existing production Core.
+    if ExistingCore and ('{#MySourceRepository}' = 'organization') then
+      RaiseException('ORGANIZATION_PREVIEW_EXISTING_INSTALL_DENIED');
     EnsurePowerShell7;
 
     ExtractTemporaryFile('server-install-windows.ps1');
     PrereqScript := ExpandConstant('{tmp}\server-install-windows.ps1');
     Params :=
       '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + PrereqScript + '"' +
-      ' -SourceRef "{#MySourceRef}" -ExpectedCommit "{#MyCommit}" -PrerequisitesOnly';
+      ' -SourceRef "{#MySourceRef}" -ExpectedCommit "{#MyCommit}" -SourceRepository "{#MySourceRepository}" -PrerequisitesOnly';
     WizardForm.StatusLabel.Caption := 'Verifying machine prerequisites...';
     if not ShellExec('runas', PwshPath, Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
       RaiseException('Could not elevate prerequisite installation.');
@@ -235,7 +272,8 @@ begin
     CoreScript := ExpandConstant('{tmp}\install.ps1');
     Params :=
       '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + CoreScript + '"' +
-      ' -StartServer -StandardMode -SourceRef "{#MySourceRef}" -ExpectedCommit "{#MyCommit}"';
+      ' -StartServer -SourceRef "{#MySourceRef}" -ExpectedCommit "{#MyCommit}" -SourceRepository "{#MySourceRepository}"';
+    if not ExistingCore then Params := Params + ' -StandardMode';
     WizardForm.StatusLabel.Caption := 'Installing and verifying Remote Commander core for this user...';
     if not Exec(PwshPath, Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
       RaiseException('Could not start Remote Commander core installer.');
@@ -249,8 +287,40 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   QueueDir, QueuePath, Normalized, Mode, Manifest: String;
+#ifdef BrowserSetup
+  BrowserExitCode: Integer;
+#endif
 begin
   if CurStep <> ssPostInstall then Exit;
+
+#ifdef BrowserSetup
+  // Nested Browser installation must be checked before writing success metadata.
+  // The previous [Run] entry waited but never examined its process exit code.
+  if WizardIsComponentSelected('browser') then
+  begin
+    ExtractTemporaryFile('{#BrowserSetupName}');
+    WizardForm.StatusLabel.Caption := 'Installing selected Remote Commander Browser...';
+    if not Exec(ExpandConstant('{tmp}\{#BrowserSetupName}'),
+      '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART', '', SW_HIDE, ewWaitUntilTerminated, BrowserExitCode) then
+    begin
+      BrowserSetupFailed := True;
+      Log('BROWSER_INSTALL_LAUNCH_FAILED');
+      if not WizardSilent then
+        MsgBox('The selected Browser could not be started. Commander Core may already be installed.', mbCriticalError, MB_OK);
+      Exit;
+    end;
+    if BrowserExitCode <> 0 then
+    begin
+      BrowserSetupFailed := True;
+      Log('BROWSER_INSTALL_EXIT_NONZERO_' + IntToStr(BrowserExitCode));
+      if not WizardSilent then
+        MsgBox('The selected Browser setup failed (exit ' + IntToStr(BrowserExitCode) +
+          '). Commander Core may already be installed.', mbCriticalError, MB_OK);
+      Exit;
+    end;
+  end;
+#endif
+
 
   if not NormalizeProfiles(ProfilePage.Values[0], Normalized) then
     RaiseException('Profile list became invalid during installation.');

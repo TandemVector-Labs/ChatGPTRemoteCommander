@@ -7,9 +7,44 @@ import net from 'node:net';
 import { spawn, spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
+import { validateHardwareSelftestEndpoint } from '../tools/hardware-selftest-endpoint.mjs';
+// Ensure the cross-session owner/lock contract executes in the canonical CI suite.
+import './windows-updater-cross-session-lock.test.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const read=f=>fs.readFileSync(path.join(root,f),'utf8');
+
+test('hardware selftest URL admits only canonical numeric loopback MCP endpoints',()=>{
+  for (const url of ['http://127.0.0.1:47831/mcp','http://[::1]:47831/mcp','http://127.0.0.1:65535/mcp'])
+    assert.equal(validateHardwareSelftestEndpoint(url),url);
+  for (const url of [
+    'http://localhost:47831/mcp',
+    'http://example.invalid:47831/mcp',
+    'https://127.0.0.1:47831/mcp',
+    'http://0x7f000001:47831/mcp',
+    'http://127.0.0.1/mcp',
+    'http://127.0.0.1:80/mcp',
+    'http://127.0.0.1:47831/health',
+    'http://127.0.0.1:47831/foo/mcp',
+    'http://127.0.0.1:47831/mcp/',
+    'http://127.0.0.1:47831/mcp?next=example.invalid',
+    'http://127.0.0.1:47831/mcp#fragment',
+    'http://user:pass@127.0.0.1:47831/mcp',
+    'file:///etc/passwd'
+  ]) assert.throws(()=>validateHardwareSelftestEndpoint(url),/SELFTEST_LOOPBACK_ONLY/,url);
+});
+
+test('hardware selftest denies invalid URL before loading config or sending requests',()=>{
+  const script=path.join(root,'tools','hardware-selftest.mjs');
+  const missing=path.join(os.tmpdir(),'hardware-selftest-config-should-not-exist-48177.json');
+  const r=spawnSync(process.execPath,[script,'--url','http://localhost:47831/mcp','--config',missing],{
+    encoding:'utf8',timeout:5000
+  });
+  assert.notEqual(r.status,0);
+  assert.match(r.stderr,/SELFTEST_LOOPBACK_ONLY/);
+  assert.doesNotMatch(r.stderr,/ENOENT|ECONNREFUSED|fetch failed/);
+});
+
 
 test('R205 retirement preflight is before any old release deletion on Windows and Linux',()=>{
  const win=read('auto-update-windows.ps1'),linux=read('auto-update-linux.sh'),helper=read('tools/release-retirement-gate-r205.mjs');
@@ -99,10 +134,63 @@ test('R230 real updater helper execution leaves arbitrary legacy projection sent
  }
 });
 
+test('R-fleet unattended Stable check preserves newer persisted active route when MCP is unavailable',t=>{
+ const win=read('auto-update-windows.ps1');
+ const marker=win.indexOf('  # R-fleet: An accepted newer route');
+ const end=win.indexOf('  $currentStatus=$null',marker);
+ assert.ok(marker>win.indexOf('$script:QualificationCommit=$stage.Commit'),'guard follows stage identity');
+ assert.ok(end>marker && end<win.indexOf("Run-Gate $stage.Dir 'check'"),'guard must precede tests or promotion');
+ const snippet=win.slice(marker,end);
+ for(const key of ["if(-not $Force)", "Get-RoutePath 'default'","Read-Json $persistedRoutePath",
+   "Test-VersionGreater $persistedVersion $stage.Version","$report.authoritySource='PERSISTED_ROUTE'",
+   "AUTO_UPDATE_NEWER_PERSISTED_ROUTE","exit 0"])assert.ok(snippet.includes(key),'missing '+key);
+ if(process.platform!=='win32')return;
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'rc-route-no-downgrade-'));
+ t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const fixture=path.join(dir,'default.json');
+ const run=(force,contents)=>{
+   if(contents===null){fs.rmSync(fixture,{force:true});}
+   else fs.writeFileSync(fixture,contents,'utf8');
+   const program=[
+     "$ErrorActionPreference='Stop'",
+     '$Force='+String(force?'$true':'$false'),
+     "$stage=[pscustomobject]@{Version='0.10.20'}",
+     "$report=[ordered]@{}",
+     "$ResultFile='unused-isolated-contract'",
+     'function Get-RoutePath([string]$Profile){return $env:RC_ROUTE_FIXTURE}',
+     'function Read-Json([string]$Path){return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -ErrorAction Stop}',
+     'function Test-VersionGreater([string]$Left,[string]$Right){return ([version]$Left -gt [version]$Right)}',
+     'function Atomic-Json([string]$Path,[object]$Value){Write-Output ("RECEIPT_STATUS="+$Value.status)}',
+     'function Log([string]$Message){Write-Output $Message}',
+     snippet,
+     "Write-Output 'CROSSED_GUARD'"
+   ].join('\n');
+   return spawnSync('pwsh.exe',['-NoLogo','-NoProfile','-NonInteractive','-Command',program],{
+     encoding:'utf8',timeout:15000,
+     env:{...process.env,RC_ROUTE_FIXTURE:fixture}
+   });
+ };
+ const newer=JSON.stringify({active:{version:'0.10.24',commit:'accepted-preview'}});
+ const blocked=run(false,newer);
+ assert.equal(blocked.status,0,blocked.stderr);
+ assert.match(blocked.stdout,/AUTO_UPDATE_NEWER_PERSISTED_ROUTE/);
+ assert.match(blocked.stdout,/RECEIPT_STATUS=NEWER_CURRENT/);
+ assert.doesNotMatch(blocked.stdout,/CROSSED_GUARD/);
+ const explicit=run(true,newer);
+ assert.equal(explicit.status,0,explicit.stderr);
+ assert.match(explicit.stdout,/CROSSED_GUARD/,'explicit Force is still available');
+ const fresh=run(false,null);
+ assert.equal(fresh.status,0,fresh.stderr);
+ assert.match(fresh.stdout,/CROSSED_GUARD/,'first install without route is unaffected');
+ const invalid=run(false,'{"active": ');
+ assert.notEqual(invalid.status,0,'unparseable persisted authority fails closed');
+ assert.doesNotMatch(invalid.stdout,/CROSSED_GUARD/);
+});
+
 test('auto updater is candidate-first, hardware-gated and commit-point aware',()=>{
   const s=read('auto-update-windows.ps1');
   for(const marker of [
-    'Local\\ChatGPTRemoteCommanderAutoUpdater',
+    '[IO.FileShare]::None',
     "Run-Gate $stage.Dir 'check'",
     "Run-Gate $stage.Dir 'test'",
     "Run-Gate $stage.Dir 'audit'",
@@ -1038,4 +1126,22 @@ test('R254 Linux plugin post-verify failure preserves owner data and quarantines
  assert.notEqual(retry.status,0);
  assert.match(retry.stdout,/prior-snapshot-or-quarantine-awaiting-owner/);
  assert.equal(fs.readdirSync(parent).filter(n=>n.startsWith('.chatgpt-remote-commander.failed-')).length,1);
+});
+
+test('R157 staged release lookup uses the pinned source version, not a fixed old tag',()=>{
+ const workflow=read('.github/workflows/windows-updater-e2e-r157.yml');
+ const version=JSON.parse(read('package.json')).version;
+ assert.match(version,/^\d+\.\d+\.\d+$/);
+ for(const requirement of [
+  "Join-Path $env:GITHUB_WORKSPACE 'package.json'",
+  "R157_SOURCE_PACKAGE_MISSING",
+  "R157_SOURCE_VERSION_INVALID",
+  "('releases\\v'+$sourceVersion+'-'+$sha.Substring(0,12))",
+  "(git -C $stage rev-parse HEAD).Trim() -ne $sha",
+  "R157_EXACT_STAGE_MISSING",
+  "R157_UNEXPECTED_ROUTE_PROMOTION",
+  "R157_JOB_NOT_ACCEPTED_"
+ ]) assert.ok(workflow.includes(requirement),'missing exact NoPromote safeguard: '+requirement);
+ assert.equal(workflow.includes("('releases\\v0.10.24-'+$sha.Substring(0,12))"),false);
+ assert.equal('releases\\v'+version+'-'+'f'.repeat(12),'releases\\v0.10.25-'+'f'.repeat(12));
 });

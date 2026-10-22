@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { boundNodeTestConcurrency, parseQualificationArgs, prioritizeSensitiveQualificationCommands, isolateWindowsLeaseRegression, isolateWindowsTimingSensitiveRegressions, isolateWindowsProcessTreeRegression, isolateWindowsAgentHttpRegression } from '../tools/run-bounded-test-script.mjs';
+import { boundNodeTestConcurrency, parseQualificationArgs, prioritizeSensitiveQualificationCommands, isolateWindowsLeaseRegression, isolateWindowsTimingSensitiveRegressions, isolateWindowsProcessTreeRegression, isolateWindowsAgentHttpRegression, isolateWindowsTransferMeshHttpRegression, isolateWindowsWorkflowPlanRegression, isolateWindowsAsyncHttpRegression, isolateWindowsAdaptiveTeamRegression, isolateWindowsWorkflowConversationRegression, markIsolatedQualificationPhases } from '../tools/run-bounded-test-script.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const read=rel=>fs.readFileSync(path.join(root,rel),'utf8');
@@ -130,7 +130,7 @@ test('R468 dedicated Windows timing-sensitive project fixtures run once before b
   assert.ok(runner.includes('command=isolateWindowsLeaseRegression(command);'));
   assert.ok(runner.includes('command=isolateWindowsTimingSensitiveRegressions(command);'));
   // The underlying business logic and per-test timeouts are intentionally unchanged.
-  assert.ok(read('test/project-adaptive.test.mjs').includes("{ timeout: 6000 }"));
+  assert.ok(read('test/project-adaptive.test.mjs').includes("? 15_000 : 6_000"), 'hosted Windows only has a bounded starvation allowance');
   assert.ok(read('test/project-delivery-correlation.test.mjs').includes('maxDurationMs:10000'));
 });
 
@@ -235,4 +235,321 @@ test('R470 Windows fixture extracts failing test and counters without persisting
   const many=run([file,file.replace('fixture','duplicate')]);
   assert.equal(many.status,'AMBIGUOUS_MULTIPLE_MATCHING_LOGS');
   assert.equal(many.failureTests.length,0,'never guess newest');
+});
+
+test('R157 qualifier markers are opt-in, index-only, and preserve all original commands',()=>{
+  const sample='node --test test/a.test.mjs && node test/b.mjs';
+  assert.equal(markIsolatedQualificationPhases(sample),
+    'echo RC_QUAL_PHASE_START_00 && node --test test/a.test.mjs && echo RC_QUAL_PHASE_PASS_00 && '+
+    'echo RC_QUAL_PHASE_START_01 && node test/b.mjs && echo RC_QUAL_PHASE_PASS_01');
+  assert.throws(()=>markIsolatedQualificationPhases('echo untrusted command'),/R157_PHASE_COMMAND_SHAPE_INVALID/);
+  const pkg=JSON.parse(read('package.json'));
+  const bounded=boundNodeTestConcurrency(pkg.scripts.test,1);
+  let command=prioritizeSensitiveQualificationCommands(bounded.command);
+  command=isolateWindowsAgentHttpRegression(command);
+  command=isolateWindowsTimingSensitiveRegressions(command);
+  command=isolateWindowsProcessTreeRegression(command);
+  command=isolateWindowsTransferMeshHttpRegression(command);
+  command=isolateWindowsLeaseRegression(command);
+  const groups=command.split(' && ');
+  const marked=markIsolatedQualificationPhases(command);
+  assert.ok(marked.length<7500,'preserve Windows cmd.exe length limit');
+  assert.equal((marked.match(/RC_QUAL_PHASE_START_\d{2}/g)||[]).length,groups.length);
+  assert.equal((marked.match(/RC_QUAL_PHASE_PASS_\d{2}/g)||[]).length,groups.length);
+  for(const [index,part] of groups.entries()){
+    assert.ok(marked.includes('RC_QUAL_PHASE_START_'+String(index).padStart(2,'0')+' && '+part+' && echo RC_QUAL_PHASE_PASS_'+String(index).padStart(2,'0')),
+      'each exact original command is preserved in its own observed phase');
+  }
+  const wrapper=read('tools/run-bounded-test-script.mjs');
+  assert.ok(wrapper.includes("process.env.RC_QUALIFICATION_RUN_ID"),'R157 opt-in is guarded');
+  assert.ok(wrapper.includes('command=markIsolatedQualificationPhases(command)'));
+});
+
+test('R470 does not misreport a non-TAP failure as a TAP summary; identifies only numeric phase',t=>{
+  if(process.platform!=='win32')return t.skip('native PowerShell fixture applies only to Windows');
+  const sha='604ed6a8a0e0f95197fabcc92d93537142017a0b';
+  const script=path.join(root,'tools','diagnose-updater-gate-r470.ps1');
+  const secret='ghp_R470_DO_NOT_INCLUDE_SECRET';
+  for(const [name,lines,status,index] of [
+    ['marked',['RC_QUAL_PHASE_START_00','RC_QUAL_PHASE_PASS_00','RC_QUAL_PHASE_START_01',
+      'Fatal: injected Windows private path C:\\Private\\User\\ ' +secret],'NON_TAP_FAILURE_PHASE_IDENTIFIED',1],
+    ['unmarked',['fatal error without TAP and without phase markers '+secret],'NON_TAP_FAILURE_UNCLASSIFIED',null],
+  ]){
+    const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'rc-r470-nontap-'));
+    try{
+      const dir=path.join(tmp,'STATE','ChatGPTRemoteCommander','update-logs');
+      fs.mkdirSync(dir,{recursive:true});
+      fs.writeFileSync(path.join(dir,'qualification-output-qualification-test-'+sha.slice(0,12)+'-'+name+'.stdout.log'),lines.join('\n'),'utf8');
+      const proc=spawnSync('pwsh.exe',['-NoProfile','-NonInteractive','-File',script,'-Root',tmp,
+        '-ExpectedCommit',sha],{encoding:'utf8',timeout:15000});
+      assert.equal(proc.status,0,proc.stderr||proc.stdout);
+      const raw=fs.readFileSync(path.join(tmp,'DIAGNOSTIC_R470.json'),'utf8');
+      assert.ok(!raw.includes(secret),'raw secret must not appear in artifact');
+      assert.ok(!raw.includes(tmp),'absolute local path must not appear in artifact');
+      const report=JSON.parse(raw);
+      assert.equal(report.status,status);
+      assert.equal(report.failurePhaseIndex,index);
+      assert.equal(report.failureTests.length,0);
+      assert.equal(report.rawLogIncluded,false);
+    }finally{fs.rmSync(tmp,{recursive:true,force:true});}
+  }
+});
+
+test('R470 Node24 spec reporter failure is classified and sanitized with no raw user paths',t=>{
+  if(process.platform!=='win32')return t.skip('requires native Windows PowerShell');
+  const sha='604ed6a8a0e0f95197fabcc92d93537142017a0b';
+  const secret='ghp_TEST_SECRET_NOT_TO_PERSIST';
+  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'rc-r470-spec-'));
+  try{
+    const dir=path.join(tmp,'STATE','ChatGPTRemoteCommander','update-logs');
+    fs.mkdirSync(dir,{recursive:true});
+    const lines=['✖ R157 harmless formatting probe (1.8478ms)','ℹ tests 1','ℹ suites 0',
+      'ℹ pass 0','ℹ fail 1','ℹ duration_ms 144.5914','✖ failing tests:',
+      '✖ R157 harmless formatting probe (1.8478ms)',
+      'at C:\\Users\\Private\\report '+secret];
+    fs.writeFileSync(path.join(dir,'qualification-output-qualification-test-'+sha.slice(0,12)+'-spec.stdout.log'),
+      lines.join('\n'),'utf8');
+    const script=path.join(root,'tools','diagnose-updater-gate-r470.ps1');
+    const proc=spawnSync('pwsh.exe',['-NoProfile','-NonInteractive','-File',script,'-Root',tmp,
+      '-ExpectedCommit',sha],{encoding:'utf8',timeout:15000});
+    assert.equal(proc.status,0,proc.stderr||proc.stdout);
+    const raw=fs.readFileSync(path.join(tmp,'DIAGNOSTIC_R470.json'),'utf8');
+    assert.ok(!raw.includes(secret));
+    assert.ok(!raw.includes(tmp));
+    const report=JSON.parse(raw);
+    assert.equal(report.status,'SPEC_SUMMARY_EXTRACTED');
+    assert.deepEqual(report.specFailureTests,['R157 harmless formatting probe']);
+    assert.equal(report.specCounts.tests,'1');
+    assert.equal(report.specCounts.fail,'1');
+    assert.equal(report.failurePhaseIndex,null);
+    assert.equal(report.rawLogIncluded,false);
+  }finally{fs.rmSync(tmp,{recursive:true,force:true});}
+});
+
+test('V025W R470 captures a check-stage qualification failure with a checked gate selector and no secrets',t=>{
+  if(process.platform!=='win32')return t.skip('Windows PowerShell test; static gate tests run cross-platform');
+  const sha='604ed6a8a0e0f95197fabcc92d93537142017a0b';
+  const secret='ghp_R470_CHECK_STAGE_NEVER_STORE';
+  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'r470-check-stage-'));
+  try{
+    const logs=path.join(tmp,'STATE','ChatGPTRemoteCommander','update-logs');
+    fs.mkdirSync(logs,{recursive:true});
+    const prefix='qualification-output-qualification-';
+    fs.writeFileSync(path.join(logs,prefix+'check-'+sha.slice(0,12)+'-failure.stdout.log'),
+      ['TAP version 13','not ok 7 - isolated baseline check stopped','# tests 7','# fail 1',
+       'Authorization: Bearer '+secret].join('\n'),'utf8');
+    fs.writeFileSync(path.join(logs,prefix+'test-'+sha.slice(0,12)+'-unrelated.stdout.log'),
+      ['TAP version 13','not ok 9 - unrelated TEST stage','# fail 1'].join('\n'),'utf8');
+    const script=path.join(root,'tools','diagnose-updater-gate-r470.ps1');
+    const args=['-NoProfile','-NonInteractive','-File',script,'-Root',tmp,'-ExpectedCommit',sha,
+      '-Scope','READ_ONLY_HOSTED_V025W_ROLLBACK_QUALIFICATION_FAILURE','-Gate','check'];
+    const result=spawnSync('pwsh.exe',args,{encoding:'utf8',timeout:15000});
+    assert.equal(result.status,0,result.stderr||result.stdout);
+    const raw=fs.readFileSync(path.join(tmp,'DIAGNOSTIC_R470.json'),'utf8');
+    assert.ok(!raw.includes(secret));
+    assert.ok(!raw.includes(tmp));
+    assert.ok(!raw.includes('unrelated TEST stage'));
+    const report=JSON.parse(raw);
+    assert.equal(report.gate,'check');
+    assert.equal(report.matchingLogCount,1);
+    assert.equal(report.status,'TAP_SUMMARY_EXTRACTED');
+    assert.equal(report.failureTests[0].index,7);
+    assert.equal(report.rawLogIncluded,false);
+    assert.equal(report.secretsIncluded,false);
+    assert.equal(report.absolutePathsIncluded,false);
+    const rollback=read('test/release-rollback-windows-v01025.ps1');
+    assert.ok(rollback.includes('(?<gate>check|test)'));
+    assert.ok(rollback.includes('-Gate $gate'));
+    assert.ok(rollback.includes('$report.gate -cne $gate'));
+  }finally{fs.rmSync(tmp,{recursive:true,force:true});}
+});
+
+test('R173 V025W diagnostic uses distinct scope, hashed synthetic spec and artifact without leaking logs',t=>{
+  if(process.platform!=='win32')return t.skip('requires native Windows PowerShell');
+  const sha='604ed6a8a0e0f95197fabcc92d93537142017a0b';
+  const secret='ghp_R173_SENSITIVE_SENTINEL_NEVER_PERSIST';
+  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'r173-v025-r470-'));
+  try{
+    const folder=path.join(tmp,'STATE','ChatGPTRemoteCommander','update-logs');
+    fs.mkdirSync(folder,{recursive:true});
+    const log=path.join(folder,'qualification-output-qualification-test-'+sha.slice(0,12)+'-fixture.stdout.log');
+    fs.writeFileSync(log,[
+      '✖ synthetic rollback test failure (3.14ms)',
+      'ℹ tests 1','ℹ pass 0','ℹ fail 1',
+      'at C:\\Private\\Owner\\location '+secret
+    ].join('\n'),'utf8');
+    const tool=path.join(root,'tools','diagnose-updater-gate-r470.ps1');
+    const scope='READ_ONLY_HOSTED_V025W_ROLLBACK_QUALIFICATION_FAILURE';
+    const proc=spawnSync('pwsh.exe',['-NoLogo','-NoProfile','-NonInteractive','-File',
+      tool,'-Root',tmp,'-ExpectedCommit',sha,'-Scope',scope],
+      {encoding:'utf8',timeout:15000});
+    assert.equal(proc.status,0,proc.stderr||proc.stdout);
+    const artifact=fs.readFileSync(path.join(tmp,'DIAGNOSTIC_R470.json'),'utf8');
+    assert.ok(!artifact.includes(secret),'do not publish raw secrets');
+    assert.ok(!artifact.includes(tmp),'do not publish private paths');
+    const report=JSON.parse(artifact);
+    assert.equal(report.status,'SPEC_SUMMARY_EXTRACTED');
+    assert.equal(report.scope,scope);
+    assert.equal(report.commit,sha);
+    assert.equal(report.matchingLogCount,1);
+    assert.equal(report.historicalFailureJob,null);
+    assert.deepEqual(report.specFailureTests,['synthetic rollback test failure']);
+    assert.equal(report.specCounts.fail,'1');
+    assert.equal(report.rawLogIncluded,false);
+    assert.equal(report.secretsIncluded,false);
+    assert.equal(report.absolutePathsIncluded,false);
+    const rollback=read('test/release-rollback-windows-v01025.ps1');
+    assert.ok(rollback.includes("-Scope '"+scope+"'"));
+    assert.ok(rollback.includes('V025W_R470_READBACK_MISMATCH'));
+    for(const wf of ['.github/workflows/release-rollback-windows-r173.yml',
+      '.github/workflows/candidate-rollback-v01025.yml']){
+      assert.ok(read(wf).includes('remote-commander-rollback-v025w/DIAGNOSTIC_R470.json'),
+        'only sanitized diagnostic receipt may be uploaded: '+wf);
+    }
+  }finally{fs.rmSync(tmp,{recursive:true,force:true});}
+});
+
+test('Windows qualification isolates strict adaptive team and preserves MCP Tasks cold-start fixture',()=>{
+  const pkg=JSON.parse(read('package.json'));
+  let command=prioritizeSensitiveQualificationCommands(boundNodeTestConcurrency(pkg.scripts.test,1).command);
+  for(const fn of [
+    isolateWindowsAgentHttpRegression,isolateWindowsTimingSensitiveRegressions,
+    isolateWindowsProcessTreeRegression,isolateWindowsTransferMeshHttpRegression,
+    isolateWindowsLeaseRegression,isolateWindowsWorkflowPlanRegression,
+    isolateWindowsAsyncHttpRegression
+  ]) command=fn(command);
+  const file='test/project-adaptive.test.mjs';
+  const actual=isolateWindowsAdaptiveTeamRegression(command);
+  const head='node --test --test-concurrency=1 '+file+' && ';
+  assert.equal(actual,head+command.split(' && ').filter(part=>part!==head.slice(0,-4)).join(' && '),'move existing standalone fixture to head without changing coverage');
+  assert.equal(actual.split(file).length-1,1,'no dropped or duplicated adaptive tests');
+  assert.throws(()=>isolateWindowsAdaptiveTeamRegression(command.replace(' '+file,'')),/CI_ADAPTIVE_TEAM_CARDINALITY/);
+  assert.throws(()=>isolateWindowsAdaptiveTeamRegression(head+command),/CI_ADAPTIVE_TEAM_CARDINALITY/);
+  assert.ok(markIsolatedQualificationPhases(actual).length<7500,'Windows phase command remains bounded');
+  const strict=read(file);
+  assert.ok(strict.includes("team reserves all calls before workers and executes only the coordinator proposal', { timeout: teamTimeoutMs }"));
+  assert.ok(strict.includes("process.platform === 'win32' && process.env.GITHUB_ACTIONS === 'true'"));
+  assert.ok(strict.includes('? 15_000 : 6_000'), 'keep normal 6000ms and hosted-Windows 15000ms only');
+  const mcp=read('test/mcp-tasks-extension.test.mjs');
+  assert.ok(mcp.includes('const readyDeadline=Date.now()+20_000'),'bounded cold-start allowance is explicit');
+  assert.ok(mcp.includes("assert.equal(healthy,true,stderr)"),'live Health acceptance remains required');
+  assert.ok(mcp.includes("assert.equal(discover.status,200)"),'real Tasks protocol checks remain active');
+  assert.ok(read('tools/run-bounded-test-script.mjs').includes('command=isolateWindowsAdaptiveTeamRegression(command);'));
+});
+
+test('Windows isolates strict NEEDS_CHAT delivery before loaded CI without extending the original wait',()=>{
+  const pkg=JSON.parse(read('package.json'));
+  let command=prioritizeSensitiveQualificationCommands(boundNodeTestConcurrency(pkg.scripts.test,1).command);
+  for(const fn of [
+    isolateWindowsAgentHttpRegression,isolateWindowsTimingSensitiveRegressions,
+    isolateWindowsProcessTreeRegression,isolateWindowsTransferMeshHttpRegression,
+    isolateWindowsLeaseRegression,isolateWindowsWorkflowPlanRegression,
+    isolateWindowsAsyncHttpRegression
+  ]) command=fn(command);
+  const file='test/workflow-conversation.test.mjs',before=command.split(' && ');
+  const isolated=isolateWindowsWorkflowConversationRegression(command);
+  const lead='node --test --test-concurrency=1 '+file+' && ';
+  assert.equal(isolated,lead+command.replace(' '+file,''),'move only the existing fixture file to its own process');
+  assert.equal(isolated.split(file).length-1,1,'run conversation regression exactly once');
+  assert.equal(isolated.split(' && ').length,before.length+1,'one split, no duplicate');
+  assert.throws(()=>isolateWindowsWorkflowConversationRegression(command.replace(' '+file,'')),/CI_CONVERSATION_CARDINALITY/);
+  assert.throws(()=>isolateWindowsWorkflowConversationRegression(lead+command),/CI_CONVERSATION_CARDINALITY/);
+  const final=isolateWindowsAdaptiveTeamRegression(isolated);
+  assert.ok(final.startsWith('node --test --test-concurrency=1 test/project-adaptive.test.mjs && '+lead),
+    'keep six-second adaptive fixture first and 2500ms NEEDS_CHAT fixture second');
+  assert.ok(markIsolatedQualificationPhases(final).length<7500,'preserve Windows bounded command');
+  const strict=read(file);
+  assert.ok(strict.includes('const waitFor=async(fn,{timeout=2500,interval=20}={})'),
+    'original conversation poll deadline remains 2500ms');
+  assert.ok(strict.includes('assert.ok(deferred)'),'deferred state acceptance remains required');
+  assert.ok(strict.includes("assert.equal(deferred.lastCode,'WAITING_FOR_CHAT_TAB')"));
+  assert.ok(read('tools/run-bounded-test-script.mjs').includes('command=isolateWindowsWorkflowConversationRegression(command);'));
+});
+
+test('Windows R157 isolates exact async HTTP operation fixture without widening its strict response budget',()=>{
+  const pkg=JSON.parse(read('package.json'));
+  const initial=prioritizeSensitiveQualificationCommands(boundNodeTestConcurrency(pkg.scripts.test,1).command);
+  const staged=isolateWindowsWorkflowPlanRegression(
+    isolateWindowsLeaseRegression(
+      isolateWindowsTransferMeshHttpRegression(
+        isolateWindowsProcessTreeRegression(
+          isolateWindowsTimingSensitiveRegressions(
+            isolateWindowsAgentHttpRegression(initial))))));
+  const file='test/async-http.test.mjs';
+  const leader='node --test --test-concurrency=1 '+file+' && ';
+  const command=isolateWindowsAsyncHttpRegression(staged);
+  assert.equal(command,leader+staged.replace(' '+file,''),'only split the existing test file from its original batch');
+  assert.equal(command.split(file).length-1,1,'the async fixture runs exactly once');
+  assert.throws(()=>isolateWindowsAsyncHttpRegression(staged.replace(' '+file,'')),/CI_ASYNC_HTTP_CARDINALITY/);
+  assert.throws(()=>isolateWindowsAsyncHttpRegression(leader+staged),/CI_ASYNC_HTTP_CARDINALITY/);
+  assert.ok(markIsolatedQualificationPhases(command).length < 7500,'R157 command remains within Windows shell limit');
+  assert.ok(read('tools/run-bounded-test-script.mjs').includes('command=isolateWindowsAsyncHttpRegression(command);'));
+  const asyncTest=read(file);
+  assert.ok(asyncTest.includes('assert.ok(elapsed < 1000'),'keep strict HTTP response budget');
+  assert.ok(asyncTest.includes("assert.equal(final.status, 'SUCCEEDED')"),'preserve durable lifecycle acceptance');
+  assert.ok(asyncTest.includes('assert.equal(largeResult.result.stdout.truncated, true)'),'preserve file-backed output proof');
+});
+
+test('Windows runs exact workflow-plan races before loaded CI; strict adaptive team deadline unchanged',()=>{
+  const pkg=JSON.parse(read('package.json'));
+  let command=prioritizeSensitiveQualificationCommands(boundNodeTestConcurrency(pkg.scripts.test,1).command);
+  command=isolateWindowsAgentHttpRegression(command);
+  command=isolateWindowsTimingSensitiveRegressions(command);
+  command=isolateWindowsProcessTreeRegression(command);
+  command=isolateWindowsTransferMeshHttpRegression(command);
+  command=isolateWindowsLeaseRegression(command);
+  const prior=command, file='test/workflow-plan.test.mjs';
+  command=isolateWindowsWorkflowPlanRegression(command);
+  assert.ok(command.startsWith('node --test --test-concurrency=1 '+file+' && '),'exact concurrency file is first');
+  assert.equal(command.split(file).length-1,1,'original workflow-plan tests still run exactly once');
+  assert.equal(command.replace('node --test --test-concurrency=1 '+file+' && ','').split(' && ').length,
+    prior.split(' && ').length,'one isolated command replaces one file inside the original batch');
+  assert.ok(command.includes('test/project-adaptive.test.mjs'));
+  assert.ok(command.includes('test/project-engine-integration.test.mjs'));
+  assert.ok(command.includes('test/boot-recovery-diagnostics.test.mjs'));
+  assert.throws(()=>isolateWindowsWorkflowPlanRegression(prior.replace(' '+file,'')),/CI_WORKFLOW_PLAN_CARDINALITY/);
+  const marked=markIsolatedQualificationPhases(command);
+  assert.ok(marked.length<7500,'bounded R157 Windows shell command with phase markers');
+  const source=read('test/project-adaptive.test.mjs');
+  const first=source.indexOf("  test('inspect, extend, read prerequisite");
+  const team=source.indexOf("  test('team reserves all calls before workers");
+  assert.ok(team>0 && first>team,'strict six-second team regression runs before crash workers');
+  assert.equal(source.split("test('team reserves all calls before workers").length-1,1);
+  assert.ok(source.includes("test('team reserves all calls before workers and executes only the coordinator proposal', { timeout: teamTimeoutMs }"));
+  assert.ok(source.includes("? 15_000 : 6_000"), 'bound only hosted Windows fixture startup');
+});
+
+test('CI Windows runs the Transfer Mesh HTTP fixture alone without weakening readiness or dropping coverage',()=>{
+  const pkg=JSON.parse(read('package.json'));
+  const original=prioritizeSensitiveQualificationCommands(boundNodeTestConcurrency(pkg.scripts.test,1).command);
+  const agent=isolateWindowsAgentHttpRegression(original);
+  const timed=isolateWindowsTimingSensitiveRegressions(agent);
+  const tree=isolateWindowsProcessTreeRegression(timed);
+  const transfer=isolateWindowsTransferMeshHttpRegression(tree);
+  const result=isolateWindowsLeaseRegression(transfer);
+  const file='test/transfer-mesh-http.test.mjs',leader='node --test --test-concurrency=1 '+file+' && ';
+  const scheduler='test/project-engine-integration.test.mjs';
+  const schedulerLeader='node --test --test-concurrency=1 '+scheduler+' && ';
+  assert.equal(transfer,leader+tree.replace(' '+file,''),'transfer scheduling only; all other tests unchanged');
+  assert.equal(result,schedulerLeader+transfer.replace(' '+scheduler,''),'scheduler scheduling only');
+  assert.ok(result.startsWith(schedulerLeader+leader),'bounded scheduler and HTTP fixture run first');
+  assert.equal(result.split(file).length-1,1,'single execution is retained');
+  assert.equal(result.split(scheduler).length-1,1,'scheduler executes exactly once');
+  assert.ok(result.includes('test/transfer-mesh-native.test.mjs'),'native transfer coverage stays enabled');
+  assert.ok(result.includes('tools/commander-transfer-mesh/pilot-cli.test.mjs'));
+  assert.ok(result.indexOf(file)<result.indexOf('test/transfer-mesh-native.test.mjs'),
+    'HTTP fixture is separated before the high-volume transfer group');
+  assert.throws(()=>isolateWindowsTransferMeshHttpRegression(tree.replace(' '+file,'')),
+    /CI_TRANSFER_HTTP_CARDINALITY/);
+  assert.throws(()=>isolateWindowsTransferMeshHttpRegression(leader+tree),
+    /CI_TRANSFER_HTTP_CARDINALITY/);
+  const wrapper=read('tools/run-bounded-test-script.mjs');
+  assert.ok(wrapper.includes("command=isolateWindowsTransferMeshHttpRegression(command);"));
+  assert.ok(wrapper.indexOf('command=isolateWindowsLeaseRegression(command);')>
+    wrapper.indexOf('command=isolateWindowsTransferMeshHttpRegression(command);'),
+    'last composed prefix is scheduled first; no additional test runs or deadlines');
+  const fixture=read('test/transfer-mesh-http.test.mjs');
+  assert.ok(fixture.includes('for(let i=0;i<200;i++)'),'same bounded readiness budget');
+  assert.ok(fixture.includes('await wait(25)'),'same server-readiness poll');
+  assert.ok(fixture.includes('assert.equal(healthy,true,stderr)'),'still fail closed if server cannot start');
 });

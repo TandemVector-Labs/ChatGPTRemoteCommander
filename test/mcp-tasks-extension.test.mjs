@@ -53,7 +53,16 @@ test('MCP Tasks extension maps durable Commander operations without changing fal
     const configPath=path.join(serverRoot,'config.json');await fs.writeFile(configPath,JSON.stringify(config,null,2));
     child=spawn(process.execPath,[path.join(serverRoot,'src','server-v0.3.mjs')],{cwd:serverRoot,env:{...process.env,REMOTE_COMMANDER_CONFIG:configPath},stdio:['ignore','pipe','pipe']});
     let stderr='';child.stderr.on('data',c=>stderr+=c.toString('utf8'));
-    let healthy=false;for(let i=0;i<400;i++){try{const r=await fetch(`http://127.0.0.1:${port}/health`);if(r.ok){healthy=true;break;}}catch{}await wait(25);}
+    // Cold Windows CI may take longer to start a Node child while other jobs
+    // are competing for the runner. This only bounds test fixture bootstrap;
+    // operation/request budgets and the actual /health acceptance are unchanged.
+    const readyDeadline=Date.now()+20_000;
+    let healthy=false;
+    while(Date.now()<readyDeadline){
+      if(child.exitCode!==null)break;
+      try{const r=await fetch(`http://127.0.0.1:${port}/health`);if(r.ok){healthy=true;break;}}catch{}
+      await wait(25);
+    }
     assert.equal(healthy,true,stderr);
 
     const discover=await rpc(port,1,'server/discover',{_meta:meta(true)},undefined);
