@@ -191,7 +191,7 @@ function copyJob(p,j){
   assertion(hash(existingPayload)===verified,'PUBLISHED_PAYLOAD_HASH_MISMATCH');
   const expected={schema:'ctmesh-v1',id:j.id,from:j.from,to:j.peer,name:j.name,bytes:j.bytes,sha256:verified,createdAt:j.createdAt};
   if(fs.existsSync(existingManifest)){
-    const m=JSON.parse(fs.readFileSync(existingManifest,'utf8'));
+    const m=recordRead({record:existingManifest});
     assertion(JSON.stringify(m)===JSON.stringify(expected),'PUBLISHED_MANIFEST_DIFFERENT');
   }else{fs.writeFileSync(existingManifest,JSON.stringify(expected)+'\n',{flag:'wx',mode:0o600});}
   j.sha256=verified;j.copiedBytes=j.bytes;j.status='PUBLISHED';save(p,j);return;
