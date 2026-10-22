@@ -85,6 +85,39 @@ test('untrusted peer and malformed transfer ID rejected',()=>{
   }
  });
 });
+test('node identity cannot switch to external symlink after preflight',t=>{
+ const root=create('PC');
+ try{
+  const node=path.join(root,'node.json'),outside=path.join(root,'outside-identity.json');
+  fs.writeFileSync(outside,JSON.stringify({schema:'ctmesh-node-v1',alias:'Linux'}));
+  const trial=path.join(root,'node-link-probe');
+  try{fs.symlinkSync(outside,trial,'file');fs.unlinkSync(trial);}
+  catch(e){if(['EPERM','EACCES','ENOTSUP'].includes(e.code)){t.skip('File symlinks unavailable');return;}throw e;}
+  const marker=path.join(root,'identity-race.marker'),preload=path.join(root,'identity-race-hook.cjs');
+  fs.writeFileSync(preload,[
+   "const fs=require('node:fs'),mod=require('node:module');",
+   "const old=fs.readFileSync;let fired=false;",
+   "fs.readFileSync=function(file,...args){",
+   "if(!fired&&String(file)===process.env.RC_NODE){fired=true;",
+   "fs.renameSync(file,file+'.original');",
+   "fs.symlinkSync(process.env.RC_EXTERNAL,file,'file');",
+   "fs.writeFileSync(process.env.RC_MARKER,'ATTACK_EXECUTED');",
+   "}return old.call(this,file,...args);};",
+   "mod.syncBuiltinESMExports();"
+  ].join('\n'));
+  const result=spawnSync(process.execPath,['--require',preload,cli,'info'],{
+   encoding:'utf8',timeout:15000,env:{...process.env,COMMANDER_TRANSFER_HOME:root,
+    RC_NODE:node,RC_EXTERNAL:outside,RC_MARKER:marker}});
+  if(fs.existsSync(marker)){
+   assert.notEqual(result.status,0,'Outside alias must not become CLI identity');
+   assert.match(result.stderr,/Untrusted node identity|ELOOP/);
+  }else{
+   assert.equal(result.status,0,result.stderr);
+   assert.equal(JSON.parse(result.stdout).device,'PC');
+  }
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
 test('oversized untrusted incoming manifest is rejected before parsing',()=>{
  withFixtures((src,dst)=>{
   const id='oversize-manifest-001';send(src,id,Buffer.from('legitimate payload'));
