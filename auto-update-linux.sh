@@ -227,6 +227,33 @@ latest_ref(){
   [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'latest published release tag discovery failed' >&2; return 1; }
   printf '%s\n' "$tag"
 }
+# The security audit checks exact Git-commit provenance of historical fixtures.
+# A depth-1 staged checkout relabels its initial file diff as the shallow HEAD,
+# so the audit must never run until the staged, pinned commit has full ancestry.
+ensure_complete_audit_history(){
+  local stage="$1" expected="$2" current shallow
+  [[ "$expected" =~ ^[0-9a-f]{40}$ ]] || { log 'AUDIT_HISTORY_EXPECTED_SHA_INVALID'; return 1; }
+  current="$(git -C "$stage" rev-parse HEAD 2>/dev/null)" || return 1
+  [[ "$current" == "$expected" ]] || { log 'AUDIT_HISTORY_STAGE_SHA_MISMATCH'; return 1; }
+  [[ -z "$(git -C "$stage" status --porcelain --untracked-files=no)" ]] || { log 'AUDIT_HISTORY_DIRTY_STAGE'; return 1; }
+  shallow="$(git -C "$stage" rev-parse --is-shallow-repository)"
+  if [[ "$shallow" == true ]]; then
+    log 'AUDIT_HISTORY_FETCH_START'
+    if ! GIT_TERMINAL_PROMPT=0 timeout --signal=TERM --kill-after=10s 120s \
+        git -C "$stage" fetch --quiet --no-tags --unshallow origin "$expected"; then
+      log 'AUDIT_HISTORY_FETCH_FAILED'
+      return 1
+    fi
+  fi
+  [[ "$(git -C "$stage" rev-parse --is-shallow-repository)" == false ]] ||
+    { log 'AUDIT_HISTORY_STILL_SHALLOW'; return 1; }
+  [[ "$(git -C "$stage" rev-parse HEAD)" == "$expected" ]] ||
+    { log 'AUDIT_HISTORY_STAGE_MOVED'; return 1; }
+  [[ -z "$(git -C "$stage" status --porcelain --untracked-files=no)" ]] ||
+    { log 'AUDIT_HISTORY_STAGE_MUTATED'; return 1; }
+  log 'AUDIT_HISTORY_FULL_PROVENANCE_PASS'
+}
+
 stage_release(){
   local ref="$1" tmp resolved version final head
   tmp="$RELEASE_ROOT/stage-$(printf '%s' "$ref" | tr -c 'A-Za-z0-9._-' '_')-$$"
@@ -785,6 +812,7 @@ trap validation_cleanup ERR
 run_gate "$STAGE_DIR" linux-gui-safety node tools/linux-gui-safety-audit.mjs
 run_gate "$STAGE_DIR" check npm run check:qualification
 run_gate "$STAGE_DIR" test npm run test:qualification
+ensure_complete_audit_history "$STAGE_DIR" "$COMMIT"
 run_gate "$STAGE_DIR" audit npm run audit
 
 PORT="$(node "$STAGE_DIR/tools/find-free-port.mjs" --start 48831 --end 51999)"
