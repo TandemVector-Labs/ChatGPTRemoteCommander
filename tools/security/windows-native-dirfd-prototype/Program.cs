@@ -83,7 +83,7 @@ class Program {
 #endif
    if(!Path.IsPathFullyQualified(args[0])||args[0].StartsWith(@"\\"))throw new ArgumentException("DRIVE_ROOT_ONLY");
    string root=Path.GetFullPath(args[0]), rel=args[1];
-   if(string.IsNullOrEmpty(rel)||Path.IsPathRooted(rel)||rel.Contains(':')||rel.StartsWith('\')||rel.StartsWith('/'))
+   if(string.IsNullOrEmpty(rel)||Path.IsPathRooted(rel)||rel.Contains(':')||rel.StartsWith((char)92)||rel.StartsWith('/'))
        throw new ArgumentException("RELATIVE_COMPONENTS_ONLY");
    if(root.Length<3||!char.IsLetter(root[0])||root[1]!=':'||root[2]!='\\'||root.StartsWith(@"\\"))
        throw new ArgumentException("DRIVE_ROOT_ONLY");
