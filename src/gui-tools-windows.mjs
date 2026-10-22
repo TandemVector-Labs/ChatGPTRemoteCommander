@@ -6,6 +6,7 @@ import { performance } from 'node:perf_hooks';
 import { GUI_RULES, guiError, guiToolDefinitions, validateGuiInput } from './gui-contract.mjs';
 import { createGuiProcessClient, runGuiProcess } from './gui-process.mjs';
 import { createGuiInputIncidentStore } from './gui-incident-store.mjs';
+import { createWindowsOwnerGuiStatusProvider } from './windows-owner-gui-status-provider.mjs';
 export { guiToolDefinitions };
 
 const project = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -41,7 +42,7 @@ const bound = (v, low, high, defaultValue) => Number.isSafeInteger(v) ? Math.max
  * application coordination; distinct trust levels require separate OS sessions.
  */
 export function createGuiController({ platform = process.platform, now = () => performance.now(), token = () => randomBytes(24).toString('hex'), isStopped = stopped,
-  invoke = invokeDefault, closeInvoke = closeInvokeDefault, incidentStore = createGuiInputIncidentStore() } = {}) {
+  invoke = invokeDefault, closeInvoke = closeInvokeDefault, incidentStore = createGuiInputIncidentStore(), ownerSessionStatusProbe = null } = {}) {
   let session = null;
   let frame = null;
   let busy = false;
@@ -94,7 +95,29 @@ export function createGuiController({ platform = process.platform, now = () => p
       if (name === 'gui_status') {
         const status = await invoke({ action: 'status', stopFile });
         if (status?.ok !== true) throw guiError(status?.error || 'GUI_NATIVE_FAILED');
-        return { ...status, enabled, busy: false, leased: !!current(), backend: status.backend ?? (platform === 'win32' ? 'windows-user32-gdi' : 'gnome-shell-wayland'), policy: {
+        // Owner-session readiness is STATUS metadata, not permission for desktop control.
+        // Authenticated Session 1 state never makes Session 0's native GUI available.
+        let ownerSessionBridge;
+        if (platform === 'win32' && status.available === false &&
+            cfg.ownerSessionBridgeReadOnly === true && typeof ownerSessionStatusProbe === 'function') {
+          try {
+            const proof = await ownerSessionStatusProbe();
+            const valid = proof && proof.ok === true && proof.authenticated === true &&
+              proof.protocol === 1 && proof.backend === 'windows-owner-session-namedpipe-readonly' &&
+              Number.isSafeInteger(proof.ownerSession) && proof.ownerSession > 0 &&
+              Number.isSafeInteger(proof.ownerDisplayWidth) && proof.ownerDisplayWidth >= 1 && proof.ownerDisplayWidth <= 16384 &&
+              Number.isSafeInteger(proof.ownerDisplayHeight) && proof.ownerDisplayHeight >= 1 && proof.ownerDisplayHeight <= 16384 &&
+              Array.isArray(proof.operations) && proof.operations.length === 1 && proof.operations[0] === 'status' &&
+              proof.screenshot === false && proof.mouse === false && proof.keyboard === false && proof.focus === false;
+            ownerSessionBridge = valid ? {
+              state: 'AUTHENTICATED_READONLY', ownerSession: proof.ownerSession,
+              displayWidth: proof.ownerDisplayWidth, displayHeight: proof.ownerDisplayHeight,
+              screenshot: false, input: false, takeover: false, nativeGuiRoutable: false
+            } : { state: 'UNAVAILABLE', nativeGuiRoutable: false };
+          } catch { ownerSessionBridge = { state: 'UNAVAILABLE', nativeGuiRoutable: false }; }
+        }
+        return { ...status, ...(ownerSessionBridge ? { ownerSessionBridge } : {}),
+          enabled, busy: false, leased: !!current(), backend: status.backend ?? (platform === 'win32' ? 'windows-user32-gdi' : 'gnome-shell-wayland'), policy: {
           allowScreenshot: cfg.allowScreenshot === true, allowMouse: cfg.allowMouse === true,
           allowKeyboard: cfg.allowKeyboard === true, allowWindowFocus: cfg.allowWindowFocus === true,
           defaultSessionMode: 'observe', explicitTakeoverRequired: true,
@@ -187,5 +210,13 @@ export function createGuiController({ platform = process.platform, now = () => p
   }
   return { execute };
 }
-const controller = createGuiController();
+const controller = createGuiController({
+  // Disabled until an installer pins a verified native binary under Program Files.
+  // Never execute a user-writable developer build as SYSTEM.
+  ownerSessionStatusProbe: createWindowsOwnerGuiStatusProvider({
+    dllPath: path.win32.join(process.env.ProgramFiles || 'C:/Program Files',
+      'TandemVector-Labs', 'RemoteCommander', 'OwnerSessionBridge.dll'),
+    expectedDllSha256: null
+  })
+});
 export async function executeGuiTool(ctx, name, input) { return controller.execute(ctx, name, input); }
