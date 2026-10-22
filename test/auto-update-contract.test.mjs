@@ -188,7 +188,7 @@ test('R-fleet unattended Stable check preserves newer persisted active route whe
 test('auto updater is candidate-first, hardware-gated and commit-point aware',()=>{
   const s=read('auto-update-windows.ps1');
   for(const marker of [
-    'Local\\ChatGPTRemoteCommanderAutoUpdater',
+    '[IO.FileShare]::None',
     "Run-Gate $stage.Dir 'check'",
     "Run-Gate $stage.Dir 'test'",
     "Run-Gate $stage.Dir 'audit'",
