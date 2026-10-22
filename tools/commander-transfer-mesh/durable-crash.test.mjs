@@ -11,14 +11,23 @@ const alive=pid=>{try{process.kill(pid,0);return true;}catch(e){return e.code===
 function call(root,...args){const o=execFileSync(process.execPath,[cli,...args],{encoding:'utf8',timeout:12000,env:{...process.env,COMMANDER_TRANSFER_HOME:root}});return JSON.parse(o);}
 async function until(root,id,states,timeout=25000){
  const f=path.join(root,'jobs','Linux',id+'.json');const start=Date.now();
+ let last;
  while(Date.now()-start<timeout){
-  const r=JSON.parse(fs.readFileSync(f,'utf8'));
-  if(states.includes(r.status))return r;
+  last=JSON.parse(fs.readFileSync(f,'utf8'));
+  if(states.includes(last.status))return last;
   await wait(20);
  }
- throw Error('TIMED_OUT_WAITING_FOR_'+states.join(','));
+ // Preserve a bounded, nonsecret diagnostic: a real worker stall must remain
+ // a failed test, not be silently skipped or excused by a longer timeout.
+ throw Error('TIMED_OUT_WAITING_FOR_'+states.join(',')+
+  '_STATUS_'+String(last?.status??'UNKNOWN')+
+  '_COPIED_'+String(last?.copiedBytes??'UNKNOWN')+
+  '_EXPECTED_'+String(last?.bytes??'UNKNOWN'));
 }
-test('real worker termination during partial copy can be resumed and hash-verified', {timeout:60000},async t=>{
+// Hosted Windows runners can take longer than 30s to copy and hash 512 MiB
+// after process termination. Keep the full payload and all integrity assertions;
+// increase only the test wait budget and fail on an actually stalled worker.
+test('real worker termination during partial copy can be resumed and hash-verified', {timeout:150000},async t=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-kill-resume-'));
  let workerPid=0;
  try{
@@ -30,7 +39,7 @@ test('real worker termination during partial copy can be resumed and hash-verifi
   assert.equal(j.status,'QUEUED');
   const record=path.join(root,'jobs','Linux','kill-test-001.json');
   let copying=null;const started=Date.now();
-  while(Date.now()-started<12000){
+  while(Date.now()-started<20000){
    const state=JSON.parse(fs.readFileSync(record,'utf8'));
    if(state.status==='COPYING'&&state.copiedBytes>=16*1024*1024&&state.copiedBytes<state.bytes){
     copying=state;break;
@@ -38,18 +47,25 @@ test('real worker termination during partial copy can be resumed and hash-verifi
    if(state.status==='PUBLISHED')break;
    await wait(10);
   }
-  if(!copying){t.skip('Worker finished before controlled crash could be observed');return;}
+  if(!copying){
+   const state=JSON.parse(fs.readFileSync(record,'utf8'));
+   if(state.status==='PUBLISHED'){
+    t.skip('Worker finished before controlled crash could be observed');return;
+   }
+   assert.fail('Worker never reached a crashable COPY state; status='+state.status+
+     ' bytes='+state.copiedBytes+'/'+state.bytes);
+  }
   workerPid=copying.pid;
   assert.equal(Number.isInteger(workerPid),true);
   process.kill(workerPid,'SIGTERM');
-  for(let i=0;i<200&&alive(workerPid);i++)await wait(15);
+  for(let i=0;i<500&&alive(workerPid);i++)await wait(15);
   assert.equal(alive(workerPid),false,'Worker must terminate before resume');
   const interrupted=call(root,'job-status','--peer','Linux','--id','kill-test-001');
   assert.equal(interrupted.status,'INTERRUPTED');
   assert.ok(interrupted.copiedBytes>=16*1024*1024);
   const resumed=call(root,'resume','--peer','Linux','--id','kill-test-001');
   assert.equal(resumed.status,'QUEUED');
-  const finished=await until(root,'kill-test-001',['PUBLISHED','FAILED'],30000);
+  const finished=await until(root,'kill-test-001',['PUBLISHED','FAILED'],90000);
   assert.equal(finished.status,'PUBLISHED',finished.errorCode);
   assert.equal(finished.copiedBytes,finished.bytes);
   const filePayload=path.join(root,'pairs','Linux','transfers','kill-test-001','payload.bin');
