@@ -1,0 +1,41 @@
+name: CodeQL CSharp Native Probe
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'tools/security/windows-native-dirfd-prototype/**'
+      - '.github/workflows/codeql-csharp-native.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze-native-csharp:
+    name: Analyze native CSharp
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install .NET 10
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: '10.0.x'
+      - name: Initialize CSharp CodeQL database
+        uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          languages: csharp
+          build-mode: manual
+          queries: security-extended
+      - name: Build exactly the checked-in native Reader source
+        run: |
+          dotnet restore tools/security/windows-native-dirfd-prototype/NativeDirfdProbe.csproj
+          dotnet build tools/security/windows-native-dirfd-prototype/NativeDirfdProbe.csproj --no-restore -c Release
+      - name: Publish CSharp CodeQL analysis
+        uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          category: '/language:csharp/native-prototype'
