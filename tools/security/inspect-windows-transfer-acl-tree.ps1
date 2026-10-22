@@ -3,7 +3,8 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory=$true)][ValidateNotNullOrEmpty()][string]$Root,
-  [ValidateRange(1,4096)][int]$MaxEntries=256
+  [ValidateRange(1,4096)][int]$MaxEntries=256,
+  [ValidatePattern('^S-1-(?:[0-9]+-)+[0-9]+$')][string]$ExpectedOwnerSid
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
@@ -16,6 +17,7 @@ $report=[ordered]@{
   inspectedDirectories=0
   observerIsSystem=$false
   rootOwnerIsObserver=$false
+  rootOwnerIsExpected=$false
   rootInheritanceProtected=$false
   inheritedScopeCount=0
   ownersOutsideAllowedCount=0
@@ -33,6 +35,11 @@ try {
   $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
   if($null -eq $identity.User){throw 'OBSERVER_SID_MISSING'}
   $sid=$identity.User.Value
+  # An observing SYSTEM service can verify a separate pinned operator owner.
+  $expectedSid=$sid
+  if($PSBoundParameters.ContainsKey('ExpectedOwnerSid')){
+    $expectedSid=([Security.Principal.SecurityIdentifier]::new($ExpectedOwnerSid)).Value
+  }
   $report.observerIsSystem=($sid -eq 'S-1-5-18')
   # Check each lexical component BEFORE touching the caller-selected root.
   # Get-Item(...).Parent may refer to the target of a redirected path.
@@ -50,11 +57,8 @@ try {
   if($report.reparseEntryCount -eq 0) {
     $rootItem=Get-Item -LiteralPath $full -Force -ErrorAction Stop
     if(-not $rootItem.PSIsContainer){throw 'ROOT_NOT_DIRECTORY'}
-    # SYSTEM observers are not necessarily the owner; exclude the actual
-    # root owner SID from unrelated ACE counts, but flag identity mismatch.
-    $rootOwner=(Get-Acl -LiteralPath $full -ErrorAction Stop).GetOwner(
-      [Security.Principal.SecurityIdentifier]).Value
-    $allowed=@($rootOwner,'S-1-5-18','S-1-5-32-544')
+    # The observed root owner cannot expand its own trusted-principal list.
+    $allowed=@($expectedSid,'S-1-5-18','S-1-5-32-544')
   }
   $writeRights=([Security.AccessControl.FileSystemRights]::WriteData -bor
     [Security.AccessControl.FileSystemRights]::AppendData -bor
@@ -89,6 +93,7 @@ try {
     $owner=$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
     if($report.inspectedEntries -eq 1) {
       $report.rootOwnerIsObserver=($owner -eq $sid)
+      $report.rootOwnerIsExpected=($owner -eq $expectedSid)
       $report.rootInheritanceProtected=[bool]$acl.AreAccessRulesProtected
     }
     if($allowed -cnotcontains $owner){$report.ownersOutsideAllowedCount++}
@@ -106,7 +111,7 @@ try {
     }
   }
   }
-  $unsafeObserved=(-not $report.rootOwnerIsObserver -or
+  $unsafeObserved=(-not $report.rootOwnerIsExpected -or
     -not $report.rootInheritanceProtected -or
     $report.unapprovedAllowAceCount -gt 0 -or
     $report.ownersOutsideAllowedCount -gt 0 -or
