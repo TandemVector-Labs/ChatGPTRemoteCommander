@@ -17,6 +17,7 @@ permissions:
   contents: read
 
 env:
+  REMOTE_COMMANDER_REPO_URL: https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git
   RC_SOURCE_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
   RC_EXPECTED_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
 
