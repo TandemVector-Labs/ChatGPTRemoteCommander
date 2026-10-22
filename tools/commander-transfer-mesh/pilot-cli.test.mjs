@@ -52,6 +52,38 @@ test('send -> mirror -> receive validates bytes and hash and no overwrite',()=>{
   assert.match(repeated.stderr,/Destination exists/);
  });
 });
+test('Linux rejects staging ancestor swapped to outside directory before outgoing copy',t=>{
+ if(process.platform!=='linux'){t.skip('Linux pinned staging path only');return;}
+ const root=create('PC'),outside=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-staging-outside-'));
+ try{
+  const source=path.join(root,'source.bin'),id='staging-ancestor-001';
+  fs.writeFileSync(source,Buffer.from('outgoing staged bytes must remain inside owner root'));
+  const staging=path.join(root,'staging','Linux'),part=path.join(staging,id+'.part');
+  const marker=path.join(root,'staging-swap.marker'),preload=path.join(root,'staging-swap.cjs');
+  fs.writeFileSync(preload,[
+   "const fs=require('node:fs'),mod=require('node:module');",
+   "const old=fs.lstatSync;let seen=0,fired=false;",
+   "fs.lstatSync=function(file,...args){",
+   "if(!fired&&String(file)===process.env.RC_PART&&++seen===2){fired=true;",
+   "fs.renameSync(process.env.RC_STAGING,process.env.RC_STAGING+'.original');",
+   "fs.symlinkSync(process.env.RC_OUTSIDE,process.env.RC_STAGING,'dir');",
+   "fs.writeFileSync(process.env.RC_MARKER,'ACTUAL_ANCESTOR_SWAP');",
+   "}return old.call(this,file,...args);};",
+   "mod.syncBuiltinESMExports();"
+  ].join('\n'));
+  const result=spawnSync(process.execPath,['--require',preload,cli,'send',
+   '--peer','Linux','--path',source,'--id',id],{encoding:'utf8',timeout:15000,
+   env:{...process.env,COMMANDER_TRANSFER_HOME:root,RC_PART:part,
+    RC_STAGING:staging,RC_OUTSIDE:outside,RC_MARKER:marker}});
+  assert.equal(fs.existsSync(marker),true,'The post-preflight staging swap must fire');
+  assert.notEqual(result.status,0,'A symlink outside the managed staging tree must not be a copy destination');
+  assert.deepEqual(fs.readdirSync(outside),[],'No external staged file may be written');
+ }finally{
+  fs.rmSync(root,{recursive:true,force:true});
+  fs.rmSync(outside,{recursive:true,force:true});
+ }
+});
+
 test('same transfer ID cannot be silently reused',()=>{
  withFixtures((src)=>{
   send(src,'test-unique-001',Buffer.from('a'));
