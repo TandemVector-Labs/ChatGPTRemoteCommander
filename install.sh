@@ -12,7 +12,7 @@ BROWSER_PROFILE_ROOT=""
 START_SERVER=0
 INSTALL_PREREQS=0
 SKIP_TUNNEL_CLIENT=0
-SOURCE_REF="${REMOTE_COMMANDER_SOURCE_REF:-v0.10.23}"
+SOURCE_REF="${REMOTE_COMMANDER_SOURCE_REF:-v0.10.24}"
 EXPECTED_COMMIT="${REMOTE_COMMANDER_EXPECTED_COMMIT:-}"
 CURL_CONNECT_TIMEOUT="${REMOTE_COMMANDER_CURL_CONNECT_TIMEOUT:-15}"
 CURL_MAX_TIME="${REMOTE_COMMANDER_CURL_MAX_TIME:-180}"
@@ -28,7 +28,7 @@ Usage: install.sh [options]
   --enable-capability CAP   Explicit capability opt-in (repeatable)
   --start-server            Start MCP server with nohup after validation
   --skip-tunnel-client      Skip tunnel-client download; reuse existing pinned client when present
-  --source-ref REF          Git ref to install (default: v0.10.23)
+  --source-ref REF          Git ref to install (default: v0.10.24)
   --expected-commit SHA     Require the fetched ref to peel to this exact 40-hex commit
   -h, --help                Show help
 USAGE
@@ -355,6 +355,7 @@ write_local_config() {
       --allowed-program git --allowed-program node --allowed-program npm
       --allowed-program npx --allowed-program python3 --allowed-program python
       --allowed-program dotnet --allowed-program cmake --allowed-program ninja)
+    [[ "$CUSTOM_NO_START" == 1 ]] && args+=(--delivery-root "$state_root/delivery")
   fi
   local cap
   [[ "$CUSTOM_NO_START" == 1 ]] || args+=(--provider-root "$state_root")
@@ -386,10 +387,39 @@ install_linux_gui_backend() {
   "$project/tools/install-gnome-gui-extension.sh"
 }
 
+# Fresh server bootstrap and custom Core installs can use a shallow Git fetch.
+# The strict security audit verifies fixture provenance by introducing commit;
+# shallow history would falsely attribute that fixture to the candidate HEAD.
+ensure_install_audit_history(){
+  local candidate="$INSTALL_DIR" expected shallow
+  expected="$(git -C "$candidate" rev-parse HEAD 2>/dev/null)" || return 1
+  [[ "$expected" =~ ^[0-9a-f]{40}$ ]] || { echo 'INSTALL_AUDIT_EXPECTED_SHA_INVALID' >&2; return 1; }
+  if [[ -n "$EXPECTED_COMMIT" && "${expected,,}" != "${EXPECTED_COMMIT,,}" ]]; then
+    echo 'INSTALL_AUDIT_PIN_MISMATCH' >&2; return 1
+  fi
+  [[ -z "$(git -C "$candidate" status --porcelain --untracked-files=no)" ]] ||
+    { echo 'INSTALL_AUDIT_TRACKED_TREE_DIRTY' >&2; return 1; }
+  shallow="$(git -C "$candidate" rev-parse --is-shallow-repository)"
+  if [[ "$shallow" == true ]]; then
+    echo INSTALL_AUDIT_HISTORY_FETCH_START
+    if ! GIT_TERMINAL_PROMPT=0 timeout --signal=TERM --kill-after=10s 120s       git -C "$candidate" fetch --quiet --no-tags --unshallow origin "$expected"; then
+      echo 'INSTALL_AUDIT_HISTORY_FETCH_FAILED' >&2; return 1
+    fi
+  fi
+  [[ "$(git -C "$candidate" rev-parse --is-shallow-repository)" == false ]] ||
+    { echo 'INSTALL_AUDIT_HISTORY_STILL_SHALLOW' >&2; return 1; }
+  [[ "$(git -C "$candidate" rev-parse HEAD)" == "$expected" ]] ||
+    { echo 'INSTALL_AUDIT_STAGED_HEAD_CHANGED' >&2; return 1; }
+  [[ -z "$(git -C "$candidate" status --porcelain --untracked-files=no)" ]] ||
+    { echo 'INSTALL_AUDIT_STAGED_TREE_CHANGED' >&2; return 1; }
+  echo INSTALL_AUDIT_HISTORY_FULL_PASS
+}
+
 validate_installation() {
   cd "$INSTALL_DIR"
   npm run check:qualification
   npm run test:qualification
+  ensure_install_audit_history
   npm run audit
 }
 

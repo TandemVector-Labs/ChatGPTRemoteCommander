@@ -1,5 +1,7 @@
 import { readFile } from 'node:fs/promises';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
+import {isVerifiedSyntheticNotionBearer} from '../tools/security-audit-history.mjs';
 
 function git(args, options = {}) {
   const result = spawnSync('git', args, {
@@ -17,18 +19,126 @@ const patterns = [
   ['GitHub token', new RegExp('gh' + '[pousr]_' + '[A-Za-z0-9]{20,}', 'i')],
   ['Developer Windows path', /C:\\Users\\[^\\\r\n]+\\source\\repos\\ChatGPTRemoteCommander/i]
 ];
+// The source commit below contains one demonstrably synthetic bearer header in a
+// Notion OAuth fixture. Preserve the committed evidence; do not rewrite published Git
+// history or silence the bearer rule globally. Scope the exception to one exact byte
+// sequence and one test path. Original commit is recorded only as provenance;
+// shallow release clones can present the same file as a different root commit.
+const FIXTURE_PATH = 'test/notion-mcp-engine.test.mjs';
+const FIXTURE_ORIGIN = '7b28ae4ffbfc3094c70647fd1ad8c4c491ba7bf5';
+const FIXTURE_BEARER = 'Bearer ' + 'FIXTURE_PRIVATE_ACCESS';
+function scrubFixture(value) { return value.split(FIXTURE_BEARER).join('Bearer [KNOWN-SYNTHETIC-FIXTURE]'); }
 const tunnelPattern = patterns.find(([type]) => type === 'Tunnel identifier')[1];
 if (!tunnelPattern.test('tunnel' + '_' + '0123456789abcdef'.repeat(2)) || tunnelPattern.test('tunnel_control_plane_fresh') || tunnelPattern.test('TUNNEL_HEALTH_UNKNOWN_LISTENER')) {
   throw new Error('Tunnel identifier audit pattern regression');
 }
+// Scan complete Git history without buffering the entire potentially multi-GB patch.
+// Lines are bounded; anything above the bound fails closed instead of being skipped.
+function makeHistoryScanner(rules) {
+  const hits = new Set();
+  let pending = '', preceding = '', currentCommit = null, currentFile = null;
+  const limit = 16 * 1024 * 1024;
+  function scanLine(line) {
+    // Git emits immutable commit boundaries and per-file diff headers.
+    // Keep provenance while streaming; never buffer full history or raw hits.
+    const commit = /^commit ([0-9a-f]{40})(?:\r?\n|$)/.exec(line);
+    if (commit) { currentCommit = commit[1]; currentFile = '(commit metadata)'; }
+    const changedFile = /^diff --git a\/(.+?) b\/(.+?)\r?\n?$/.exec(line);
+    if (changedFile) {
+      const candidate = changedFile[2];
+      currentFile = /^[a-zA-Z0-9._/-]{1,128}$/.test(candidate)
+        ? candidate : '(nonstandard path)';
+    }
+    const sample = preceding + line;
+    for (const [name, pattern] of rules) {
+      const flags = pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g';
+      const finder = new RegExp(pattern.source, flags);
+      for (const match of sample.matchAll(finder)) {
+        if (isVerifiedSyntheticNotionBearer(name, match[0], {commit:currentCommit,file:currentFile})) continue;
+        hits.add(name);
+      }
+    }
+    preceding = sample.slice(-512);
+  }
+  return {
+    write(text) {
+      pending += text;
+      for (;;) {
+        const at = pending.indexOf('\n');
+        if (at < 0) break;
+        scanLine(pending.slice(0, at + 1));
+        pending = pending.slice(at + 1);
+      }
+      if (pending.length > limit) throw new Error('SECURITY_AUDIT_HISTORY_LINE_TOO_LONG');
+    },
+    finish() {
+      if (pending) { scanLine(pending); pending = ''; }
+      return hits;
+    }
+  };
+}
+const boundaryProbe = makeHistoryScanner(patterns);
+boundaryProbe.write('tunnel' + '_0123456789abcdef');
+boundaryProbe.write('0123456789abcdef\nBearer \n');
+boundaryProbe.write('A'.repeat(25) + '\n');
+const probed = boundaryProbe.finish();
+if (!probed.has('Tunnel identifier') || !probed.has('Bearer token literal')) {
+  throw new Error('SECURITY_AUDIT_STREAM_SCANNER_REGRESSION');
+}
+// Regression: exact synthetic fixture may be exempt only on approved commit and path.
+const syntheticLabel = 'Bearer ' + 'FIXTURE_PRIVATE_ACCESS';
+const fixtureFile = 'test/notion-mcp-engine.test.mjs';
+const fixtureCommit = '7b28ae4ffbfc3094c70647fd1ad8c4c491ba7bf5';
+if (!isVerifiedSyntheticNotionBearer('Bearer token literal',syntheticLabel,{commit:fixtureCommit,file:fixtureFile})) {
+  throw Error('SECURITY_AUDIT_EXACT_FIXTURE_PROVENANCE_REJECTED');
+}
+for(const source of [{commit:'f'.repeat(40),file:fixtureFile},{commit:fixtureCommit,file:'src/other.mjs'}]){
+  if (isVerifiedSyntheticNotionBearer('Bearer token literal',syntheticLabel,source)) {
+    throw Error('SECURITY_AUDIT_FIXTURE_PROVENANCE_TOO_BROAD');
+  }
+}
+async function scanCompleteHistory() {
+  const args = ['log', '--all', '-p', '--no-color', '--no-ext-diff'];
+  const child = spawn('git', args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const closed = new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', (code, signal) => resolve({ code, signal }));
+  });
+  const scanner = makeHistoryScanner(patterns);
+  const decoder = new StringDecoder('utf8');
+  let stderr = '', bytes = 0;
+  const errors = (async () => {
+    for await (const chunk of child.stderr) stderr = (stderr + chunk.toString('utf8')).slice(-4096);
+  })();
+  try {
+    for await (const chunk of child.stdout) {
+      bytes += chunk.length;
+      scanner.write(decoder.write(chunk));
+    }
+    scanner.write(decoder.end());
+    const done = await closed;
+    await errors;
+    if (done.code !== 0 || done.signal) {
+      throw new Error('git log --all -p failed: ' + stderr.slice(-1024));
+    }
+    return { hits: scanner.finish(), bytes };
+  } catch (error) {
+    if (child.exitCode === null) child.kill();
+    await closed.catch(() => {});
+    await errors.catch(() => {});
+    throw error;
+  }
+}
+
 const findings = [];
 const tracked = git(['ls-files', '-z']).split('\0').filter(Boolean);
 for (const file of tracked) {
   let text;
   try { text = await readFile(file, 'utf8'); } catch { continue; }
+  const content = file === FIXTURE_PATH ? scrubFixture(text) : text;
   for (const [type, pattern] of patterns) {
     pattern.lastIndex = 0;
-    if (pattern.test(text)) findings.push({ scope: 'CURRENT', type, location: file });
+    if (pattern.test(content)) findings.push({ scope: 'CURRENT', type, location: file });
   }
 }
 
@@ -40,11 +150,11 @@ for (const expectedIgnored of ['config.local.json', '.env', 'connections.local.j
   if (ignored.status !== 0) findings.push({ scope: 'CURRENT', type: 'Expected ignore missing', location: expectedIgnored });
 }
 
-const history = git(['log', '--all', '-p', '--no-color', '--no-ext-diff']);
-for (const [type, pattern] of patterns) {
-  pattern.lastIndex = 0;
-  if (pattern.test(history)) findings.push({ scope: 'HISTORY', type, location: 'git log --all -p' });
+const historyScan = await scanCompleteHistory();
+for (const type of historyScan.hits) {
+  findings.push({ scope: 'HISTORY', type, location: 'git log --all -p' });
 }
+console.log('SECURITY_AUDIT_HISTORY_BYTES ' + historyScan.bytes);
 const emails = [...new Set(git(['log', '--all', '--format=%ae%n%ce']).split(/\r?\n/).filter(Boolean))].sort();
 if (emails.length) {
   console.log('COMMIT_EMAILS (public metadata, not credentials):');

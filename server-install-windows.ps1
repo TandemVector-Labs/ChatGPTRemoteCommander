@@ -1,6 +1,7 @@
 param(
-  [string]$SourceRef = 'v0.10.23',
+  [string]$SourceRef = 'v0.10.24',
   [string]$ExpectedCommit = '',
+  [ValidateSet('upstream','organization')][string]$SourceRepository = 'upstream',
   [ValidateSet('Power','Standard')][string]$AccessMode = 'Power',
   [ValidateSet('Auto','On','Off')][string]$GuiControl = 'Auto',
   [string]$InstallDir = '',
@@ -18,6 +19,52 @@ $script:BootstrapGitHubToken = [Environment]::GetEnvironmentVariable('RC_GITHUB_
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $Repo = 'https://github.com/GOD13emad/ChatGPTRemoteCommander.git'
+# Optional explicit organization preview; default is the original upstream.
+# Never authorize unpinned organization source for an end-user installer.
+if ($SourceRepository -eq 'organization') {
+  if ($ExpectedCommit -notmatch '^[0-9a-fA-F]{40}$' -or $SourceRef -notmatch '^[A-Za-z0-9._/-]{1,128}$') {
+    throw 'ORGANIZATION_SOURCE_REQUIRES_PINNED_COMMIT'
+  }
+  $Repo = 'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git'
+}
+# The organization-fork source is allowed only for a SHA-pinned GitHub-hosted
+# same-repository installer canary. Normal installs use the upstream origin.
+# This is not an arbitrary repository URL override or a publication permit.
+if ([Environment]::GetEnvironmentVariable('RC_GITHUB_CI_FORK_SOURCE','Process') -eq '1') {
+  if ($env:GITHUB_ACTIONS -ne 'true' -or
+      $env:GITHUB_REPOSITORY -ne 'TandemVector-Labs/ChatGPTRemoteCommander' -or
+      $ExpectedCommit -notmatch '^[0-9a-fA-F]{40}$' -or
+      $SourceRef -notmatch '^[A-Za-z0-9._/-]{1,128}$') {
+    throw 'CI_FORK_SOURCE_CONTEXT_DENIED'
+  }
+  $Repo = 'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git'
+}
+
+# Explicit source URL aliases are accepted only from the two known repositories.
+# An organization URL must ALWAYS be SHA-pinned even when set in environment.
+$RequestedRepo = [Environment]::GetEnvironmentVariable('REMOTE_COMMANDER_REPO_URL','Process')
+if (-not [string]::IsNullOrWhiteSpace($RequestedRepo)) {
+  if ($RequestedRepo -cnotin @('https://github.com/GOD13emad/ChatGPTRemoteCommander.git',
+                               'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git')) {
+    throw 'RC_SOURCE_REPO_DENIED'
+  }
+  if ($RequestedRepo -eq 'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git' -and
+      ($ExpectedCommit -notmatch '^[0-9a-fA-F]{40}$' -or $SourceRef -notmatch '^[A-Za-z0-9._/-]{1,128}$')) {
+    throw 'ORGANIZATION_SOURCE_REQUIRES_PINNED_COMMIT'
+  }
+  if (($SourceRepository -eq 'organization' -or
+       [Environment]::GetEnvironmentVariable('RC_GITHUB_CI_FORK_SOURCE','Process') -eq '1') -and
+      $RequestedRepo -ne 'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git') {
+    throw 'RC_SOURCE_REPOSITORY_CONFLICT'
+  }
+  $Repo = $RequestedRepo
+}
+
+# Defense in depth: every resolved origin must be allowlisted before any fetch.
+if ($Repo -cnotin @('https://github.com/GOD13emad/ChatGPTRemoteCommander.git',
+                   'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git')) {
+  throw 'RC_SOURCE_REPO_DENIED'
+}
 $BootstrapRoot = Join-Path $env:ProgramData 'ChatGPTRemoteCommander\bootstrap'
 $ManifestPath = Join-Path $env:ProgramData 'ChatGPTRemoteCommander\server-install-allowlist.json'
 $Downloads = Join-Path $BootstrapRoot ('downloads-' + [guid]::NewGuid().ToString('N'))
@@ -38,7 +85,7 @@ function Refresh-Path {
 
 function Invoke-Download([string]$Url,[string]$Destination) {
   Write-Host "Downloading $Url"
-  Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination -Headers @{'User-Agent'='ChatGPTRemoteCommander-ServerInstaller/0.10.23'}
+  Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination -Headers @{'User-Agent'='ChatGPTRemoteCommander-ServerInstaller/0.10.24'}
   if (-not (Test-Path -LiteralPath $Destination -PathType Leaf)) { throw "Download did not create $Destination" }
 }
 
@@ -176,7 +223,7 @@ function Ensure-Git([string]$Arch) {
   # Public GitHub shared runner IPs can exhaust the unauthenticated REST limit.
   # Authentication is optional, fixed to this release-metadata endpoint only.
   $headers = @{
-    'User-Agent'='ChatGPTRemoteCommander-ServerInstaller/0.10.23'
+    'User-Agent'='ChatGPTRemoteCommander-ServerInstaller/0.10.24'
     'X-GitHub-Api-Version'='2022-11-28'
   }
   if ($script:BootstrapGitHubToken) {
@@ -303,7 +350,7 @@ try {
 
   $installer = Join-Path $stage 'install.ps1'
   if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw 'Staged install.ps1 is missing.' }
-  $args = @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$installer,'-SourceRef',$SourceRef,'-ExpectedCommit',$resolved)
+  $args = @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$installer,'-SourceRef',$SourceRef,'-ExpectedCommit',$resolved,'-SourceRepository',$SourceRepository)
   if ($AccessMode -eq 'Power') { $args += '-PowerMode' } else { $args += '-StandardMode' }
   if ($InstallDir) { $args += @('-InstallDir',$InstallDir) }
   if (-not $NoStartServer) { $args += '-StartServer' }

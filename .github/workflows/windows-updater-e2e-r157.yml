@@ -21,6 +21,8 @@ concurrency:
 
 jobs:
   isolated-windows-updater:
+    env:
+      REMOTE_COMMANDER_REPO_URL: https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git
     runs-on: windows-latest
     timeout-minutes: 50
     steps:
@@ -116,7 +118,11 @@ jobs:
           }
           $leftover=@(Get-CimInstance Win32_Process -Filter "Name='node.exe'"|Where-Object {([string]$_.CommandLine).Contains($root)})
           if($leftover.Count -gt 0){throw ('R157_ORPHANS_'+$leftover.Count)}
-          $stage=Join-Path $state ('releases\v0.10.23-'+$sha.Substring(0,12))
+          $manifest=Join-Path $env:GITHUB_WORKSPACE 'package.json'
+          if(-not(Test-Path -LiteralPath $manifest -PathType Leaf)){throw 'R157_SOURCE_PACKAGE_MISSING'}
+          $sourceVersion=[string]((Get-Content -LiteralPath $manifest -Raw -Encoding UTF8|ConvertFrom-Json).version)
+          if($sourceVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$'){throw 'R157_SOURCE_VERSION_INVALID'}
+          $stage=Join-Path $state ('releases\v'+$sourceVersion+'-'+$sha.Substring(0,12))
           if(-not(Test-Path $stage) -or (git -C $stage rev-parse HEAD).Trim() -ne $sha){throw 'R157_EXACT_STAGE_MISSING'}
           $receipt=[ordered]@{schema=1;revision='R157';status='PASS_HOSTED_WINDOWS_UPDATER_NOPROMOTE'
             exactCommit=$sha;qualifierReceipts=3;doctor='PASS';shadowStore='PASS'

@@ -349,6 +349,10 @@ def run_dashboard(app_id: str,
             box.append(self.ai_info)
             self.tasks_page.append(box)
 
+        def _build_notion(self):
+            from notion_panel import attach_notion_panel
+            attach_notion_panel(self.notion_page, Gtk, GLib)
+
         def _build_security(self):
             self.security_page.append(label("Security & appearance", "rc-page-head"))
             self.security_page.append(label(
@@ -412,6 +416,7 @@ def run_dashboard(app_id: str,
                 ("profiles", "Profiles"),
                 ("tasks", "Workflows"),
                 ("security", "Security"),
+                ("notion", "Notion"),
             ):
                 nav_button = Gtk.Button(label=nav_title)
                 nav_button.add_css_class("flat")
@@ -427,7 +432,7 @@ def run_dashboard(app_id: str,
                 navigator.append(nav_button)
                 self.nav_buttons[nav_key] = nav_button
             sidebar.append(navigator)
-            sidebar.append(label("READ-ONLY MODE", "rc-section-caption"))
+            sidebar.append(label("MONITORING + LOCAL NOTION", "rc-section-caption"))
             workspace.append(sidebar)
             self.stack.set_hexpand(True)
             self.stack.set_vexpand(True)
@@ -435,22 +440,25 @@ def run_dashboard(app_id: str,
             self.profiles_scroll, self.profiles_page = self._make_page()
             self.tasks_scroll, self.tasks_page = self._make_page()
             self.security_scroll, self.security_page = self._make_page()
+            self.notion_scroll, self.notion_page = self._make_page()
             for key, title, page in (
                 ("overview", "Overview", self.overview_scroll),
                 ("profiles", "Profiles", self.profiles_scroll),
                 ("tasks", "Workflows", self.tasks_scroll),
                 ("security", "Security", self.security_scroll),
+                ("notion", "Notion", self.notion_scroll),
             ):
                 page.set_visible(True)
                 stack_page = self.stack.add_titled(page, key, title)
                 stack_page.set_visible(True)
-            # The tab model retains all four Gtk.StackPages. Owner interaction
-            # only changes which page is visible, never executes a workflow.
+            # Monitoring pages remain read-only. The opt-in Notion page performs
+            # only explicit owner-local credential actions, never Core workflows.
             self._select_nav("overview")
             self._build_overview()
             self._build_profiles()
             self._build_tasks()
             self._build_security()
+            self._build_notion()
             workspace.append(self.stack)
             root.append(workspace)
             footer = label(

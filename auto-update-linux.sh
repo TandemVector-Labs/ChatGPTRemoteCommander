@@ -227,6 +227,33 @@ latest_ref(){
   [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'latest published release tag discovery failed' >&2; return 1; }
   printf '%s\n' "$tag"
 }
+# The security audit checks exact Git-commit provenance of historical fixtures.
+# A depth-1 staged checkout relabels its initial file diff as the shallow HEAD,
+# so the audit must never run until the staged, pinned commit has full ancestry.
+ensure_complete_audit_history(){
+  local stage="$1" expected="$2" current shallow
+  [[ "$expected" =~ ^[0-9a-f]{40}$ ]] || { log 'AUDIT_HISTORY_EXPECTED_SHA_INVALID'; return 1; }
+  current="$(git -C "$stage" rev-parse HEAD 2>/dev/null)" || return 1
+  [[ "$current" == "$expected" ]] || { log 'AUDIT_HISTORY_STAGE_SHA_MISMATCH'; return 1; }
+  [[ -z "$(git -C "$stage" status --porcelain --untracked-files=no)" ]] || { log 'AUDIT_HISTORY_DIRTY_STAGE'; return 1; }
+  shallow="$(git -C "$stage" rev-parse --is-shallow-repository)"
+  if [[ "$shallow" == true ]]; then
+    log 'AUDIT_HISTORY_FETCH_START'
+    if ! GIT_TERMINAL_PROMPT=0 timeout --signal=TERM --kill-after=10s 120s \
+        git -C "$stage" fetch --quiet --no-tags --unshallow origin "$expected"; then
+      log 'AUDIT_HISTORY_FETCH_FAILED'
+      return 1
+    fi
+  fi
+  [[ "$(git -C "$stage" rev-parse --is-shallow-repository)" == false ]] ||
+    { log 'AUDIT_HISTORY_STILL_SHALLOW'; return 1; }
+  [[ "$(git -C "$stage" rev-parse HEAD)" == "$expected" ]] ||
+    { log 'AUDIT_HISTORY_STAGE_MOVED'; return 1; }
+  [[ -z "$(git -C "$stage" status --porcelain --untracked-files=no)" ]] ||
+    { log 'AUDIT_HISTORY_STAGE_MUTATED'; return 1; }
+  log 'AUDIT_HISTORY_FULL_PROVENANCE_PASS'
+}
+
 stage_release(){
   local ref="$1" tmp resolved version final head
   tmp="$RELEASE_ROOT/stage-$(printf '%s' "$ref" | tr -c 'A-Za-z0-9._-' '_')-$$"
@@ -489,6 +516,39 @@ install_linux_gui_backend(){
   log "LINUX_GUI_BACKEND_SYNCED project=$project"
 }
 
+# A separately installed Control Center is not automatically updated by
+# Core's git checkout. Only upgrade an existing owner-local GUI after
+# accepted Core promotion. Preserve an independently tested rollback copy.
+# A GUI defer is reported separately; it cannot falsely mark the GUI as ready
+# or take the healthy Core offline.
+upgrade_optional_linux_control_center(){
+  local project="$1" data_root="${XDG_DATA_HOME:-$HOME/.local/share}" launcher installer result
+  [[ "$NO_PROMOTE" != 1 ]] || { log 'LINUX_CONTROL_CENTER_UPGRADE_SKIP_NOPROMOTE'; return 0; }
+  launcher="$data_root/applications/io.github.god13emad.RemoteCommander.ControlCenter.desktop"
+  installer="$project/desktop/linux-control-center/install_user.py"
+  [[ -f "$launcher" && -d "$data_root/remote-commander-control-center" ]] || {
+    log 'LINUX_CONTROL_CENTER_UPGRADE_SKIP_NOT_INSTALLED'
+    return 0
+  }
+  [[ -f "$installer" && ! -L "$installer" ]] || {
+    log 'LINUX_CONTROL_CENTER_UPGRADE_DEFER_PACKAGE_MISSING'
+    return 0
+  }
+  if ! command -v python3 >/dev/null 2>&1; then
+    log 'LINUX_CONTROL_CENTER_UPGRADE_DEFER_PYTHON_MISSING'
+    return 0
+  fi
+  if ! result="$(python3 -B "$installer" --install 2>/dev/null)"; then
+    log 'LINUX_CONTROL_CENTER_UPGRADE_DEFER_INSTALL_FAILED'
+    return 0
+  fi
+  case "$result" in
+    LINUX_CONTROL_CENTER_INSTALL_PASS|LINUX_CONTROL_CENTER_ALREADY_CURRENT)
+      log "LINUX_CONTROL_CENTER_UPGRADE_PASS status=$result" ;;
+    *) log 'LINUX_CONTROL_CENTER_UPGRADE_DEFER_RECEIPT_INVALID' ;;
+  esac
+}
+
 sync_work_plugin_projection(){
   local project="$1" version="$2" commit="$3"
   local template="$project/plugin-template"
@@ -720,6 +780,7 @@ if [[ "$FORCE" != 1 && -f "$ROUTE" ]]; then
       [[ -z "$LIVE_WF" ]] || node "$STAGE_DIR/tools/finalize-workflow-schema.mjs" --directory "$LIVE_WF"
       promote_control "$COMMIT" "$REF"
       install_linux_gui_backend "$STAGE_DIR" "$ACTIVE_CFG"
+      upgrade_optional_linux_control_center "$STAGE_DIR"
       sync_work_plugin_projection "$STAGE_DIR" "$VERSION" "$COMMIT"
       cleanup_releases || log 'AUTO_UPDATE_CLEANUP_PENDING_AFTER_MAINTENANCE'
       write_update_result maintenance_pass "$VERSION" "$COMMIT" "$REF"
@@ -733,6 +794,7 @@ if [[ "$FORCE" != 1 && -f "$ROUTE" ]]; then
         exit 0
       fi
     fi
+    upgrade_optional_linux_control_center "$STAGE_DIR"
     log "AUTO_UPDATE_CURRENT version=$VERSION"
     exit 0
   fi
@@ -750,6 +812,7 @@ trap validation_cleanup ERR
 run_gate "$STAGE_DIR" linux-gui-safety node tools/linux-gui-safety-audit.mjs
 run_gate "$STAGE_DIR" check npm run check:qualification
 run_gate "$STAGE_DIR" test npm run test:qualification
+ensure_complete_audit_history "$STAGE_DIR" "$COMMIT"
 run_gate "$STAGE_DIR" audit npm run audit
 
 PORT="$(node "$STAGE_DIR/tools/find-free-port.mjs" --start 48831 --end 51999)"
@@ -914,6 +977,7 @@ fi
 node "$STAGE_DIR/tools/finalize-workflow-schema.mjs" --directory "$LIVE_WF"
 install_linux_gui_backend "$STAGE_DIR" "$FINAL_CFG"
 promote_control "$COMMIT" "$REF"
+upgrade_optional_linux_control_center "$STAGE_DIR"
 sync_work_plugin_projection "$STAGE_DIR" "$VERSION" "$COMMIT"
 cleanup_releases || log 'AUTO_UPDATE_CLEANUP_PENDING_AFTER_PROMOTION'
 write_update_result pass "$VERSION" "$COMMIT" "$REF"

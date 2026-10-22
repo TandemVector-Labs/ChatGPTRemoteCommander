@@ -1,0 +1,4 @@
+# Shared organization fork: independent human code-owner review mandatory.
+# Preserve protected CODEOWNERS policy and required partner review.
+* @GOD13emad @mohammadmohammadzadeh19960-code
+/.github/CODEOWNERS @GOD13emad @mohammadmohammadzadeh19960-code
