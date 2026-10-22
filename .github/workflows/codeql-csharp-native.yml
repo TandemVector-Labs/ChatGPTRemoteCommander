@@ -1,0 +1,97 @@
+name: CodeQL CSharp Native Probe
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'tools/security/windows-native-dirfd-prototype/**'
+      - '.github/workflows/codeql-csharp-native.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze-native-csharp:
+    name: Analyze native CSharp
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install .NET 10
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: '10.0.x'
+      - name: Initialize CSharp CodeQL database
+        uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          languages: csharp
+          build-mode: manual
+          queries: security-extended
+      - name: Build exactly the checked-in native Reader source
+        run: |
+          dotnet restore tools/security/windows-native-dirfd-prototype/NativeDirfdProbe.csproj
+          dotnet build tools/security/windows-native-dirfd-prototype/NativeDirfdProbe.csproj --no-restore -c Release
+      - name: Export CSharp CodeQL analysis locally (Default Setup stays enabled)
+        uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          category: '/language:csharp/native-prototype'
+          upload: never
+          output: ./codeql-csharp-results
+      - name: Enforce offline CSharp security-severity gate
+        shell: bash
+        run: |
+          python3 - <<'PYCODE'
+          import json
+          from pathlib import Path
+          report=Path('codeql-csharp-results/csharp.sarif')
+          if not report.is_file():
+              raise SystemExit('MISSING_CSHARP_SARIF')
+          data=json.loads(report.read_text())
+          runs=data.get('runs',[])
+          if not runs:
+              raise SystemExit('EMPTY_CODEQL_SARIF_RUNS')
+          findings=[]
+          for run in runs:
+              driver=run.get('tool',{}).get('driver',{})
+              if 'CodeQL' not in driver.get('name',''):
+                  raise SystemExit('WRONG_SARIF_ANALYZER')
+              # Zero findings cannot count as a clean scan on an empty database.
+              source_paths=[a.get('location',{}).get('uri','') for a in run.get('artifacts',[])]
+              if not any(p.endswith('tools/security/windows-native-dirfd-prototype/Program.cs')
+                         for p in source_paths):
+                  raise SystemExit('CSHARP_READER_SOURCE_NOT_EXTRACTED')
+              metrics=run.get('properties',{}).get('metricResults',[])
+              extracted_loc=sum(int(m.get('value',0)) for m in metrics
+                                if m.get('ruleId')=='cs/summary/lines-of-code')
+              if extracted_loc<20:
+                  raise SystemExit('CSHARP_EXTRACTED_SOURCE_TOO_SMALL')
+              print('CSHARP_CODEQL_EXTRACTED_PROGRAM',True,'LINES_OF_CODE',extracted_loc)
+              rules=driver.get('rules',[])
+              for item in run.get('results',[]):
+                  idx=item.get('ruleIndex')
+                  rule=rules[idx] if isinstance(idx,int) and 0<=idx<len(rules) else next(
+                      (r for r in rules if r.get('id')==item.get('ruleId')),{})
+                  score=rule.get('properties',{}).get('security-severity')
+                  score=float(score) if score is not None else 0
+                  level=item.get('level','warning')
+                  findings.append((item.get('ruleId','unknown'),score,level))
+          critical=[x for x in findings if x[1]>=9]
+          high=[x for x in findings if x[1]>=7 or x[2]=='error']
+          print('CODEQL_CSHARP_SARIF_REPORT',report,'RUNS',len(runs),'FINDINGS',len(findings),
+                'HIGH_OR_ERROR',len(high),'CRITICAL',len(critical))
+          for rule,score,level in findings[:40]:
+              print('FINDING',rule,'SECURITY_SEVERITY',score,'LEVEL',level)
+          if high:
+              raise SystemExit('CSHARP_CODEQL_HIGH_SECURITY_FINDINGS')
+          PYCODE
+      - name: Preserve exact-commit CSharp SARIF for independent review
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: csharp-codeql-sarif
+          path: codeql-csharp-results/*.sarif
+          if-no-files-found: warn
+          retention-days: 30
