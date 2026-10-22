@@ -215,11 +215,10 @@ function copyVerifiedPartial(source,part,bytes){
  return oldBytes;
 }
 
-// An incoming manifest controls identity and destination filename. Never
-// parse it by re-opening a pathname after the managed-tree preflight: a
-// synchronized peer can substitute an external symlink in that interval.
-function readVerifiedManifest(file){
- const unsafe=()=>fail('Untrusted transfer manifest');
+// Identity and incoming manifest JSON are authoritative. Both must be parsed
+// from the same descriptor that passed regular-file / pathname identity checks.
+function readVerifiedJson(file,code){
+ const unsafe=()=>fail(code);
  const before=fs.lstatSync(file),limit=16384;
  if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1||
     before.size<1||before.size>limit)unsafe();
@@ -251,7 +250,7 @@ function readVerifiedManifest(file){
 function checkIncoming(peer,self,id){
  const p=transferPaths(peer,self,id);
  if(!fs.existsSync(p.payload)||!fs.existsSync(p.manifest))fail('Transfer is pending');
- const m=readVerifiedManifest(p.manifest);
+ const m=readVerifiedJson(p.manifest,'Untrusted transfer manifest');
  if(m.schema!=='ctmesh-v1'||m.id!==id||m.from!==peer||m.to!==self)fail('Identity mismatch');
  if(typeof m.name!=='string'||m.name!==path.basename(m.name)||/[\\/:*?"<>|\x00-\x1f]/.test(m.name)||m.name==='.'||m.name==='..')fail('Unsafe filename');
  if(!Number.isSafeInteger(m.bytes)||m.bytes<0||!(/^[0-9a-f]{64}$/.test(m.sha256)))fail('Invalid metadata');
@@ -264,7 +263,7 @@ try{
   throw Error('CTMESH_MANAGED_PATH_UNSAFE'); // Explicit relative roots must not be rebased onto an arbitrary cwd.
  assertUnredirectedDirectoryAncestors(root,'CTMESH_MANAGED_PATH_UNSAFE');
  assertManagedEntry(path.join(root,'node.json'),false);
- const self=JSON.parse(fs.readFileSync(path.join(root,'node.json'),'utf8')).alias;
+ const self=readVerifiedJson(path.join(root,'node.json'),'Untrusted node identity').alias;
  if(!validAlias.test(self))fail('Unrecognized local device');
  if(cmd==='info'){json({schema:'ctmesh-v1',device:self,transport:'Syncthing 2.1.6',root});}
  else{
