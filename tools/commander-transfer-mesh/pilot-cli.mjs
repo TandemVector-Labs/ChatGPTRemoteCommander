@@ -215,10 +215,43 @@ function copyVerifiedPartial(source,part,bytes){
  return oldBytes;
 }
 
+// An incoming manifest controls identity and destination filename. Never
+// parse it by re-opening a pathname after the managed-tree preflight: a
+// synchronized peer can substitute an external symlink in that interval.
+function readVerifiedManifest(file){
+ const unsafe=()=>fail('Untrusted transfer manifest');
+ const before=fs.lstatSync(file),limit=16384;
+ if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1||
+    before.size<1||before.size>limit)unsafe();
+ const flags=fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW??0)|(fs.constants.O_NONBLOCK??0);
+ const fd=fs.openSync(file,flags);
+ try{
+  const opened=fs.fstatSync(fd),named=fs.lstatSync(file);
+  const same=(a,b)=>a.dev===b.dev&&a.ino===b.ino&&a.size===b.size;
+  if(!opened.isFile()||opened.nlink!==1||opened.size<1||opened.size>limit||
+     !named.isFile()||named.isSymbolicLink()||named.nlink!==1||
+     !same(before,opened)||!same(opened,named))unsafe();
+  const bytes=Buffer.alloc(opened.size);
+  let at=0;
+  while(at<bytes.length){
+   const n=fs.readSync(fd,bytes,at,bytes.length-at,at);
+   if(n<=0)unsafe();
+   at+=n;
+  }
+  const after=fs.fstatSync(fd),namedAfter=fs.lstatSync(file);
+  if(!after.isFile()||after.nlink!==1||!namedAfter.isFile()||
+     namedAfter.isSymbolicLink()||namedAfter.nlink!==1||
+     !same(opened,after)||!same(opened,namedAfter)||
+     after.mtimeMs!==opened.mtimeMs||after.ctimeMs!==opened.ctimeMs||
+     namedAfter.mtimeMs!==opened.mtimeMs||namedAfter.ctimeMs!==opened.ctimeMs)unsafe();
+  return JSON.parse(bytes.toString('utf8'));
+ }finally{fs.closeSync(fd);}
+}
+
 function checkIncoming(peer,self,id){
  const p=transferPaths(peer,self,id);
  if(!fs.existsSync(p.payload)||!fs.existsSync(p.manifest))fail('Transfer is pending');
- const m=JSON.parse(fs.readFileSync(p.manifest,'utf8'));
+ const m=readVerifiedManifest(p.manifest);
  if(m.schema!=='ctmesh-v1'||m.id!==id||m.from!==peer||m.to!==self)fail('Identity mismatch');
  if(typeof m.name!=='string'||m.name!==path.basename(m.name)||/[\\/:*?"<>|\x00-\x1f]/.test(m.name)||m.name==='.'||m.name==='..')fail('Unsafe filename');
  if(!Number.isSafeInteger(m.bytes)||m.bytes<0||!(/^[0-9a-f]{64}$/.test(m.sha256)))fail('Invalid metadata');
