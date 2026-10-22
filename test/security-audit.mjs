@@ -19,6 +19,15 @@ const patterns = [
   ['GitHub token', new RegExp('gh' + '[pousr]_' + '[A-Za-z0-9]{20,}', 'i')],
   ['Developer Windows path', /C:\\Users\\[^\\\r\n]+\\source\\repos\\ChatGPTRemoteCommander/i]
 ];
+// The source commit below contains one demonstrably synthetic bearer header in a
+// Notion OAuth fixture. Preserve the committed evidence; do not rewrite published Git
+// history or silence the bearer rule globally. Scope the exception to one exact byte
+// sequence and one test path. Original commit is recorded only as provenance;
+// shallow release clones can present the same file as a different root commit.
+const FIXTURE_PATH = 'test/notion-mcp-engine.test.mjs';
+const FIXTURE_ORIGIN = '7b28ae4ffbfc3094c70647fd1ad8c4c491ba7bf5';
+const FIXTURE_BEARER = 'Bearer ' + 'FIXTURE_PRIVATE_ACCESS';
+function scrubFixture(value) { return value.split(FIXTURE_BEARER).join('Bearer [KNOWN-SYNTHETIC-FIXTURE]'); }
 const tunnelPattern = patterns.find(([type]) => type === 'Tunnel identifier')[1];
 if (!tunnelPattern.test('tunnel' + '_' + '0123456789abcdef'.repeat(2)) || tunnelPattern.test('tunnel_control_plane_fresh') || tunnelPattern.test('TUNNEL_HEALTH_UNKNOWN_LISTENER')) {
   throw new Error('Tunnel identifier audit pattern regression');
@@ -76,6 +85,18 @@ const probed = boundaryProbe.finish();
 if (!probed.has('Tunnel identifier') || !probed.has('Bearer token literal')) {
   throw new Error('SECURITY_AUDIT_STREAM_SCANNER_REGRESSION');
 }
+// Regression: exact synthetic fixture may be exempt only on approved commit and path.
+const syntheticLabel = 'Bearer ' + 'FIXTURE_PRIVATE_ACCESS';
+const fixtureFile = 'test/notion-mcp-engine.test.mjs';
+const fixtureCommit = '7b28ae4ffbfc3094c70647fd1ad8c4c491ba7bf5';
+if (!isVerifiedSyntheticNotionBearer('Bearer token literal',syntheticLabel,{commit:fixtureCommit,file:fixtureFile})) {
+  throw Error('SECURITY_AUDIT_EXACT_FIXTURE_PROVENANCE_REJECTED');
+}
+for(const source of [{commit:'f'.repeat(40),file:fixtureFile},{commit:fixtureCommit,file:'src/other.mjs'}]){
+  if (isVerifiedSyntheticNotionBearer('Bearer token literal',syntheticLabel,source)) {
+    throw Error('SECURITY_AUDIT_FIXTURE_PROVENANCE_TOO_BROAD');
+  }
+}
 async function scanCompleteHistory() {
   const args = ['log', '--all', '-p', '--no-color', '--no-ext-diff'];
   const child = spawn('git', args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -114,9 +135,10 @@ const tracked = git(['ls-files', '-z']).split('\0').filter(Boolean);
 for (const file of tracked) {
   let text;
   try { text = await readFile(file, 'utf8'); } catch { continue; }
+  const content = file === FIXTURE_PATH ? scrubFixture(text) : text;
   for (const [type, pattern] of patterns) {
     pattern.lastIndex = 0;
-    if (pattern.test(text)) findings.push({ scope: 'CURRENT', type, location: file });
+    if (pattern.test(content)) findings.push({ scope: 'CURRENT', type, location: file });
   }
 }
 

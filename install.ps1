@@ -10,14 +10,59 @@ param(
   [switch]$StartServer,
   [switch]$SkipTunnelClient,
   [string]$TunnelClientVersion = '0.0.15',
-  [string]$SourceRef = 'v0.10.23',
-  [string]$ExpectedCommit = ''
+  [string]$SourceRef = 'v0.10.24',
+  [string]$ExpectedCommit = '',
+  [ValidateSet('upstream','organization')][string]$SourceRepository = 'upstream'
 )
 $ErrorActionPreference = 'Stop'
 
-$Repo=[Environment]::GetEnvironmentVariable('REMOTE_COMMANDER_REPO_URL','Process')
-if([string]::IsNullOrWhiteSpace($Repo)){$Repo='https://github.com/GOD13emad/ChatGPTRemoteCommander.git'}
-if($Repo -cnotin @('https://github.com/GOD13emad/ChatGPTRemoteCommander.git','https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git')){throw 'RC_SOURCE_REPO_DENIED'}
+$Repo = 'https://github.com/GOD13emad/ChatGPTRemoteCommander.git'
+# Optional explicit organization preview; default is the original upstream.
+# Never authorize unpinned organization source for an end-user installer.
+if ($SourceRepository -eq 'organization') {
+  if ($ExpectedCommit -notmatch '^[0-9a-fA-F]{40}$' -or $SourceRef -notmatch '^[A-Za-z0-9._/-]{1,128}$') {
+    throw 'ORGANIZATION_SOURCE_REQUIRES_PINNED_COMMIT'
+  }
+  $Repo = 'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git'
+}
+# The organization-fork source is allowed only for a SHA-pinned GitHub-hosted
+# same-repository installer canary. Normal installs use the upstream origin.
+# This is not an arbitrary repository URL override or a publication permit.
+if ([Environment]::GetEnvironmentVariable('RC_GITHUB_CI_FORK_SOURCE','Process') -eq '1') {
+  if ($env:GITHUB_ACTIONS -ne 'true' -or
+      $env:GITHUB_REPOSITORY -ne 'TandemVector-Labs/ChatGPTRemoteCommander' -or
+      $ExpectedCommit -notmatch '^[0-9a-fA-F]{40}$' -or
+      $SourceRef -notmatch '^[A-Za-z0-9._/-]{1,128}$') {
+    throw 'CI_FORK_SOURCE_CONTEXT_DENIED'
+  }
+  $Repo = 'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git'
+}
+
+# Explicit source URL aliases are accepted only from the two known repositories.
+# An organization URL must ALWAYS be SHA-pinned even when set in environment.
+$RequestedRepo = [Environment]::GetEnvironmentVariable('REMOTE_COMMANDER_REPO_URL','Process')
+if (-not [string]::IsNullOrWhiteSpace($RequestedRepo)) {
+  if ($RequestedRepo -cnotin @('https://github.com/GOD13emad/ChatGPTRemoteCommander.git',
+                               'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git')) {
+    throw 'RC_SOURCE_REPO_DENIED'
+  }
+  if ($RequestedRepo -eq 'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git' -and
+      ($ExpectedCommit -notmatch '^[0-9a-fA-F]{40}$' -or $SourceRef -notmatch '^[A-Za-z0-9._/-]{1,128}$')) {
+    throw 'ORGANIZATION_SOURCE_REQUIRES_PINNED_COMMIT'
+  }
+  if (($SourceRepository -eq 'organization' -or
+       [Environment]::GetEnvironmentVariable('RC_GITHUB_CI_FORK_SOURCE','Process') -eq '1') -and
+      $RequestedRepo -ne 'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git') {
+    throw 'RC_SOURCE_REPOSITORY_CONFLICT'
+  }
+  $Repo = $RequestedRepo
+}
+
+# Defense in depth: every resolved origin must be allowlisted before any fetch.
+if ($Repo -cnotin @('https://github.com/GOD13emad/ChatGPTRemoteCommander.git',
+                   'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git')) {
+  throw 'RC_SOURCE_REPO_DENIED'
+}
 
 if ($PowerMode -and $StandardMode) {
   throw 'Use only one of -PowerMode or -StandardMode.'
@@ -124,6 +169,7 @@ function Ensure-Prerequisites {
 }
 
 function Invoke-ExistingSafeUpdate {
+  if ($SourceRepository -eq 'organization') { throw 'ORGANIZATION_PREVIEW_EXISTING_INSTALL_DENIED' }
   $temp = Join-Path $env:TEMP ("ChatGPTRemoteCommander-updater-" + $PID + "-" + [guid]::NewGuid().ToString('N'))
   New-Item -ItemType Directory -Path $temp | Out-Null
   try {
@@ -174,6 +220,7 @@ function Install-Source {
   New-Item -ItemType Directory -Force -Path $parent | Out-Null
 
   if (Test-Path -LiteralPath (Join-Path $InstallDir '.git')) {
+    if ($SourceRepository -eq 'organization') { throw 'ORGANIZATION_PREVIEW_EXISTING_INSTALL_DENIED' }
     $dirty = & git.exe -C $InstallDir status --porcelain --untracked-files=no
     if ($LASTEXITCODE -ne 0) {
       throw 'git status failed'

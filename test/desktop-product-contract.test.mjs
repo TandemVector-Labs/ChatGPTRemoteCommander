@@ -147,3 +147,32 @@ test('new Windows desktop/admin scripts parse without execution',t=>{
     assert.equal(r.status,0,script+'\n'+(r.stdout||'')+(r.stderr||''));
   }
 });
+
+test('Control Center includes owner-local Notion onboarding for every Windows installation',()=>{
+  const dashboard=read('desktop/RemoteCommanderDashboard/Program.cs');
+  const wizard=read('desktop/RemoteCommanderDashboard/NotionSetupForm.cs');
+  const importer=read('tools/notion-pat-import.mjs');
+  assert.match(dashboard,/Button\("Notion Connection"/);
+  assert.match(dashboard,/--notion-connect/);
+  assert.match(dashboard,/new NotionSetupForm\(\)/);
+  for(const check of [
+    'UseSystemPasswordChar = true',
+    'RedirectStandardInput = true',
+    'ArgumentList.Add("--token-stdin")',
+    'StandardInput.WriteLineAsync(token)',
+    'ArgumentList.Add("--status")',
+    'LocalApplicationData',
+    'ChatGPTRemoteCommander',
+    'notion-pat-import.mjs',
+    'app.notion.com/developers/tokens',
+    'NOTION_REST_PAT_VERIFIED_AND_SAVED_IN_OS_VAULT'
+  ])assert.ok(wizard.includes(check),check);
+  assert.equal(wizard.includes('ArgumentList.Add(token)'),false,'token must not be an argv');
+  assert.equal(wizard.includes('Clipboard.SetText'),false,'form must never copy the token');
+  assert.ok(importer.includes('if (opts.status)'), 'dashboard must have owner-private status');
+  assert.ok(importer.includes('engine.importPersonalAccessToken(token, { replaceExisting: opts.replaceExisting })'), 'importer must verify and vault-save');
+  const project=read('desktop/RemoteCommanderDashboard/RemoteCommanderDashboard.csproj');
+  assert.ok(project.includes('<UseWindowsForms>true</UseWindowsForms>'));
+  const build=read('desktop/build-windows.ps1');
+  assert.ok(build.includes('RemoteCommanderDashboard.csproj'),'compiled wizard is included in desktop binary');
+});

@@ -6,6 +6,22 @@ import path from 'node:path';
 const root=path.resolve(import.meta.dirname,'..');
 const read=rel=>fs.readFileSync(path.join(root,rel),'utf8');
 
+test('renamed organization source is pinned to canonical repository in install canaries',()=>{
+  const repo='TandemVector-Labs/ChatGPTRemoteCommander';
+  const workflow=read('.github/workflows/server-install-canary.yml');
+  const windows=read('server-install-windows.ps1');
+  const installer=read('install.ps1');
+  assert.ok(workflow.includes(`github.repository == '${repo}'`));
+  assert.ok(workflow.includes(`GOD13emad/ChatGPTRemoteCommander|${repo})`));
+  assert.ok(windows.includes(`$env:GITHUB_REPOSITORY -ne '${repo}'`));
+  assert.ok(windows.includes(`$Repo = 'https://github.com/${repo}.git'`));
+  assert.ok(installer.includes(`$env:GITHUB_REPOSITORY -ne '${repo}'`));
+  assert.ok(installer.includes(`$Repo = 'https://github.com/${repo}.git'`));
+  assert.equal(workflow.includes('Usefull-Skills/ChatGPTRemoteCommander'),false);
+  assert.equal(windows.includes('Usefull-Skills/ChatGPTRemoteCommander'),false);
+  assert.equal(installer.includes('Usefull-Skills/ChatGPTRemoteCommander'),false);
+});
+
 test('single Windows installer exposes one product shell with two installation modes',()=>{
   const iss=read('installer/RemoteCommander.iss');
 
@@ -44,7 +60,9 @@ test('fresh Windows bootstrap elevates only machine prerequisites and returns to
   assert.ok(iss.includes("ShellExec('runas'"),'machine prerequisite boundary must explicitly elevate');
   assert.ok(iss.includes('-PrerequisitesOnly'));
   assert.ok(iss.includes("Exec(PwshPath, Params"),'per-user core install must use the non-elevated setup context');
-  assert.ok(iss.includes('-StartServer -StandardMode'));
+  assert.ok(iss.includes(' -StartServer -SourceRef "'), 'setup must preserve the existing core profile');
+  assert.ok(iss.includes("if not ExistingCore then Params := Params + ' -StandardMode';"),
+    'fresh installations remain Standard while existing installations preserve their access tier');
   assert.ok(iss.includes('PowerShell-7.6.6-win-x64.msi'));
   assert.ok(iss.includes('958838FF55091E1C8705D89EFED0CC7E8245A3A6EF6C0CCFAE20015227108AD8'));
 
@@ -99,7 +117,7 @@ test('browser component is compile-time optional until a standalone Browser inst
   assert.ok(iss.includes('#define BrowserSetupName ExtractFileName(BrowserSetup)'));
   assert.ok(iss.includes('Name: "browser"; Description: "Remote Commander Browser"'));
   assert.ok(iss.includes('Source: "{#BrowserSetup}"; DestName: "{#BrowserSetupName}"'));
-  assert.ok(iss.includes('Filename: "{tmp}\\{#BrowserSetupName}"'));
+  assert.equal(iss.includes('Filename: "{tmp}\\{#BrowserSetupName}"'),false,'nested Browser must check exit');
 });
 
 test('product icon is a standards-compliant multi-image ICO asset',()=>{
@@ -133,4 +151,74 @@ test('hosted canaries select the organizational source rather than implicit lega
   const linux=read('server-install-linux.sh');
   assert.ok(linux.includes('REMOTE_COMMANDER_REPO_URL'), 'Linux installer must inherit same explicit source');
   assert.ok(read('install.sh').includes('REMOTE_COMMANDER_REPO_URL'), 'nested Linux installer must inherit the same explicit source');
+});
+test('native Desktop upgrade preserves authorized existing Core tier instead of forcing Standard',()=>{
+  const iss=read('installer/RemoteCommander.iss');
+  const install=read('install.ps1');
+  const section=iss.slice(iss.indexOf('function PrepareToInstall'),iss.indexOf('procedure CurStepChanged'));
+  assert.ok(section.includes("ExistingCoreGit := ExpandConstant('{localappdata}\\ChatGPTRemoteCommander\\app\\.git');"),
+    'detect only the canonical existing user-local Core repository');
+  assert.ok(section.includes('ExistingCore := DirExists(ExistingCoreGit) or FileExists(ExistingCoreGit);'),
+    'accept directory or worktree Git markers without assuming a fresh installation');
+  assert.ok(section.includes("if not ExistingCore then Params := Params + ' -StandardMode';"),
+    'do not pass a demotion switch into an existing Core');
+  assert.equal(section.includes(' -StartServer -StandardMode -SourceRef'),false,
+    'unconditional Standard on Desktop update would downgrade existing owner-authorized Power');
+  assert.ok(install.includes("if ($StandardMode) { $args += '-StandardMode' }"),
+    'installer forwards explicit Standard only when supplied');
+  assert.ok(install.includes('Invoke-ExistingSafeUpdate'),
+    'existing Core still routes through the qualified updater');
+});
+
+test('organization preview bootstrap is explicit, exact-commit pinned, and cannot upgrade existing owner Core',()=>{
+  const iss=read('installer/RemoteCommander.iss'), builder=read('installer/build-setup.ps1');
+  const core=read('install.ps1'), server=read('server-install-windows.ps1');
+  for(const file of [core,server]){
+    assert.ok(file.includes("[ValidateSet('upstream','organization')][string]$SourceRepository = 'upstream'"));
+    assert.ok(file.includes('ORGANIZATION_SOURCE_REQUIRES_PINNED_COMMIT'));
+    assert.ok(file.includes("$Repo = 'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git'"));
+  }
+  assert.ok(core.includes('ORGANIZATION_PREVIEW_EXISTING_INSTALL_DENIED'));
+  assert.ok(iss.includes('if ExistingCore and (\'{#MySourceRepository}\' = \'organization\') then'));
+  assert.ok(builder.includes('ORGANIZATION_SOURCE_REF_NOT_ADVERTISED'));
+  assert.ok(builder.includes('ORGANIZATION_SOURCE_REF_SHA_MISMATCH'));
+  assert.ok(server.includes("'-SourceRepository',$SourceRepository"));
+  assert.ok(builder.includes("'/DMySourceRepository='+$SourceRepository"));
+  assert.ok(builder.includes('ORGANIZATION_SOURCE_REQUIRES_PINNED_COMMIT'));
+  assert.ok(iss.includes('#define MySourceRepository "upstream"'));
+  assert.equal(iss.split('-SourceRepository "{#MySourceRepository}"').length - 1,2);
+});
+
+
+test('selected nested Browser failure is checked before writing installation metadata',()=>{
+  const iss=read('installer/RemoteCommander.iss');
+  const run=iss.slice(iss.indexOf('[Run]'),iss.indexOf('[Code]'));
+  const code=iss.slice(iss.indexOf('procedure CurStepChanged('));
+  assert.ok(!run.includes('BrowserSetupName'));
+  assert.ok(code.includes("if WizardIsComponentSelected('browser') then"));
+  assert.ok(code.includes("ExtractTemporaryFile('{#BrowserSetupName}')"));
+  assert.ok(code.includes("if not Exec(ExpandConstant('{tmp}\\{#BrowserSetupName}')"));
+  assert.ok(code.includes('ewWaitUntilTerminated, BrowserExitCode)'));
+  assert.ok(code.includes("Log('BROWSER_INSTALL_LAUNCH_FAILED')"));
+  assert.ok(code.includes('if BrowserExitCode <> 0 then'));
+  assert.ok(iss.includes('function GetCustomSetupExitCode: Integer;'));
+  assert.ok(iss.includes('if BrowserSetupFailed then Result := 4'));
+  assert.equal((code.match(/BrowserSetupFailed := True;/g)??[]).length,2);
+  assert.ok(code.includes('if not WizardSilent then'));
+  assert.ok(!code.includes("RaiseException('BROWSER_INSTALL_EXIT_NONZERO_'"));
+  assert.ok(code.includes("Log('BROWSER_INSTALL_EXIT_NONZERO_'"));
+  assert.ok(code.indexOf('BROWSER_INSTALL_EXIT_NONZERO_') <
+    code.indexOf("SaveStringToFile(ExpandConstant('{app}\\product-install.json')"));
+});
+
+
+test('Browser selection cannot auto-open Commander before Browser post-install succeeds',()=>{
+  const iss=read('installer/RemoteCommander.iss');
+  const run=iss.slice(iss.indexOf('[Run]'),iss.indexOf('[Code]'));
+  assert.ok(run.includes('Check: ShouldAutoLaunchCommander'));
+  assert.ok(iss.includes('function ShouldAutoLaunchCommander: Boolean;'));
+  assert.ok(iss.includes("Result := not WizardIsComponentSelected('browser')"));
+  assert.ok(iss.includes('#ifdef BrowserSetup'));
+  assert.ok(iss.includes("'/VERYSILENT /SUPPRESSMSGBOXES /NORESTART'"));
+  assert.ok(iss.includes('if not WizardSilent then'));
 });

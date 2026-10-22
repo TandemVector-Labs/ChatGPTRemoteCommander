@@ -249,7 +249,7 @@ throw 'R219_UNINSTALL_REFUSED_NO_ACCEPTED_RETIREMENT_PLAN: Use transactional in-
 New-Item -Path $Reg -Force | Out-Null
 New-ItemProperty -Path $Reg -Name DisplayName -Value 'Remote Commander' -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $Reg -Name DisplayVersion -Value $Version -PropertyType String -Force | Out-Null
-New-ItemProperty -Path $Reg -Name Publisher -Value 'Remote Commander' -PropertyType String -Force | Out-Null
+New-ItemProperty -Path $Reg -Name Publisher -Value 'TandemVector Labs' -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $Reg -Name InstallLocation -Value $InstallRoot -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $Reg -Name DisplayIcon -Value $Icon -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $Reg -Name UninstallString -Value ('"'+$Pwsh+'" -NoProfile -File "'+$Uninstall+'"') -PropertyType String -Force | Out-Null
