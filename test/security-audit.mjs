@@ -25,7 +25,7 @@ if (!tunnelPattern.test('tunnel' + '_' + '0123456789abcdef'.repeat(2)) || tunnel
 }
 // Scan complete Git history without buffering the entire potentially multi-GB patch.
 // Lines are bounded; anything above the bound fails closed instead of being skipped.
-function makeHistoryScanner(rules) {
+function makeHistoryScanner(rules, shallowBoundaryCommits = new Set()) {
   const hits = new Set();
   let pending = '', preceding = '', currentCommit = null, currentFile = null;
   const limit = 16 * 1024 * 1024;
@@ -45,7 +45,9 @@ function makeHistoryScanner(rules) {
       const flags = pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g';
       const finder = new RegExp(pattern.source, flags);
       for (const match of sample.matchAll(finder)) {
-        if (isVerifiedSyntheticNotionBearer(name, match[0], {commit:currentCommit,file:currentFile})) continue;
+        if (isVerifiedSyntheticNotionBearer(name, match[0], {commit:currentCommit,file:currentFile}) ||
+            (shallowBoundaryCommits.has(currentCommit) &&
+              isVerifiedCurrentSyntheticNotionBearer(name, match[0], currentFile))) continue;
         hits.add(name);
       }
     }
@@ -97,14 +99,45 @@ if (!isVerifiedCurrentSyntheticNotionBearer('Bearer token literal',
   throw new Error('SECURITY_AUDIT_CURRENT_FIXTURE_BOUNDARY_REGRESSION');
 }
 
+// Only a real Git shallow-boundary SHA can extend the exact history fixture
+// exception; unrelated files/tokens or a nonboundary commit are detected.
+const syntheticHeader='Bearer ' + 'FIXTURE_PRIVATE_ACCESS';
+const shallowSHA='f'.repeat(40);
+const makeProbe=(file,header,allow)=> {
+  const scanner=makeHistoryScanner(patterns,allow?new Set([shallowSHA]):new Set());
+  scanner.write('commit '+shallowSHA+'\n');
+  scanner.write('diff --git a/'+file+' b/'+file+'\n');
+  scanner.write('+Authorization: '+header+'\n');
+  return scanner.finish().has('Bearer token literal');
+};
+if (makeProbe('test/notion-mcp-engine.test.mjs',syntheticHeader,true) ||
+    !makeProbe('test/notion-mcp-engine.test.mjs',syntheticHeader,false) ||
+    !makeProbe('src/other.mjs',syntheticHeader,true) ||
+    !makeProbe('test/notion-mcp-engine.test.mjs','Bearer ' + 'notasyntheticfixturelongtokenz12345',true)) {
+  throw new Error('SECURITY_AUDIT_SHALLOW_BOUNDARY_SCOPE_REGRESSION');
+}
+
 async function scanCompleteHistory() {
+  // A depth-one clone represents its artificial Git shallow boundary as a
+  // root commit. Use only actual .git/shallow identities, never any arbitrary
+  // commit or whole file, to accept the exact non-secret Notion test fixture.
+  const shallowBoundaryCommits = new Set();
+  if (git(['rev-parse','--is-shallow-repository']).trim() === 'true') {
+    const shallowPath = git(['rev-parse','--git-path','shallow']).trim();
+    const shallowText = await readFile(shallowPath,'utf8');
+    for (const sha of shallowText.split(/\r?\n/).filter(Boolean)) {
+      if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error('SECURITY_AUDIT_BAD_SHALLOW_COMMIT');
+      shallowBoundaryCommits.add(sha);
+    }
+    if (!shallowBoundaryCommits.size) throw new Error('SECURITY_AUDIT_EMPTY_SHALLOW_BOUNDARY');
+  }
   const args = ['log', '--all', '-p', '--no-color', '--no-ext-diff'];
   const child = spawn('git', args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   const closed = new Promise((resolve, reject) => {
     child.once('error', reject);
     child.once('close', (code, signal) => resolve({ code, signal }));
   });
-  const scanner = makeHistoryScanner(patterns);
+  const scanner = makeHistoryScanner(patterns,shallowBoundaryCommits);
   const decoder = new StringDecoder('utf8');
   let stderr = '', bytes = 0;
   const errors = (async () => {
