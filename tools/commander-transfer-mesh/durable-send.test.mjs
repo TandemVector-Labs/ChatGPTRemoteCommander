@@ -168,7 +168,7 @@ test('job-status never consumes a post-check substituted record symlink',t=>{
    "const fs=require('node:fs');",
    "const rd=fs.readFileSync,op=fs.openSync;",
    "let swapped=false;",
-   "function replace(file){if(!swapped&&String(file)===process.env.RC_RECORD){",
+   "function replace(file){if(!swapped&&(String(file)===process.env.RC_RECORD||(String(file).startsWith('/proc/self/fd/')&&String(file).endsWith('/'+require('node:path').basename(process.env.RC_RECORD))))){",
    " swapped=true; fs.renameSync(file,file+'.checked');",
    " fs.symlinkSync(process.env.RC_OUTSIDE,file,'file');",
    "}}",
@@ -220,7 +220,7 @@ test('enqueue admission rejects a queued journal swapped for an external symlink
    "const fs=require('node:fs');",
    "const read=fs.readFileSync,open=fs.openSync;",
    "let swapped=false;",
-   "function swap(file){if(!swapped&&String(file)===process.env.RC_RECORD){",
+   "function swap(file){if(!swapped&&(String(file)===process.env.RC_RECORD||(String(file).startsWith('/proc/self/fd/')&&String(file).endsWith('/'+require('node:path').basename(process.env.RC_RECORD))))){",
    " swapped=true;fs.renameSync(file,file+'.checked');",
    " fs.symlinkSync(process.env.RC_EXTERNAL,file,'file');",
    "}}",
@@ -274,7 +274,7 @@ test('enqueue rejects a swapped node identity symlink instead of adopting forged
    "const fs=require('node:fs');",
    "const rd=fs.readFileSync,open=fs.openSync;",
    "let used=false;",
-   "function swap(file){if(!used&&String(file)===process.env.RC_NODE){",
+   "function swap(file){if(!used&&(String(file)===process.env.RC_NODE||(String(file).startsWith('/proc/self/fd/')&&String(file).endsWith('/'+require('node:path').basename(process.env.RC_NODE))))){",
    "used=true;fs.renameSync(file,file+'.checked');",
    "fs.symlinkSync(process.env.RC_EXTERNAL,file,'file');",
    "}}",
@@ -311,7 +311,7 @@ test('job-status rejects a substituted stale-worker lock symlink after safePaths
    "const fs=require('node:fs');",
    "const rd=fs.readFileSync,open=fs.openSync;",
    "let used=false;",
-   "function swap(file){if(!used&&String(file)===process.env.RC_LOCK){",
+   "function swap(file){if(!used&&(String(file)===process.env.RC_LOCK||(String(file).startsWith('/proc/self/fd/')&&String(file).endsWith('/'+require('node:path').basename(process.env.RC_LOCK))))){",
    "used=true;fs.renameSync(file,file+'.checked');",
    "fs.symlinkSync(process.env.RC_EXTERNAL,file,'file');",
    "}}",
@@ -443,5 +443,36 @@ test('recovery must not hash a post-preflight swapped external published payload
   assert.equal(after.status,'FAILED',
     'Swapped outside payload may not be treated as a verified published artifact');
   assert.deepEqual(fs.readFileSync(external),bytes);
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('Linux journal read rejects job-directory ancestor swap after preflight', {skip:process.platform!=='linux'},()=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-linux-parent-fd-'));
+ try{
+  const peer='Linux',id='parent-swap-001',dir=path.join(root,'jobs',peer),outside=path.join(root,'external');
+  fs.mkdirSync(dir,{recursive:true});fs.mkdirSync(outside);
+  const queued={schema:'ctmesh-durable-v1',id,peer,status:'QUEUED',bytes:3,createdAt:new Date().toISOString()};
+  const record=path.join(dir,id+'.json'),external=path.join(outside,id+'.json');
+  fs.writeFileSync(record,JSON.stringify(queued));
+  fs.writeFileSync(external,JSON.stringify({...queued,status:'PUBLISHED'}));
+  const hook=path.join(root,'ancestor-open-hook.cjs');
+  fs.writeFileSync(hook,[
+   "const fs=require('node:fs'),open=fs.openSync,lstat=fs.lstatSync;",
+   "let changed=false,n=0;",
+   "function swap(){if(changed)return;changed=true;",
+   "fs.renameSync(process.env.RC_JOB,process.env.RC_JOB+'.original');",
+   "fs.symlinkSync(process.env.RC_OUTSIDE,process.env.RC_JOB,'dir');}",
+   "fs.lstatSync=function(file,...rest){",
+   "if((String(file)===process.env.RC_RECORD||(String(file).startsWith('/proc/self/fd/')&&String(file).endsWith('/'+require('node:path').basename(process.env.RC_RECORD))))&&++n===2)swap();",
+   "return lstat.call(this,file,...rest);};",
+   "fs.openSync=function(file,...rest){",
+   "if(String(file)===process.env.RC_ROOT)swap();",
+   "return open.call(this,file,...rest);};"
+  ].join('\n'));
+  const r=spawnSync(process.execPath,[cli,'job-status','--peer',peer,'--id',id],{
+   encoding:'utf8',timeout:6500,env:{...process.env,COMMANDER_TRANSFER_HOME:root,
+    NODE_OPTIONS:'--require '+hook,RC_RECORD:record,RC_JOB:dir,RC_OUTSIDE:outside,RC_ROOT:root}});
+  assert.notEqual(r.status,0,'No external job-status after ancestor redirected: '+r.stdout);
+  assert.equal(fs.readFileSync(external,'utf8'),JSON.stringify({...queued,status:'PUBLISHED'}));
  }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
