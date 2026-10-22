@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
-import {spawn} from 'node:child_process';
+import {spawn,spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 // This worker is copied to COMMANDER_TRANSFER_HOME/durable-send.mjs on hosts.
 // Keep the minimal path-root guard self-contained so a copied worker can run
@@ -91,10 +91,45 @@ function withLinuxPinnedPath(file,read){
   return read('/proc/self/fd/'+fds[fds.length-1]+'/'+parts.at(-1));
  }finally{for(let i=fds.length-1;i>=0;i--)fs.closeSync(fds[i]);}
 }
+// Optional Windows-only integration with the separately qualified native
+// handle-relative reader. Both explicit executable path and SHA-256 pin are
+// required; no fallback to path-based reads if a configured helper fails.
+// This is not an installer, binary trust/ACL attestation, or write-path fix.
+function nativeWindowsRecordRead(file){
+ const configured=process.env.COMMANDER_TRANSFER_NATIVE_READER;
+ const digest=process.env.COMMANDER_TRANSFER_NATIVE_READER_SHA256;
+ assertion(typeof configured==='string'&&configured.length>0&&
+   typeof digest==='string'&&/^[a-f0-9]{64}$/i.test(digest),'NATIVE_READER_CONFIGURATION_INVALID');
+ assertion(path.isAbsolute(configured)&&/^[A-Za-z]:[\\/]/.test(configured)&&
+   !within(configured,root)&&/\.exe$/i.test(configured),'NATIVE_READER_PATH_UNSAFE');
+ assertUnredirectedDirectoryAncestors(path.dirname(configured),'NATIVE_READER_PATH_UNSAFE');
+ const st=fs.lstatSync(configured);
+ assertion(st.isFile()&&!st.isSymbolicLink()&&st.nlink===1,'NATIVE_READER_PATH_UNSAFE');
+ assertion(hash(configured)===digest.toLowerCase(),'NATIVE_READER_DIGEST_MISMATCH');
+ const relative=path.relative(root,file);
+ assertion(relative!==''&&relative!=='..'&&!relative.startsWith('..'+path.sep)&&
+   !path.isAbsolute(relative),'UNTRUSTED_JOB_RECORD');
+ const result=spawnSync(configured,[root,relative],{
+   shell:false,windowsHide:true,encoding:'utf8',timeout:10000,maxBuffer:300000
+ });
+ assertion(!result.error&&result.status===0&&typeof result.stdout==='string','UNTRUSTED_JOB_RECORD');
+ const b64=result.stdout.trim();
+ assertion(b64.length>0&&b64.length<180000&&
+   /^[A-Za-z0-9+/]+={0,2}$/.test(b64),'UNTRUSTED_JOB_RECORD');
+ const bytes=Buffer.from(b64,'base64');
+ assertion(bytes.length>=1&&bytes.length<=131072&&
+   bytes.toString('base64')===b64,'UNTRUSTED_JOB_RECORD');
+ return JSON.parse(bytes.toString('utf8'));
+}
 // Do not reopen a preflight-checked journal via a pathname. A peer that can
 // replace a managed record between lstat and read must not forge job status.
 // Keep the journal bounded and attach bytes to a stable regular-file descriptor.
 function recordRead(p){
+ // Opt-in Windows trusted-helper mode: never downgrade after configuration.
+ if(process.platform==='win32'&&
+   (process.env.COMMANDER_TRANSFER_NATIVE_READER!==undefined||
+    process.env.COMMANDER_TRANSFER_NATIVE_READER_SHA256!==undefined))
+  return nativeWindowsRecordRead(p.record);
  return withLinuxPinnedPath(p.record,(name)=>{
  const before=fs.lstatSync(name);
  assertion(before.isFile()&&!before.isSymbolicLink()&&before.nlink===1&&
