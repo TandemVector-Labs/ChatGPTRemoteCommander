@@ -15,6 +15,9 @@ on:
 permissions:
   contents: read
 
+env:
+  REMOTE_COMMANDER_REPO_URL: https://github.com/${{ github.repository }}.git
+
 concurrency:
   group: candidate-v01025-isolated-rollback-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: false

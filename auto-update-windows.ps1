@@ -25,6 +25,14 @@ foreach($requestedProfile in $TargetProfile){
 $TargetProfile=@($TargetProfile|Select-Object -Unique)
 
 $Repo='https://github.com/GOD13emad/ChatGPTRemoteCommander.git'
+# CI-only, exact-repository source selection. The installed updater keeps
+# the legacy release repository unless this is TandemVector's hosted QA.
+if($env:GITHUB_ACTIONS -ceq 'true' -and
+   $env:GITHUB_REPOSITORY -ceq 'TandemVector-Labs/ChatGPTRemoteCommander' -and
+   $env:REMOTE_COMMANDER_REPO_URL -ceq 'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git' -and
+   $ExpectedCommit -cmatch '^[0-9a-f]{40}$'){
+  $Repo=$env:REMOTE_COMMANDER_REPO_URL
+}
 $StateRoot=Join-Path $env:LOCALAPPDATA 'ChatGPTRemoteCommander'
 $PauseFile=Join-Path $StateRoot 'maintenance\auto-update-paused.json'
 if(-not $Force -and (Test-Path -LiteralPath $PauseFile -PathType Leaf)){
