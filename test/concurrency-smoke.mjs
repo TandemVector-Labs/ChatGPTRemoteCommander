@@ -50,14 +50,20 @@ server.stderr.on('data', (chunk) => { serverOutput += chunk.toString('utf8'); })
 process.once('exit', () => { try { server.kill('SIGTERM'); } catch {} });
 
 async function waitForHealth() {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  // Hosted Windows can take longer to initialize native modules under load.
+  // Keep startup bounded, and fail immediately if the child actually exits.
+  const deadline = Date.now() + (process.platform === 'win32' ? 30_000 : 15_000);
+  while (Date.now() < deadline) {
+    if (server.exitCode !== null || server.signalCode !== null) {
+      throw new Error(`server exited before health became ready: ${serverOutput}`);
+    }
     try {
       const response = await fetch(`http://127.0.0.1:${port}/health`);
       if (response.ok) return;
     } catch { /* startup */ }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error(`server did not become healthy: ${serverOutput}`);
+  throw new Error(`server did not become healthy within startup deadline: ${serverOutput}`);
 }
 
 async function waitForRuntimeState(timeoutMs = 30000) {
