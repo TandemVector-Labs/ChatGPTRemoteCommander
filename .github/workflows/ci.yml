@@ -32,6 +32,8 @@ jobs:
       - name: Qualify native Windows handle-relative security prototype
         if: runner.os == 'Windows'
         run: node --test test/windows-native-dirfd-prototype.test.mjs
+      - name: Refuse unreviewed native Helper execution by durable worker
+        run: node --test test/windows-native-helper-admission.test.mjs
       - name: Install Linux GUI helper dependencies
         if: runner.os == 'Linux'
         run: |
