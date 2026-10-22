@@ -199,3 +199,41 @@ test('job-status refuses an oversized journal without reading or parsing it',()=
   assert.equal(fs.statSync(record).size,131073);
  }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
+
+test('enqueue rejects a queue journal swapped after directory enumeration',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-queue-swap-'));
+ try{
+  const sourceDir=path.join(root,'source'),jobDir=path.join(root,'jobs','Linux');
+  fs.mkdirSync(sourceDir);fs.mkdirSync(jobDir,{recursive:true});
+  fs.writeFileSync(path.join(root,'node.json'),JSON.stringify({alias:'PC'}));
+  const source=path.join(sourceDir,'payload.bin');fs.writeFileSync(source,Buffer.alloc(50,7));
+  const checked=path.join(jobDir,'older-001.json'),external=path.join(root,'fake-published.json');
+  const probe=path.join(root,'probe-link');
+  const active={schema:'ctmesh-durable-v1',id:'older-001',peer:'Linux',status:'QUEUED',bytes:100,createdAt:new Date().toISOString()};
+  fs.writeFileSync(checked,JSON.stringify(active));
+  fs.writeFileSync(external,JSON.stringify({...active,status:'PUBLISHED'}));
+  try{fs.symlinkSync(external,probe,'file');fs.unlinkSync(probe);}
+  catch(e){if(['EPERM','EACCES','ENOTSUP'].includes(e.code)){t.skip('Symlink creation unavailable');return;}throw e;}
+  const hook=path.join(root,'swap-queue.cjs');
+  fs.writeFileSync(hook,[
+   "const fs=require('node:fs');",
+   "const read=fs.readFileSync,open=fs.openSync,stat=fs.lstatSync;",
+   "let once=false;",
+   "function swap(file){if(!once&&String(file)===process.env.RC_QUEUED){",
+   " once=true;fs.renameSync(file,file+'.checked');fs.symlinkSync(process.env.RC_FAKE,file,'file');",
+   "}}",
+   "fs.readFileSync=function(file,...args){swap(file);return read.call(this,file,...args);};",
+   "fs.openSync=function(file,...args){swap(file);return open.call(this,file,...args);};",
+   "fs.lstatSync=function(file,...args){swap(file);return stat.call(this,file,...args);};"
+  ].join('\n'));
+  const newId='newjob-002';
+  const result=spawnSync(process.execPath,[cli,'enqueue','--peer','Linux','--id',newId,
+   '--path',source,'--source-root',sourceDir,'--max-source-bytes','64','--max-pending-bytes','128'],{
+   encoding:'utf8',timeout:6000,
+   env:{...process.env,NODE_OPTIONS:'--require '+hook,COMMANDER_TRANSFER_HOME:root,
+    RC_QUEUED:checked,RC_FAKE:external}});
+  assert.notEqual(result.status,0,'Queue quota must not be bypassed by a substituted PUBLISHED record: '+result.stdout);
+  assert.equal(fs.existsSync(path.join(jobDir,newId+'.json')),false);
+  assert.equal(fs.readFileSync(external,'utf8'),JSON.stringify({...active,status:'PUBLISHED'}));
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
