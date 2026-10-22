@@ -240,7 +240,12 @@ test('a changed runner policy cannot resolve an old input request',async()=>{
 });
 
 
-test('human WAITING_INPUT time does not consume the execution deadline',async()=>{
+test('human WAITING_INPUT time does not consume the execution deadline',async(t)=>{
+  // The real one-second clock made a healthy workflow expire before tick() on
+  // heavily loaded Windows CI workers. Advance only this test's mocked clock,
+  // so the paused-duration contract remains tested without wall-clock races.
+  let now=Date.now();
+  t.mock.method(Date,'now',()=>now);
   const f=fixture(async()=>ask());
   try{
     await f.create();
@@ -248,7 +253,7 @@ test('human WAITING_INPUT time does not consume the execution deadline',async()=
     const wait=await f.tick();
     assert.equal(wait.status,'WAITING_INPUT');
     assert.ok(Number.isSafeInteger(wait.waitingStartedAt));
-    await new Promise(resolve=>setTimeout(resolve,1100));
+    now+=1100;
     const state=(await f.api.execute('workflow_get',{id:'project'})).state;
     const resumed=await f.api.execute('workflow_run_resolve',{
       runId:'run-one',requestId:wait.pendingRequest.requestId,expectedRevision:state.revision,response:'Continue'
