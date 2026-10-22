@@ -43,6 +43,34 @@ if([IO.Path]::GetFileName($InstallDir) -ieq 'app' -and
   Write-Output 'AUTO_UPDATE_OWNER_STATE_ROOT_MISMATCH'
   exit 0
 }
+# For a normal Windows profile-local install, LOCALAPPDATA is not proof
+# of identity: a SYSTEM process can inherit the interactive owner's env.
+# Resolve the profile SID from the OS profile registry and fail closed when
+# the running token is not the owner. No credentials or profile files read.
+if([IO.Path]::GetFileName($InstallDir) -ieq 'app' -and
+   [IO.Path]::GetFileName($installParent) -ieq 'ChatGPTRemoteCommander'){
+  $localDataDir=Split-Path -Parent $installParent
+  $appDataDir=Split-Path -Parent $localDataDir
+  if([IO.Path]::GetFileName($localDataDir) -ieq 'Local' -and
+     [IO.Path]::GetFileName($appDataDir) -ieq 'AppData'){
+    $ownerProfile=[IO.Path]::GetFullPath((Split-Path -Parent $appDataDir)).TrimEnd('\')
+    $ownerSid=$null
+    foreach($key in Get-ChildItem -LiteralPath 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList' -ErrorAction Stop){
+      $entry=Get-ItemProperty -LiteralPath $key.PSPath -Name ProfileImagePath -ErrorAction SilentlyContinue
+      if(-not $entry){continue}
+      $profilePath=[Environment]::ExpandEnvironmentVariables([string]$entry.ProfileImagePath)
+      if([string]::Equals([IO.Path]::GetFullPath($profilePath).TrimEnd('\'),$ownerProfile,[StringComparison]::OrdinalIgnoreCase)){
+        $ownerSid=[string]$key.PSChildName
+        break
+      }
+    }
+    if(-not $ownerSid){throw 'AUTO_UPDATE_OWNER_PROFILE_UNVERIFIED'}
+    if([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne $ownerSid){
+      Write-Output 'AUTO_UPDATE_WRONG_ACCOUNT_SESSION'
+      exit 0
+    }
+  }
+}
 $ReleaseRoot=Join-Path $StateRoot 'releases'
 $RoutingRoot=Join-Path $StateRoot 'routing'
 $RuntimeRoot=Join-Path $StateRoot 'runtimes'

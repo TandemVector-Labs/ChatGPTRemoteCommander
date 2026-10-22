@@ -28,6 +28,10 @@ function runFile(file,args,timeout=10000){
 test('updater rejects foreign StateRoot before staging and keeps the owner pause gate',()=>{
  assert.ok(ownerStart>=0&&ownerEnd>ownerStart);
  assert.ok(ownerSnippet.includes('AUTO_UPDATE_OWNER_STATE_ROOT_MISMATCH'));
+ assert.ok(ownerSnippet.includes('AUTO_UPDATE_WRONG_ACCOUNT_SESSION'));
+ assert.ok(ownerSnippet.includes('AUTO_UPDATE_OWNER_PROFILE_UNVERIFIED'));
+ assert.ok(ownerSnippet.includes('[Security.Principal.WindowsIdentity]::GetCurrent().User.Value'));
+
  assert.ok(source.indexOf('if(-not $Force -and (Test-Path -LiteralPath $PauseFile')<ownerStart);
  assert.ok(ownerEnd<source.indexOf('New-Item -ItemType Directory -Force -Path $ReleaseRoot'));
  assert.ok(source.indexOf("if($SelfTest){")<lockStart,'selftest remains non-mutating');
@@ -61,6 +65,33 @@ test('Windows owner and foreign runtime scope cannot share owner installation', 
    assert.match(bad.stdout,/AUTO_UPDATE_OWNER_STATE_ROOT_MISMATCH/);
    assert.doesNotMatch(bad.stdout,/SCOPE_ACCEPTED/);
  });
+});
+
+test('Windows registry owner SID, not inherited LOCALAPPDATA, controls user-profile updater scope',
+  {skip:process.platform!=='win32'},()=>{
+  isolated('rc-profile-sid-',dir=>{
+    const fixture=path.join(dir,'sid-guard.ps1');
+    fs.writeFileSync(fixture,[
+      "$ErrorActionPreference='Stop'",
+      '$currentSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
+      " $entries=Get-ChildItem 'Registry::HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList' | ForEach-Object {",
+      "  $p=Get-ItemProperty -LiteralPath $_.PSPath -Name ProfileImagePath -ErrorAction SilentlyContinue",
+      "  if($p){[pscustomobject]@{sid=$_.PSChildName;profile=[Environment]::ExpandEnvironmentVariables([string]$p.ProfileImagePath)}}",
+      ' }',
+      " $target=if($args[0] -eq 'own'){@($entries|Where-Object sid -eq $currentSid|Select-Object -First 1)}else{@($entries|Where-Object sid -ne $currentSid|Select-Object -First 1)}",
+      " if(-not $target){Write-Output 'SKIP_NO_PROFILE_REGISTRY_ENTRY';exit 0}",
+      " $StateRoot=Join-Path $target[0].profile 'AppData\\Local\\ChatGPTRemoteCommander'",
+      " $InstallDir=Join-Path $StateRoot 'app'",
+      ownerSnippet,
+      " Write-Output 'SCOPE_ACCEPTED'"
+    ].join('\n'),{mode:0o600});
+    const own=runFile(fixture,['own']); assert.equal(own.status,0,own.stderr);
+    assert.doesNotMatch(own.stdout,/AUTO_UPDATE_WRONG_ACCOUNT_SESSION/);
+    assert.match(own.stdout,/SCOPE_ACCEPTED/);
+    const foreign=runFile(fixture,['foreign']); assert.equal(foreign.status,0,foreign.stderr);
+    assert.match(foreign.stdout,/AUTO_UPDATE_WRONG_ACCOUNT_SESSION/);
+    assert.doesNotMatch(foreign.stdout,/SCOPE_ACCEPTED/);
+  });
 });
 
 test('Windows exclusive installed-path lock prevents concurrent updater processes, then releases', 
