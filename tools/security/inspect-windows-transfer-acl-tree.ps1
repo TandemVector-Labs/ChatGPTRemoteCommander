@@ -34,21 +34,27 @@ try {
   if($null -eq $identity.User){throw 'OBSERVER_SID_MISSING'}
   $sid=$identity.User.Value
   $report.observerIsSystem=($sid -eq 'S-1-5-18')
-  # SYSTEM observers are not necessarily the owner; avoid counting owner ACEs
-  # as third-party access and keep observer/owner mismatch separately visible.
-  $rootOwner=(Get-Acl -LiteralPath $full -ErrorAction Stop).GetOwner(
-    [Security.Principal.SecurityIdentifier]).Value
-  $allowed=@($rootOwner,'S-1-5-18','S-1-5-32-544')
-  $rootItem=Get-Item -LiteralPath $full -Force -ErrorAction Stop
-  if(-not $rootItem.PSIsContainer){throw 'ROOT_NOT_DIRECTORY'}
-  # Root and its existing ancestors may not be redirected by a junction.
-  $anc=$rootItem
-  while($null -ne $anc){
-    if(($anc.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){
+  # Check each lexical component BEFORE touching the caller-selected root.
+  # Get-Item(...).Parent may refer to the target of a redirected path.
+  $driveRoot=[IO.Path]::GetPathRoot($full)
+  $walk=$driveRoot
+  foreach($segment in ($full.Substring($driveRoot.Length) -split '[\\/]')){
+    if(-not $segment){continue}
+    $walk=[IO.Path]::Combine($walk,$segment)
+    $ancestor=Get-Item -LiteralPath $walk -Force -ErrorAction Stop
+    if(($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){
       $report.reparseEntryCount++
       break
     }
-    $anc=$anc.Parent
+  }
+  if($report.reparseEntryCount -eq 0) {
+    $rootItem=Get-Item -LiteralPath $full -Force -ErrorAction Stop
+    if(-not $rootItem.PSIsContainer){throw 'ROOT_NOT_DIRECTORY'}
+    # SYSTEM observers are not necessarily the owner; exclude the actual
+    # root owner SID from unrelated ACE counts, but flag identity mismatch.
+    $rootOwner=(Get-Acl -LiteralPath $full -ErrorAction Stop).GetOwner(
+      [Security.Principal.SecurityIdentifier]).Value
+    $allowed=@($rootOwner,'S-1-5-18','S-1-5-32-544')
   }
   $writeRights=([Security.AccessControl.FileSystemRights]::WriteData -bor
     [Security.AccessControl.FileSystemRights]::AppendData -bor
@@ -63,9 +69,11 @@ try {
     [Security.AccessControl.FileSystemRights]::ReadExtendedAttributes -bor
     [Security.AccessControl.FileSystemRights]::ReadPermissions -bor
     [Security.AccessControl.FileSystemRights]::ExecuteFile)
-  $queue=[Collections.Generic.Stack[string]]::new()
-  $queue.Push($full)
-  while($queue.Count -gt 0) {
+  # If any ancestor is redirected, stop BEFORE enumerating anything under it.
+  if($report.reparseEntryCount -eq 0){
+    $queue=[Collections.Generic.Stack[string]]::new()
+    $queue.Push($full)
+    while($queue.Count -gt 0) {
     if($report.inspectedEntries -ge $MaxEntries){$report.truncated=$true;break}
     $current=$queue.Pop()
     $entry=Get-Item -LiteralPath $current -Force -ErrorAction Stop
@@ -96,6 +104,7 @@ try {
       $children=@(Get-ChildItem -LiteralPath $current -Force -ErrorAction Stop)
       foreach($child in $children){$queue.Push($child.FullName)}
     }
+  }
   }
   $unsafeObserved=(-not $report.rootOwnerIsObserver -or
     -not $report.rootInheritanceProtected -or

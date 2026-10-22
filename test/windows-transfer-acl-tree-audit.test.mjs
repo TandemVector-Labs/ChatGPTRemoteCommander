@@ -70,3 +70,28 @@ test('bounded Windows ACL tree audit finds read-only and mutating descendant gra
   assert.equal(run('\\\\invalid-host\\untrusted\\state').status,3);
  }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
+
+test('redirected ancestor is rejected before its target is enumerated',
+ {skip:process.platform!=='win32'},t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'rc-acl-redirect-'));
+ try {
+  const external=path.join(root,'external');
+  const inner=path.join(external,'inner');
+  fs.mkdirSync(inner,{recursive:true});
+  fs.writeFileSync(path.join(inner,'unread.txt'),'NEVER_READ', 'utf8');
+  const alias=path.join(root,'redirected');
+  try{fs.symlinkSync(external,alias,'junction');}
+  catch(e){
+   if(['EPERM','EACCES','ENOTSUP','EOPNOTSUPP'].includes(e.code)){
+    t.skip('Junction creation unavailable in this Windows test context');return;
+   }
+   throw e;
+  }
+  const report=run(path.join(alias,'inner'));
+  assert.equal(report.status,2,JSON.stringify(report.report));
+  assert.equal(report.report.status,'REVIEW_REQUIRED');
+  assert.ok(report.report.reparseEntryCount>=1);
+  assert.equal(report.report.inspectedEntries,0);
+  assert.equal(fs.readFileSync(path.join(inner,'unread.txt'),'utf8'),'NEVER_READ');
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
