@@ -8,6 +8,8 @@ import { spawn, spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { validateHardwareSelftestEndpoint } from '../tools/hardware-selftest-endpoint.mjs';
+// Ensure the cross-session owner/lock contract executes in the canonical CI suite.
+import './windows-updater-cross-session-lock.test.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const read=f=>fs.readFileSync(path.join(root,f),'utf8');
