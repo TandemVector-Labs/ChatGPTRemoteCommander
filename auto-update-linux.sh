@@ -66,6 +66,17 @@ done
 [[ -z "$EXPECTED_COMMIT" || "$EXPECTED_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]] || { echo 'invalid expected commit' >&2; exit 2; }
 [[ "$DRAIN_TIMEOUT" =~ ^[1-9][0-9]{0,2}$ ]] || { echo 'invalid drain timeout' >&2; exit 2; }
 
+# For exact GitHub-hosted PR SHA qualification, fetch the tested organization
+# commit from its actual source repository. Keep operator/default and historical
+# tag-based upgrade origins unchanged outside this tightly scoped runner context.
+if [[ "${GITHUB_ACTIONS:-}" == true &&
+      "${RUNNER_ENVIRONMENT:-}" == github-hosted &&
+      "${GITHUB_REPOSITORY:-}" == TandemVector-Labs/ChatGPTRemoteCommander &&
+      "$SOURCE_REF" =~ ^[0-9a-f]{40}$ &&
+      "$EXPECTED_COMMIT" == "$SOURCE_REF" ]]; then
+  REPO_URL=https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git
+fi
+
 INSTALL_DIR="$(cd "$INSTALL_DIR" 2>/dev/null && pwd -P || printf '%s' "$INSTALL_DIR")"
 mkdir -p "$RELEASE_ROOT" "$ROUTING_ROOT" "$RUNTIME_ROOT" "$BACKUP_ROOT" "$LOG_DIR"
 

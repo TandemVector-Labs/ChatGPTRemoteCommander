@@ -25,6 +25,19 @@ foreach($requestedProfile in $TargetProfile){
 $TargetProfile=@($TargetProfile|Select-Object -Unique)
 
 $Repo='https://github.com/GOD13emad/ChatGPTRemoteCommander.git'
+# Only an exact GitHub-hosted organization PR commit may use the organization
+# source here. Ordinary installed upgrades and accepted tag rollbacks preserve
+# the historical default origin unless explicitly selected by existing policy.
+$script:HostedExactOrgSourceQualification=(
+  $env:GITHUB_ACTIONS -ceq 'true' -and
+  $env:RUNNER_ENVIRONMENT -ceq 'github-hosted' -and
+  $env:GITHUB_REPOSITORY -ceq 'TandemVector-Labs/ChatGPTRemoteCommander' -and
+  $SourceRef -cmatch '^[0-9a-f]{40}$' -and
+  $ExpectedCommit -ceq $SourceRef
+)
+if($script:HostedExactOrgSourceQualification){
+  $Repo='https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git'
+}
 $StateRoot=Join-Path $env:LOCALAPPDATA 'ChatGPTRemoteCommander'
 $PauseFile=Join-Path $StateRoot 'maintenance\auto-update-paused.json'
 if(-not $Force -and (Test-Path -LiteralPath $PauseFile -PathType Leaf)){
@@ -841,7 +854,10 @@ function Promote-Control([string]$Commit,[string]$Ref){
     if($LASTEXITCODE-ne 0){throw 'CONTROL_TRACKED_DIRTY'}
     Log 'CONTROL_TRACKED_EOL_DRIFT_ACCEPTED'
   }
-  & git.exe -C $InstallDir fetch --no-tags origin $Ref
+  # Source SHA may exist only in the organization repository, while the
+  # immutable accepted baseline installation still points to the legacy fork.
+  $fetchFrom=if($script:HostedExactOrgSourceQualification){$Repo}else{'origin'}
+  & git.exe -C $InstallDir fetch --no-tags $fetchFrom $Ref
   if($LASTEXITCODE-ne 0){throw 'CONTROL_FETCH_FAIL'}
   $resolved=(& git.exe -C $InstallDir rev-parse 'FETCH_HEAD^{commit}').Trim().ToLowerInvariant()
   if($resolved-ne $Commit){throw 'CONTROL_COMMIT_MISMATCH'}
