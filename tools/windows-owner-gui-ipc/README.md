@@ -34,3 +34,21 @@ logged. Only a sanitized read-only signed status is emitted by `probe`.
 
 Do not deploy, auto-start, or convert to a stable GUI feature without
 CODEOWNER review and exact Windows guest/owner-session end-to-end tests.
+
+## Phase 1 optional controller status hook
+
+The review-only src/gui-tools-windows.mjs change accepts a dependency-injected
+ownerSessionStatusProbe. It is called only when Windows native GUI is unavailable,
+the GUI feature itself is enabled, and guiControl.ownerSessionBridgeReadOnly is
+explicitly true. There is no production default provider or automatic agent.
+
+A validated signed status attestation adds a separate ownerSessionBridge field,
+never changes gui_status.available, and never permits gui_session_begin or any
+native screenshot, mouse, keyboard, focus or takeover operation. Invalid data,
+provider failures and emergency stops fail closed. Unit tests and a temporary
+SYSTEM-Core-to-owner-Session1 real IPC test verify these properties.
+
+This hook is not a persistent service, deployment recipe, automatic session
+handoff, GUI takeover bridge, or an authorization to merge into protected main.
+A packaged trusted provider, owner enrollment and full session-switch/lease
+lifecycle review remain required for production.
