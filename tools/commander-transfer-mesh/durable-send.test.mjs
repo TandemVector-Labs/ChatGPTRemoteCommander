@@ -103,3 +103,50 @@ test('durable job-status rejects a symlinked record even under a normal director
   assert.equal(fs.readFileSync(outside,'utf8'),JSON.stringify({id:'audit-record',status:'PUBLISHED'}));
  }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
+
+test('durable worker refuses a staging symlink swapped at descriptor open',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-stage-swap-'));
+ try{
+  const sourceDir=path.join(root,'source'),jobs=path.join(root,'jobs','Linux'),
+    stageDir=path.join(root,'staging','Linux'),id='race-stage-001';
+  fs.mkdirSync(sourceDir);fs.mkdirSync(jobs,{recursive:true});
+  fs.mkdirSync(stageDir,{recursive:true});
+  const external=path.join(root,'outside.bin'),probe=path.join(root,'probe-link');
+  fs.writeFileSync(external,'OUTSIDE_UNCHANGED');
+  try{fs.symlinkSync(external,probe,'file');fs.unlinkSync(probe);}
+  catch(e){if(['EPERM','EACCES','ENOTSUP'].includes(e.code)){t.skip('Symlink creation not permitted');return;}throw e;}
+  fs.writeFileSync(path.join(root,'node.json'),JSON.stringify({alias:'PC'}));
+  const source=path.join(sourceDir,'data.bin'),bytes=Buffer.from('0123456789abcdefghijklmnopqrstuvwxyz');
+  fs.writeFileSync(source,bytes);
+  const stat=fs.statSync(source),part=path.join(stageDir,id+'.part');
+  fs.writeFileSync(part,'');
+  const record=path.join(jobs,id+'.json');
+  const j={schema:'ctmesh-durable-v1',id,peer:'Linux',from:'PC',path:source,
+    sourceRoot:sourceDir,name:'data.bin',bytes:bytes.length,mtimeMs:stat.mtimeMs,
+    ino:stat.ino,dev:stat.dev,copiedBytes:0,status:'QUEUED',createdAt:new Date().toISOString()};
+  fs.writeFileSync(record,JSON.stringify(j));
+  const hookPath=path.join(root,'swap-hook.cjs');
+  fs.writeFileSync(hookPath,[
+   "const fs=require('node:fs');",
+   "const orig=fs.openSync;",
+   "let swapped=false;",
+   "fs.openSync=function(file,flags,...rest){",
+   " const rw=flags==='r+'||(typeof flags==='number'&&(flags&fs.constants.O_RDWR)===fs.constants.O_RDWR);",
+   " if(!swapped&&rw&&String(file)===process.env.RC_SWAP_PART){",
+   "   swapped=true;",
+   "   fs.renameSync(file,file+'.checked');",
+   "   fs.symlinkSync(process.env.RC_SWAP_TARGET,file,'file');",
+   " }",
+   " return orig.call(this,file,flags,...rest);",
+   "};"
+  ].join('\n'));
+  const r=spawnSync(process.execPath,[cli,'work','--peer','Linux','--id',id],{
+   encoding:'utf8',timeout:6000,
+   env:{...process.env,NODE_OPTIONS:'--require '+hookPath,COMMANDER_TRANSFER_HOME:root,
+    RC_SWAP_PART:part,RC_SWAP_TARGET:external}});
+  assert.equal(r.status,0,r.stderr);
+  assert.equal(fs.readFileSync(external,'utf8'),'OUTSIDE_UNCHANGED',
+    'No data may be written through a post-check symlink replacement');
+  assert.equal(JSON.parse(fs.readFileSync(record,'utf8')).status,'FAILED');
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
