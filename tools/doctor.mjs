@@ -2,25 +2,45 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { readBoundedHardwareResponse, MAX_HARDWARE_SELFTEST_RESPONSE_BYTES } from './hardware-selftest-response.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const projectDir = path.resolve(here, '..');
 const packagePath = path.join(projectDir, 'package.json');
 const DEFAULT_ENDPOINT = 'http://127.0.0.1:47831/mcp';
 const DEFAULT_TIMEOUT_MS = 5000;
-const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_RESPONSE_BYTES = MAX_HARDWARE_SELFTEST_RESPONSE_BYTES;
 
 export function validateEndpoint(value) {
+  if (typeof value !== 'string' || value.length > 256 || value.includes('\\')) {
+    throw new Error('doctor endpoint must use a canonical URL');
+  }
   const url = new URL(value);
-  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('doctor endpoint must use http or https');
   if (url.username || url.password) throw new Error('doctor endpoint must not contain credentials');
   if (url.search || url.hash) throw new Error('doctor endpoint must not contain query or fragment');
-  const host = url.hostname.toLowerCase();
-  if (!['127.0.0.1', 'localhost', '::1', '[::1]'].includes(host)) {
-    throw new Error('doctor endpoint must be loopback-only');
+  if (!['127.0.0.1', '[::1]'].includes(url.hostname)) {
+    throw new Error('doctor endpoint must be numeric loopback-only');
   }
-  if (!url.pathname.endsWith('/mcp')) throw new Error('doctor endpoint path must end with /mcp');
+  if (url.protocol !== 'http:') throw new Error('doctor endpoint must use http');
+  if (url.pathname !== '/mcp') throw new Error('doctor endpoint path must be exactly /mcp');
+  const port = Number(url.port);
+  if (!Number.isSafeInteger(port) || port < 1024 || port > 65535) {
+    throw new Error('doctor endpoint must include a nonprivileged explicit port');
+  }
+  if (url.href !== value) throw new Error('doctor endpoint must use a canonical URL');
   return url;
+}
+
+function validateRequestTarget(value) {
+  const url = value instanceof URL ? value : new URL(value);
+  if (url.pathname !== '/mcp' && url.pathname !== '/health') {
+    throw new Error('doctor request target must be /mcp or /health');
+  }
+  const base = validateEndpoint(url.origin + '/mcp');
+  if (url.href !== base.origin + url.pathname) {
+    throw new Error('doctor request target must be canonical');
+  }
+  return url.href;
 }
 
 export function parseArgs(argv) {
@@ -42,19 +62,25 @@ export function parseArgs(argv) {
   return out;
 }
 
-async function readBounded(response) {
+// Bound the streaming body before accumulating bytes, including responses
+// lacking Content-Length. Reuse the already-qualified hardware gate reader.
+export async function readBounded(response) {
   const declared = Number(response.headers.get('content-length') || 0);
   if (declared > MAX_RESPONSE_BYTES) throw new Error('response too large');
-  const text = await response.text();
-  if (Buffer.byteLength(text, 'utf8') > MAX_RESPONSE_BYTES) throw new Error('response too large');
-  return text;
+  try {
+    return await readBoundedHardwareResponse(response);
+  } catch (error) {
+    if (error?.code === 'SELFTEST_RESPONSE_TOO_LARGE') throw new Error('response too large');
+    throw error;
+  }
 }
 
 async function requestJson(url, init, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(url, { ...init, signal: controller.signal, redirect: 'error' });
+    const target = validateRequestTarget(url);
+    const response = await fetch(target, { ...init, signal: controller.signal, redirect: 'error' });
     const text = await readBounded(response);
     if (!response.ok) throw new Error(`HTTP ${response.status}: ${text.slice(0, 300)}`);
     return text ? JSON.parse(text) : null;

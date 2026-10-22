@@ -218,3 +218,51 @@ test('real child-process kill during final receive safely resumes a verified pre
   assert.match(repeated.stderr,/Destination exists/);
  });
 });
+
+test('managed pairs ancestor symlink cannot read or write outside pilot root',t=>{
+ withFixtures(src=>{
+  const outside=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-pilot-outside-'));
+  try{
+   fs.mkdirSync(path.join(src,'pairs'));
+   try{fs.symlinkSync(outside,path.join(src,'pairs','Linux'),'dir');}
+   catch(e){if(['EPERM','EACCES','ENOTSUP'].includes(e.code)){t.skip('Symlinks unavailable');return;}throw e;}
+   const file=path.join(src,'sender.txt');fs.writeFileSync(file,'sensitive outside write check');
+   const write=run(src,'send','--peer','Linux','--id','outside-write-001','--path',file);
+   assert.notEqual(write.status,0);
+   assert.match(write.stderr,/CTMESH_MANAGED_PATH_UNSAFE/);
+   assert.deepEqual(fs.readdirSync(outside),[]);
+   const read=run(src,'status','--peer','Linux','--id','outside-read-001');
+   assert.notEqual(read.status,0);
+   assert.match(read.stderr,/CTMESH_MANAGED_PATH_UNSAFE/);
+  }finally{fs.rmSync(outside,{recursive:true,force:true});}
+ });
+});
+test('managed manifest symlink cannot be used as an incoming transfer',t=>{
+ withFixtures((src,dst)=>{
+  const id='manifest-link-001';send(src,id,Buffer.from('allowed'));
+  const incoming=mirror(src,dst,id),outside=path.join(dst,'external-manifest.json');
+  fs.copyFileSync(path.join(incoming,'manifest.json'),outside);
+  fs.unlinkSync(path.join(incoming,'manifest.json'));
+  try{fs.symlinkSync(outside,path.join(incoming,'manifest.json'),'file');}
+  catch(e){if(['EPERM','EACCES','ENOTSUP'].includes(e.code)){t.skip('Symlinks unavailable');return;}throw e;}
+  const read=run(dst,'status','--peer','PC','--id',id);
+  assert.notEqual(read.status,0);
+  assert.match(read.stderr,/CTMESH_MANAGED_PATH_UNSAFE/);
+  assert.equal(fs.existsSync(path.join(dst,'received')),false);
+ });
+});
+test('managed staging symlink rejects outgoing transfer before touching external folder',t=>{
+ withFixtures(src=>{
+  const outside=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-stage-outside-'));
+  try{
+   fs.mkdirSync(path.join(src,'staging'));
+   try{fs.symlinkSync(outside,path.join(src,'staging','Linux'),'dir');}
+   catch(e){if(['EPERM','EACCES','ENOTSUP'].includes(e.code)){t.skip('Symlinks unavailable');return;}throw e;}
+   const file=path.join(src,'input.bin');fs.writeFileSync(file,'sample');
+   const sendResult=run(src,'send','--peer','Linux','--id','stage-path-001','--path',file);
+   assert.notEqual(sendResult.status,0);
+   assert.match(sendResult.stderr,/CTMESH_MANAGED_PATH_UNSAFE/);
+   assert.deepEqual(fs.readdirSync(outside),[]);
+  }finally{fs.rmSync(outside,{recursive:true,force:true});}
+ });
+});

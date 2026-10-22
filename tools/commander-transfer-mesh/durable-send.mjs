@@ -6,6 +6,37 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+// This worker is copied to COMMANDER_TRANSFER_HOME/durable-send.mjs on hosts.
+// Keep the minimal path-root guard self-contained so a copied worker can run
+// without relative source-tree dependencies.
+function assertUnredirectedDirectoryAncestors(input,code='MANAGED_PATH_UNSAFE'){
+ if(typeof input!=='string'||!path.isAbsolute(input))throw Error(code);
+ const normalized=path.normalize(input);
+ // An absolute Windows path may still refer to a network or device namespace.
+ // Operator state must be on a local drive, not a UNC/device namespace.
+ if(process.platform==='win32'&&!/^[A-Za-z]:[\\/]/.test(normalized))throw Error(code);
+ const anchor=path.parse(normalized).root;
+ let cur=anchor;
+ let verifiedRoot;
+ for(const part of path.relative(anchor,normalized).split(path.sep)){
+  if(!part||part==='.')continue;
+  cur=path.join(cur,part);
+  try{
+   const st=fs.lstatSync(cur);
+   if(st.isSymbolicLink()||!st.isDirectory())throw Error(code);
+   if(cur===normalized)verifiedRoot=st;
+  }catch(e){if(e.code==='ENOENT')continue;throw Error(code);}
+ }
+ // Require the owner-selected POSIX transfer root to be private before
+ // any peer identity, journal or payload access. Windows ACL validation is
+ // separate and cannot be inferred from POSIX uid/mode fields.
+ if(process.platform!=='win32'&&typeof process.getuid==='function'){
+  // Reuse the already validated final ancestor stat; avoid a second lookup.
+  if(!verifiedRoot||verifiedRoot.uid!==process.getuid()||
+     (verifiedRoot.mode&0o077)!==0)
+   throw Error(code);
+ }
+}
 process.umask(0o077);
 const root=path.resolve(process.env.COMMANDER_TRANSFER_HOME||(
  process.platform==='win32'?path.join(process.env.LOCALAPPDATA||path.join(os.homedir(),'AppData','Local'),'CommanderTransferPilot'):path.join(os.homedir(),'.local','share','commander-transfer-pilot')));
@@ -15,13 +46,83 @@ const [command,...args]=process.argv.slice(2);
 const opt=k=>{const i=args.indexOf('--'+k);return i<0?undefined:args[i+1];};
 const assertion=(test,code)=>{if(!test)throw Error(code);};
 const within=(file,base)=>{const rel=path.relative(base,file);return rel===''||(rel!=='..'&&!rel.startsWith('..'+path.sep)&&!path.isAbsolute(rel));};
+// All managed paths are within the operator-selected private transfer root.
+// A symlink in an internal ancestor or journal can escape that root even if
+// peer/id pass allow-list validation. Reject it before reading or writing.
+function assertManagedEntry(file, directory){
+ let st;
+ try { st=fs.lstatSync(file); }
+ catch(e){ if(e.code==='ENOENT')return; throw e; }
+ assertion(!st.isSymbolicLink() && (directory ? st.isDirectory() : st.isFile() && st.nlink===1),
+   'TRANSFER_MANAGED_PATH_UNSAFE');
+}
 function safePaths(peer,id){
  assertion(peers.includes(peer)&&re.test(String(id||'')),'INVALID_TRANSFER_ID_OR_PEER');
  const jobDir=path.join(root,'jobs',peer);
  const stageDir=path.join(root,'staging',peer);
- return {jobDir,stageDir,record:path.join(jobDir,id+'.json'),lock:path.join(jobDir,id+'.lock'),part:path.join(stageDir,id+'.part'),destination:path.join(root,'pairs',peer,'transfers',id)};
+ const destination=path.join(root,'pairs',peer,'transfers',id);
+ const record=path.join(jobDir,id+'.json'),lock=path.join(jobDir,id+'.lock'),part=path.join(stageDir,id+'.part');
+ // The root itself is chosen by the owner; forbid redirection below it.
+ for(const dir of [path.join(root,'jobs'),jobDir,path.join(root,'staging'),stageDir,
+  path.join(root,'pairs'),path.join(root,'pairs',peer),path.dirname(destination),destination])
+  assertManagedEntry(dir,true);
+ for(const file of [record,lock,part,path.join(destination,'payload.bin'),path.join(destination,'manifest.json')])
+  assertManagedEntry(file,false);
+ return {jobDir,stageDir,record,lock,part,destination};
 }
-const recordRead=p=>JSON.parse(fs.readFileSync(p.record,'utf8'));
+// On Linux, open each managed ancestor relative to the previous held
+// directory descriptor. /proc/self/fd pins the directory object even after a
+// pathname rename. O_DIRECTORY|O_NOFOLLOW rejects substituted symlink parents.
+// This is a Linux-only data-plane mitigation; Windows needs native handle-
+// relative NtCreateFile + protected ACLs, not a path-based approximation.
+function withLinuxPinnedPath(file,read){
+ if(process.platform!=='linux'||!within(file,root))return read(file);
+ const rel=path.relative(root,file),parts=rel.split(path.sep);
+ assertion(parts.length>=1&&parts.every(x=>x&&x!=='.'&&x!=='..'),'UNTRUSTED_MANAGED_ANCESTOR');
+ const flags=fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_NOFOLLOW;
+ const fds=[];
+ try{
+  fds.push(fs.openSync(root,flags));
+  for(const part of parts.slice(0,-1)){
+   const next=fs.openSync('/proc/self/fd/'+fds[fds.length-1]+'/'+part,flags);
+   assertion(fs.fstatSync(next).isDirectory(),'UNTRUSTED_MANAGED_ANCESTOR');
+   fds.push(next);
+  }
+  return read('/proc/self/fd/'+fds[fds.length-1]+'/'+parts.at(-1));
+ }finally{for(let i=fds.length-1;i>=0;i--)fs.closeSync(fds[i]);}
+}
+// Do not reopen a preflight-checked journal via a pathname. A peer that can
+// replace a managed record between lstat and read must not forge job status.
+// Keep the journal bounded and attach bytes to a stable regular-file descriptor.
+function recordRead(p){
+ return withLinuxPinnedPath(p.record,(name)=>{
+ const before=fs.lstatSync(name);
+ assertion(before.isFile()&&!before.isSymbolicLink()&&before.nlink===1&&
+   before.size>=1&&before.size<=131072,'UNTRUSTED_JOB_RECORD');
+ const flags=fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW??0)|(fs.constants.O_NONBLOCK??0);
+ const fd=fs.openSync(name,flags);
+ try{
+  const opened=fs.fstatSync(fd);
+  assertion(opened.isFile()&&opened.nlink===1&&opened.size===before.size&&
+    opened.dev===before.dev&&opened.ino===before.ino,
+    'UNTRUSTED_JOB_RECORD');
+  const bytes=Buffer.alloc(opened.size);
+  let at=0;
+  while(at<bytes.length){
+   const n=fs.readSync(fd,bytes,at,bytes.length-at,at);
+   assertion(n>0,'UNTRUSTED_JOB_RECORD');
+   at+=n;
+  }
+  const after=fs.fstatSync(fd),named=fs.lstatSync(name);
+  assertion(after.dev===opened.dev&&after.ino===opened.ino&&after.size===opened.size&&
+    after.mtimeMs===opened.mtimeMs&&after.ctimeMs===opened.ctimeMs&&
+    named.isFile()&&!named.isSymbolicLink()&&named.nlink===1&&
+    named.dev===opened.dev&&named.ino===opened.ino&&named.size===opened.size&&
+    named.mtimeMs===opened.mtimeMs&&named.ctimeMs===opened.ctimeMs,
+    'UNTRUSTED_JOB_RECORD');
+  return JSON.parse(bytes.toString('utf8'));
+ }finally{fs.closeSync(fd);} });
+}
 function atomicRename(from,to){
  let last;
  const sleeper=new Int32Array(new SharedArrayBuffer(4));
@@ -63,7 +164,7 @@ function enforceAdmission(bytes){
   for(const item of fs.readdirSync(path.join(dir,peerDir.name),{withFileTypes:true})){
    if(!item.name.endsWith('.json'))continue;
    assertion(item.isFile()&&!item.isSymbolicLink(),'QUEUE_RECORD_UNSAFE');
-   const j=JSON.parse(fs.readFileSync(path.join(dir,peerDir.name,item.name),'utf8'));
+   const j=recordRead({record:path.join(dir,peerDir.name,item.name)});
    assertion(Number.isSafeInteger(j.bytes)&&j.bytes>=0,'QUEUE_RECORD_INVALID');
    if(['PUBLISHED','CANCELLED'].includes(j.status))continue;
    pending+=j.bytes;
@@ -96,9 +197,32 @@ function launch(p){
  return child.pid;
 }
 function hash(file){
- const sha=crypto.createHash('sha256'),fd=fs.openSync(file,'r'),buf=Buffer.allocUnsafe(4*1024*1024);
- try{for(let n;(n=fs.readSync(fd,buf,0,buf.length,null))>0;)sha.update(buf.subarray(0,n));}finally{fs.closeSync(fd);}
- return sha.digest('hex');
+ // Hash the same regular file observed before and after descriptor open.
+ // A preflight pathname check alone does not pin a published payload/source.
+ const before=fs.lstatSync(file);
+ assertion(before.isFile()&&!before.isSymbolicLink()&&before.nlink===1,'UNTRUSTED_HASH_FILE');
+ const flags=fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW??0)|(fs.constants.O_NONBLOCK??0);
+ const fd=fs.openSync(file,flags);
+ try{
+  const opened=fs.fstatSync(fd),named=fs.lstatSync(file);
+  assertion(opened.isFile()&&opened.nlink===1&&
+    opened.dev===before.dev&&opened.ino===before.ino&&opened.size===before.size&&
+    opened.mtimeMs===before.mtimeMs&&opened.ctimeMs===before.ctimeMs&&
+    named.isFile()&&!named.isSymbolicLink()&&named.nlink===1&&
+    named.dev===opened.dev&&named.ino===opened.ino,
+    'UNTRUSTED_HASH_FILE');
+  const sha=crypto.createHash('sha256'),buf=Buffer.allocUnsafe(4*1024*1024);
+  for(let n;(n=fs.readSync(fd,buf,0,buf.length,null))>0;)sha.update(buf.subarray(0,n));
+  const after=fs.fstatSync(fd),namedAfter=fs.lstatSync(file);
+  assertion(after.dev===opened.dev&&after.ino===opened.ino&&after.size===opened.size&&
+    after.mtimeMs===opened.mtimeMs&&after.ctimeMs===opened.ctimeMs&&
+    namedAfter.isFile()&&!namedAfter.isSymbolicLink()&&namedAfter.nlink===1&&
+    namedAfter.dev===opened.dev&&namedAfter.ino===opened.ino&&
+    namedAfter.size===opened.size&&namedAfter.mtimeMs===opened.mtimeMs&&
+    namedAfter.ctimeMs===opened.ctimeMs,
+    'UNTRUSTED_HASH_FILE');
+  return sha.digest('hex');
+ }finally{fs.closeSync(fd);}
 }
 function noExistingArtifact(p){assertion(!fs.existsSync(p.destination),'TRANSFER_ALREADY_PUBLISHED');}
 function copyJob(p,j){
@@ -112,18 +236,33 @@ function copyJob(p,j){
   assertion(hash(existingPayload)===verified,'PUBLISHED_PAYLOAD_HASH_MISMATCH');
   const expected={schema:'ctmesh-v1',id:j.id,from:j.from,to:j.peer,name:j.name,bytes:j.bytes,sha256:verified,createdAt:j.createdAt};
   if(fs.existsSync(existingManifest)){
-    const m=JSON.parse(fs.readFileSync(existingManifest,'utf8'));
+    const m=recordRead({record:existingManifest});
     assertion(JSON.stringify(m)===JSON.stringify(expected),'PUBLISHED_MANIFEST_DIFFERENT');
   }else{fs.writeFileSync(existingManifest,JSON.stringify(expected)+'\n',{flag:'wx',mode:0o600});}
   j.sha256=verified;j.copiedBytes=j.bytes;j.status='PUBLISHED';save(p,j);return;
  }
- if(fs.existsSync(p.part))assertion(fs.lstatSync(p.part).isFile()&&!fs.lstatSync(p.part).isSymbolicLink(),'BAD_PARTIAL_FILE');
- const input=fs.openSync(source,'r');
- const out=fs.openSync(p.part,fs.existsSync(p.part)?'r+':'wx+',0o600);
- let offset=fs.fstatSync(out).size;
- assertion(offset<=j.bytes,'PARTIAL_TOO_LARGE');
- const buf=Buffer.allocUnsafe(4*1024*1024);
+ // Pin the resumed part and the source to the files checked by preflight.
+ // An attacker must not be able to swap a named part for a symlink between
+ // lstat and open, causing writes outside the operator's private staging root.
+ const existingPart=fs.existsSync(p.part)?fs.lstatSync(p.part):null;
+ if(existingPart)assertion(existingPart.isFile()&&!existingPart.isSymbolicLink()&&existingPart.nlink===1,'BAD_PARTIAL_FILE');
+ const inputFlags=fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW??0)|(fs.constants.O_NONBLOCK??0);
+ const input=fs.openSync(source,inputFlags);
+ let out;
  try{
+  const sourceInfo=fs.fstatSync(input);
+  assertion(sourceInfo.isFile()&&sourceInfo.dev===j.dev&&sourceInfo.ino===j.ino&&
+    sourceInfo.size===j.bytes&&sourceInfo.mtimeMs===j.mtimeMs,'SOURCE_CHANGED');
+  const resumeFlags=fs.constants.O_RDWR|(fs.constants.O_NOFOLLOW??0)|(fs.constants.O_NONBLOCK??0);
+  out=fs.openSync(p.part,existingPart?resumeFlags:'wx+',0o600);
+  const opened=fs.fstatSync(out),named=fs.lstatSync(p.part);
+  assertion(opened.isFile()&&opened.nlink===1&&named.isFile()&&!named.isSymbolicLink()&&
+    named.nlink===1&&opened.dev===named.dev&&opened.ino===named.ino&&
+    (!existingPart||(opened.dev===existingPart.dev&&opened.ino===existingPart.ino&&
+      opened.size===existingPart.size)),'BAD_PARTIAL_FILE');
+  let offset=opened.size;
+  assertion(offset<=j.bytes,'PARTIAL_TOO_LARGE');
+  const buf=Buffer.allocUnsafe(4*1024*1024);
   j.status='COPYING';j.pid=process.pid;j.copiedBytes=offset;save(p,j);
   while(offset<j.bytes){
    // A cancellation is durable, not an OS-level termination of a shared process.
@@ -136,7 +275,7 @@ function copyJob(p,j){
    if(offset-j.copiedBytes>=16*1024*1024 || offset===j.bytes){fs.fsyncSync(out);j.copiedBytes=offset;save(p,j);}
   }
   fs.fsyncSync(out);
- }finally{fs.closeSync(input);fs.closeSync(out);}
+ }finally{if(out!==undefined)fs.closeSync(out);fs.closeSync(input);}
  checkInput(j);
  j.status='VERIFYING';j.copiedBytes=j.bytes;save(p,j);
  const sourceSha=hash(source),partSha=hash(p.part);
@@ -179,7 +318,7 @@ function inspect(p){
  if(['COPYING','VERIFYING','QUEUED'].includes(j.status) && (
     (j.pid && !running(j.pid)) ||
     (!j.pid && Date.now()-Date.parse(j.createdAt)>30000 && (
-      !fs.existsSync(p.lock)||!running(JSON.parse(fs.readFileSync(p.lock,'utf8')).pid)
+      !fs.existsSync(p.lock)||!running(recordRead({record:p.lock}).pid)
     ))
   )){
   j.status='INTERRUPTED';j.errorCode='WORKER_EXITED';save(p,j);
@@ -191,6 +330,9 @@ try{
   reply({schema:'ctmesh-durable-v1',contractVersion:2,admissionQuotas:true,
     supports:['enqueue','job-status','resume','cancel'],workerPersistence:true,hashVerification:'sha256'});
  }else{
+ if(process.env.COMMANDER_TRANSFER_HOME && !path.isAbsolute(process.env.COMMANDER_TRANSFER_HOME))
+  throw Error('TRANSFER_MANAGED_PATH_UNSAFE'); // Explicit relative roots must not be rebased onto an arbitrary cwd.
+ assertUnredirectedDirectoryAncestors(root,'TRANSFER_MANAGED_PATH_UNSAFE');
  const peer=opt('peer'),id=opt('id'),p=safePaths(peer,id);
  if(command==='enqueue'){
   const source=opt('path'),sourceRoot=opt('source-root');
@@ -199,7 +341,7 @@ try{
   assertion(within(real,allow),'SOURCE_PATH_NOT_ALLOWED');
   const st=fs.lstatSync(real);assertion(st.isFile()&&!st.isSymbolicLink(),'SOURCE_NOT_REGULAR');
   assertion(!/[\\/:*?"<>|\x00-\x1f]/.test(path.basename(real)),'UNSAFE_FILENAME');
-  const node=JSON.parse(fs.readFileSync(path.join(root,'node.json'),'utf8'));
+  const node=recordRead({record:path.join(root,'node.json')});
   assertion(peers.includes(node.alias)&&node.alias!==peer,'LOCAL_IDENTITY_INVALID');
   const jobsRoot=path.join(root,'jobs');
   fs.mkdirSync(jobsRoot,{recursive:true});
@@ -227,7 +369,7 @@ try{
  }else if(command==='resume'){
   const j=inspect(p);
   assertion(['FAILED','INTERRUPTED'].includes(j.status),'NOT_RESUMABLE');
-  if(fs.existsSync(p.lock)){const old=JSON.parse(fs.readFileSync(p.lock,'utf8'));assertion(!running(old.pid),'JOB_STILL_RUNNING');fs.rmSync(p.lock);}
+  if(fs.existsSync(p.lock)){const old=recordRead({record:p.lock});assertion(!running(old.pid),'JOB_STILL_RUNNING');fs.rmSync(p.lock);}
   checkInput(j);
   j.status='QUEUED';j.errorCode=null;j.pid=null;save(p,j);
   launch(p);reply(summary(j));

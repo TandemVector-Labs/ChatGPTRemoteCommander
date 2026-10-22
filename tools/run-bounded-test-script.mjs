@@ -130,6 +130,64 @@ export function isolateWindowsAgentHttpRegression(command) {
   return 'node --test --test-concurrency=1 '+file+' && '+parts.join(' && ');
 }
 
+/**
+ * CI Windows: preserve the exact 200x25ms readiness checks of the Transfer
+ * Mesh HTTP server while giving this owned loopback fixture one standalone
+ * test process before high-volume test batches. No deadlines, tool scopes,
+ * assertions or native transfer behavior are changed.
+ */
+export function isolateWindowsTransferMeshHttpRegression(command) {
+  if(typeof command!=='string'||!command)throw new Error('CI_TRANSFER_HTTP_COMMAND_INVALID');
+  const file='test/transfer-mesh-http.test.mjs';
+  if(command.split(file).length-1!==1)throw new Error('CI_TRANSFER_HTTP_CARDINALITY');
+  const parts=command.split(' && ');
+  const index=parts.findIndex(part=>part.startsWith('node --test --test-concurrency=1 ')&&part.includes(' '+file));
+  if(index<0)throw new Error('CI_TRANSFER_HTTP_BATCH_NOT_FOUND');
+  const original=parts[index],after=original.replace(' '+file,'');
+  if(after===original||after.includes(file)||!after.startsWith('node --test --test-concurrency=1 test/'))
+    throw new Error('CI_TRANSFER_HTTP_ISOLATION_INVALID');
+  parts[index]=after;
+  return 'node --test --test-concurrency=1 '+file+' && '+parts.join(' && ');
+}
+
+/**
+ * R157-only observation of the exact Windows qualification command chain.
+ * Mark the start/pass of each original command without changing the command,
+ * timeouts, test coverage or any production execution path. Only the isolated
+ * updater's RC_QUALIFICATION_RUN_ID opt-in enables these public numeric markers.
+ */
+export function markIsolatedQualificationPhases(command) {
+  if(typeof command!=='string'||!command)throw new Error('R157_PHASE_COMMAND_INVALID');
+  const parts=command.split(' && ');
+  if(parts.length<2||parts.length>90||parts.some(p=>!p.startsWith('node ')))
+    throw new Error('R157_PHASE_COMMAND_SHAPE_INVALID');
+  const marked=parts.map((part,index)=>{
+    const number=String(index).padStart(2,'0');
+    return 'echo RC_QUAL_PHASE_START_'+number+' && '+part+' && echo RC_QUAL_PHASE_PASS_'+number;
+  }).join(' && ');
+  if(marked.length>7500)throw new Error('R157_PHASE_WINDOWS_CMD_LENGTH');
+  return marked;
+}
+
+/**
+ * Windows qualification: run the real two-process workflow-plan SQLite race
+ * tests before the loaded crash/HTTP suites. The original short contention
+ * bounds and exact assertions remain unchanged; cardinality fails closed.
+ */
+export function isolateWindowsWorkflowPlanRegression(command) {
+  if(typeof command!=='string'||!command)throw new Error('CI_WORKFLOW_PLAN_COMMAND_INVALID');
+  const file='test/workflow-plan.test.mjs';
+  if(command.split(file).length-1!==1)throw new Error('CI_WORKFLOW_PLAN_CARDINALITY');
+  const parts=command.split(' && ');
+  const index=parts.findIndex(part=>part.startsWith('node --test --test-concurrency=1 ')&&part.includes(' '+file));
+  if(index<0)throw new Error('CI_WORKFLOW_PLAN_BATCH_NOT_FOUND');
+  const original=parts[index],after=original.replace(' '+file,'');
+  if(after===original||after.includes(file)||!after.startsWith('node --test --test-concurrency=1 test/'))
+    throw new Error('CI_WORKFLOW_PLAN_ISOLATION_INVALID');
+  parts[index]=after;
+  return 'node --test --test-concurrency=1 '+file+' && '+parts.join(' && ');
+}
+
 export function parseQualificationArgs(argv){
   const out={script:null,concurrency:null,prioritizeSensitive:false};
   for(let i=0;i<argv.length;i++){
@@ -144,6 +202,42 @@ export function parseQualificationArgs(argv){
   return out;
 }
 
+/**
+ * Accept only repository-owned Node qualification commands, not arbitrary shell source.
+ * R157 phase markers become bounded console output instead of shell commands.
+ */
+export function parseNodeQualificationPlan(command) {
+  if(typeof command!=='string'||!command||command.length>20000)
+    throw new Error('CI_TEST_COMMAND_INVALID');
+  const parts=command.split(' && ');
+  if(!parts.length||parts.some(part=>!part||part!==part.trim()))
+    throw new Error('CI_TEST_COMMAND_SHAPE_INVALID');
+  return parts.map(part=>{
+    if(/^echo RC_QUAL_PHASE_(?:START|PASS)_[0-9]{2}$/.test(part))
+      return {kind:'marker',value:part.slice('echo '.length)};
+    const tokens=part.split(' ');
+    if(tokens[0]!=='node'||tokens.some(x=>!x))
+      throw new Error('CI_TEST_COMMAND_NOT_NODE');
+    let fileStart=1;
+    if(tokens[1]==='--test'){
+      fileStart=2;
+      if(/^--test-concurrency=[1-8]$/.test(tokens[2]??''))fileStart=3;
+      else if(tokens[2]?.startsWith('--'))throw new Error('CI_TEST_OPTION_INVALID');
+    }else if(tokens[1]==='--check'){
+      fileStart=2;
+      if(tokens.length!==3)throw new Error('CI_TEST_CHECK_CARDINALITY');
+    }else if(tokens[1]?.startsWith('--'))throw new Error('CI_TEST_OPTION_INVALID');
+    const files=tokens.slice(fileStart);
+    const isOwnedSource=file=>{
+      if(!/^(?:src|test|tools)\/[a-zA-Z0-9._/-]+\.mjs$/.test(file))return false;
+      return file.split('/').every(part=>part!=='.'&&part!=='..'&&part.length>0);
+    };
+    if(!files.length||!files.every(isOwnedSource))
+      throw new Error('CI_TEST_SOURCE_PATH_INVALID');
+    return {kind:'node',args:tokens.slice(1)};
+  });
+}
+
 function run(){
   const args=parseQualificationArgs(process.argv.slice(2));
   const pkg=JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8'));
@@ -155,17 +249,35 @@ function run(){
   let command=prioritizeSensitive?prioritizeSensitiveQualificationCommands(bounded.command):bounded.command;
   if(process.platform==='win32') command=isolateWindowsAgentHttpRegression(command);
   if(args.script==='test'&&process.platform==='win32'){
+    // Compose from broad groups to single-fixture priority: the last prefix
+    // executes first. Scheduler cold-start must precede resource-heavy suites.
+    // Keep WorkflowPlan first, then start adaptive before the other loaded
+    // crash/HTTP fixtures; retain every original test and strict deadlines.
+    command=isolateWindowsProcessTreeRegression(command);
+    command=isolateWindowsTransferMeshHttpRegression(command);
     command=isolateWindowsLeaseRegression(command);
     command=isolateWindowsTimingSensitiveRegressions(command);
-    command=isolateWindowsProcessTreeRegression(command);
+    command=isolateWindowsWorkflowPlanRegression(command);
   }
+  if(process.platform==='win32'&&args.script==='test'&&process.env.RC_QUALIFICATION_RUN_ID)
+    command=markIsolatedQualificationPhases(command);
   console.log('CI_TEST_CONCURRENCY script='+args.script+' requestedConcurrency='+requestedConcurrency+' effectiveConcurrency='+effectiveConcurrency+' replacements='+bounded.replacements+' prioritizeSensitive='+prioritizeSensitive);
-  const child=process.platform==='win32'
-    ? spawnSync(process.env.ComSpec||'cmd.exe',['/d','/s','/c',command],{cwd:root,env:process.env,stdio:'inherit'})
-    : spawnSync('/bin/sh',['-lc',command],{cwd:root,env:process.env,stdio:'inherit'});
-  if(child.error)throw child.error;
-  if(child.signal)throw new Error(`CI_TEST_SIGNAL_${child.signal}`);
-  process.exitCode=Number.isInteger(child.status)?child.status:1;
+  // Parse all commands before starting any child. Never invoke an OS shell.
+  const plan=parseNodeQualificationPlan(command);
+  for(const step of plan){
+    if(step.kind==='marker'){console.log(step.value);continue;}
+    const child=spawnSync(process.execPath,step.args,{
+      cwd:root,env:process.env,stdio:'inherit',windowsHide:true,shell:false
+    });
+    if(child.error)throw child.error;
+    if(child.signal)throw new Error('CI_TEST_SIGNAL_'+child.signal);
+    if(!Number.isInteger(child.status)||child.status!==0){
+      process.exitCode=Number.isInteger(child.status)?child.status:1;
+      return;
+    }
+  }
+  process.exitCode=0;
+
 }
 
 if(process.argv[1]&&path.resolve(process.argv[1])===path.resolve(self)){

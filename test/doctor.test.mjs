@@ -5,17 +5,52 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
-import { parseArgs, runDoctor, validateEndpoint } from '../tools/doctor.mjs';
+import { parseArgs, runDoctor, validateEndpoint, readBounded } from '../tools/doctor.mjs';
 
 test('validateEndpoint accepts loopback MCP URLs', () => {
   assert.equal(validateEndpoint('http://127.0.0.1:47831/mcp').hostname, '127.0.0.1');
-  assert.equal(validateEndpoint('http://localhost:47831/mcp').hostname, 'localhost');
+  assert.equal(validateEndpoint('http://[::1]:47831/mcp').hostname, '[::1]');
 });
 
 test('validateEndpoint rejects remote hosts and URL secrets', () => {
   assert.throws(() => validateEndpoint('https://example.com/mcp'), /loopback-only/);
   assert.throws(() => validateEndpoint('http://user:pass@127.0.0.1:47831/mcp'), /credentials/);
   assert.throws(() => validateEndpoint('http://127.0.0.1:47831/mcp?token=x'), /query/);
+});
+
+test('doctor rejects noncanonical, DNS, privileged-port and path-confusion targets', () => {
+  for (const address of [
+    'http://localhost:47831/mcp',
+    'http://example.invalid:47831/mcp',
+    'https://127.0.0.1:47831/mcp',
+    'http://0x7f000001:47831/mcp',
+    'http://127.0.0.1/mcp',
+    'http://127.0.0.1:80/mcp',
+    'http://127.0.0.1:47831/foo/mcp',
+    'http://127.0.0.1:47831/mcp/',
+    'http://127.0.0.1:47831/mcp?secret=a',
+    'http://127.0.0.1:47831/mcp#fragment',
+    'http://127.0.0.1:47831/mcp\\host',
+    'file:///etc/passwd'
+  ]) {
+    assert.throws(() => validateEndpoint(address), undefined, address);
+  }
+});
+
+test('doctor rejects unsafe endpoint before making any HTTP request', async () => {
+  let hits = 0;
+  const server = http.createServer((_req, res) => { hits += 1; res.end('{}'); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const port = server.address().port;
+    await assert.rejects(
+      () => runDoctor({ endpoint: `http://127.0.0.1:${port}/foo/mcp` }),
+      /exactly \/mcp/
+    );
+    assert.equal(hits, 0);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
 });
 
 test('parseArgs enforces timeout bounds and known arguments', () => {
@@ -106,4 +141,73 @@ test('runDoctor reports missing core tool', async () => {
     assert.equal(report.ok, false);
     assert.match(report.checks.find((item) => item.name === 'tools/list').detail, /missing:/);
   });
+});
+
+test('doctor bounds actual streamed HTTP response bytes before retention', async () => {
+  const limit=2*1024*1024;
+  let chunks=0,closed=false,textCalled=0;
+  const body=(async function*(){
+    try{
+      chunks++;yield Buffer.alloc(limit-2,0x61);
+      chunks++;yield Buffer.alloc(3,0x62);
+      chunks++;yield Buffer.from('THIS_MUST_NOT_BE_READ');
+    }finally{closed=true;}
+  })();
+  await assert.rejects(readBounded({headers:{get:()=>null},body,text:async()=>{textCalled++;throw new Error('unbounded');}}),/response too large/);
+  assert.equal(chunks,2);
+  assert.equal(closed,true);
+  assert.equal(textCalled,0,'response.text must not buffer attacker-controlled body');
+});
+
+test('doctor rejects a single oversized chunk before retaining it', async () => {
+  let chunks=0;
+  const response={headers:{get:()=>null},body:(async function*(){
+    chunks++;yield Buffer.alloc(2*1024*1024+1);
+    chunks++;yield Buffer.from('unreachable');
+  })()};
+  await assert.rejects(readBounded(response),/response too large/);
+  assert.equal(chunks,1);
+});
+
+test('doctor honors early Content-Length cap without reading the response', async () => {
+  let reads=0;
+  const response={headers:{get:()=>String(2*1024*1024+1)},body:(async function*(){reads++;yield Buffer.from('never');})()};
+  await assert.rejects(readBounded(response),/response too large/);
+  assert.equal(reads,0);
+});
+
+test('doctor accepts exact streamed byte cap with split UTF-8 and zero-length body', async () => {
+  const limit=2*1024*1024;
+  const prefix=Buffer.from('سلام','utf8');
+  const body={headers:{get:()=>null},body:(async function*(){
+    yield prefix.subarray(0,3);yield prefix.subarray(3);yield Buffer.alloc(limit-prefix.length,0x61);
+  })()};
+  const output=await readBounded(body);
+  assert.equal(Buffer.byteLength(output),limit);
+  assert(output.startsWith('سلام'));
+  assert.equal(await readBounded({headers:{get:()=>null},body:null}),'');
+});
+
+test('doctor uses the bounded reader for every fetch path without network', async () => {
+  const original=globalThis.fetch;
+  let invoked=0,readBytes=0,closed=0;
+  globalThis.fetch=async()=>({
+    headers:{get:()=>null},ok:true,status:200,
+    body:(async function*(){
+      try{
+        invoked++;yield Buffer.alloc(2*1024*1024,0x61);
+        readBytes+=2*1024*1024;
+        yield Buffer.alloc(1,0x62);
+      }finally{closed++;}
+    })(),
+    text:()=>{throw new Error('UNBOUNDED_RESPONSE_TEXT_CALLED');}
+  });
+  try{
+    const report=await runDoctor({endpoint:'http://127.0.0.1:47831/mcp',timeoutMs:500});
+    assert.equal(report.ok,false);
+    assert.equal(report.checks.filter(x=>x.detail==='response too large').length,3);
+    assert.equal(invoked,3);
+    assert.equal(readBytes,3*2*1024*1024);
+    assert.equal(closed,3);
+  }finally{globalThis.fetch=original;}
 });

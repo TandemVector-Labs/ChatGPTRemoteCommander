@@ -209,16 +209,17 @@ writeStatus(true, { lastRotationReason: rotations ? 'startup-legacy-oversize' : 
 
 const [exe, ...args] = cfg.child;
 const childEnv = { ...process.env };
+// Child environment must be sanitized before spawn snapshots these values.
+delete childEnv.CONTROL_PLANE_API_KEY;
+delete childEnv.OPENAI_API_KEY;
+delete process.env.CONTROL_PLANE_API_KEY;
+delete process.env.OPENAI_API_KEY;
 child = spawn(exe, args, {
   stdio: ['ignore', 'pipe', 'pipe'],
   shell: false,
   windowsHide: true,
   env: childEnv
 });
-delete process.env.CONTROL_PLANE_API_KEY;
-delete process.env.OPENAI_API_KEY;
-delete childEnv.CONTROL_PLANE_API_KEY;
-delete childEnv.OPENAI_API_KEY;
 writeStatus(true, { lastRotationReason: rotations ? 'startup-legacy-oversize' : null });
 
 child.stdout.on('data', writeChunk);

@@ -5,6 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { once } from 'node:events';
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -37,18 +38,53 @@ async function waitTerminal(port,operationId) {
   }
   throw new Error('operation did not reach terminal state');
 }
+// An unrelated listener can win the freePort() release-to-bind race.
+// A successful HTTP response alone is not proof that the fixture server owns the port.
+function matchesFixtureHealth(status, expectedConfigSha256) {
+  return status?.ok === true &&
+    status?.name === 'chatgpt-remote-commander' &&
+    status?.configSha256 === expectedConfigSha256;
+}
 async function startServer(serverRoot,configPath,port) {
+  const configSha256=createHash('sha256').update(await fs.readFile(configPath)).digest('hex');
   const child=spawn(process.execPath,[path.join(serverRoot,'src','server-v0.3.mjs')],{
     cwd:serverRoot,env:{...process.env,REMOTE_COMMANDER_CONFIG:configPath},stdio:['ignore','pipe','pipe']
   });
   let stderr=''; child.stderr.on('data',c=>{stderr+=c.toString('utf8');});
-  for(let i=0;i<400;i+=1) {
-    try { const r=await fetch(`http://127.0.0.1:${port}/health`); if(r.ok) return {child,stderr:()=>stderr}; } catch {}
+  let foreignListener=false;
+  // Hosted Windows qualification can start slowly under parallel native I/O.
+  // Keep the fixture-identity check and early child-exit failure unchanged.
+  const startupBudgetMs=process.platform==='win32'?45000:15000;
+  const readinessDeadline=Date.now()+startupBudgetMs;
+  while(Date.now()<readinessDeadline) {
+    if(child.exitCode!==null) break;
+    try {
+      const response=await fetch(`http://127.0.0.1:${port}/health`,{
+        signal:AbortSignal.timeout(Math.max(1,Math.min(1000,readinessDeadline-Date.now())))
+      });
+      if(response.ok) {
+        const health=await response.json();
+        if(matchesFixtureHealth(health,configSha256) && child.exitCode===null)
+          return {child,stderr:()=>stderr};
+        foreignListener=true;
+      }
+    } catch {}
     await wait(25);
   }
-  child.kill();
-  throw new Error('server did not become healthy: '+stderr);
+  if(child.exitCode===null) child.kill();
+  throw new Error('fixture server did not become healthy with its own config identity'+
+    (foreignListener?' (unexpected listener on reserved port)':'')+': '+stderr);
 }
+
+test('fixture readiness rejects healthy but unrelated local listeners', () => {
+  const expected='a'.repeat(64);
+  const exact={ok:true,name:'chatgpt-remote-commander',configSha256:expected};
+  assert.equal(matchesFixtureHealth(exact,expected),true);
+  assert.equal(matchesFixtureHealth({...exact,configSha256:'b'.repeat(64)},expected),false);
+  assert.equal(matchesFixtureHealth({...exact,name:'other-mcp-server'},expected),false);
+  assert.equal(matchesFixtureHealth({...exact,ok:false},expected),false);
+  assert.equal(matchesFixtureHealth({ok:true},expected),false);
+});
 
 test('unbounded path mutations auto-defer, survive retry, and publish exact results', async () => {
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'rc-deferred-path-'));

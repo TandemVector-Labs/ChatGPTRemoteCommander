@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { createWorkflowTools } from '../src/workflow-tools.mjs';
+import { createWorkflowTools,WORKFLOW_TOOL_DEFINITIONS,PROJECT_ENGINE_TOOL_DEFINITIONS } from '../src/workflow-tools.mjs';
 import { WorkflowStore } from '../src/workflow-store.mjs';
 import { validateJsonSchema } from '../src/schema-validator.mjs';
 import { readText, writeText } from '../src/tools-v0.3.mjs';
@@ -137,6 +137,62 @@ if (['--crash-extension', '--crash-before-extension', '--crash-extension-extra']
   await f.close();
   process.exit(74);
 } else {
+  // Keep the strict 6-second team-reservation regression ahead of native crash
+  // fixtures: hosted Windows accumulated crash-worker I/O can exhaust its
+  // deadline even when collaboration invariants hold. Same test, no timeouts
+  // enlarged, no skipped or duplicated assertions.
+  const team = { workers: [{ id: 'reader', role: 'Inspect the evidence' }, { id: 'reviewer', role: 'Review acceptance and safety' }], maxParallel: 2 };
+
+  test('team reserves all calls before workers and executes only the coordinator proposal', { timeout: 6000 }, async () => {
+    const entered = deferred(), release = deferred();
+    let active = 0, maximum = 0, advice;
+    const reservations = [];
+    const f = fixture({ runner: { team }, planner: async context => {
+      if (context.collaboration.phase === 'worker') {
+        reservations.push(f.persisted().plannerCalls);
+        active++; maximum = Math.max(maximum, active);
+        await new Promise(resolve => setTimeout(resolve, 20));
+        active--;
+        return call('write_text', { path: `${context.collaboration.id}.txt`, content: 'Worker advice must not execute' });
+      }
+      advice = context.collaboration;
+      entered.resolve(); await release.promise;
+      return call('write_text', { path: 'result.txt', content: 'verified output' });
+    } });
+    let pending;
+    try {
+      await f.create(); await f.start({ maxPlannerCalls: 3 });
+      pending = f.tick();
+      // A premature terminal tick must fail with its status, not wait forever
+      // for a coordinator callback that can no longer be entered.
+      const first = await Promise.race([
+        entered.promise.then(() => ({ phase: 'coordinator-entered' })),
+        pending.then(
+          state => ({ phase: 'tick-ended-before-coordinator', status: state.status, code: state.lastCode }),
+          error => ({ phase: 'tick-error-before-coordinator', code: error?.code || error?.message || 'unknown' })
+        )
+      ]);
+      assert.equal(first.phase, 'coordinator-entered', JSON.stringify(first));
+      assert.equal(f.plans, 3);
+      assert.deepEqual(reservations, [3, 3]);
+      assert.equal((await f.status()).plannerCalls, 3);
+      assert.equal(f.effects, 0);
+      assert.equal(fs.existsSync(path.join(f.root, 'result.txt')), false);
+      assert.equal(maximum, 2);
+      assert.equal(advice.adviceTrust, 'untrusted');
+      assert.equal(advice.workerProposals.length, 2);
+      release.resolve();
+      assert.equal((await pending).status, 'QUEUED', f.dispatchErrors.join('\n'));
+      assert.equal(f.effects, 1);
+      assert.equal(fs.existsSync(path.join(f.root, 'reader.txt')), false);
+      assert.equal(fs.existsSync(path.join(f.root, 'reviewer.txt')), false);
+      const final = await f.tick();
+      assert.equal(final.status, 'COMPLETED', JSON.stringify({ code: final.lastCode, verification: final.verification }));
+      assert.equal(final.plannerCalls, 3);
+      assert.equal(f.plans, 3);
+    } finally { release.resolve(); await pending; await f.dispose(); }
+  });
+
   test('inspect, extend, read prerequisite, execute and verify preserves immutable acceptance', async () => {
     const f = fixture({ planner: async context => {
       if (context.currentStep.id === 'inspect') return call('read_text', { path: 'requirements.txt' });
@@ -176,7 +232,9 @@ if (['--crash-extension', '--crash-before-extension', '--crash-extension-extra']
       assert.equal(fs.readFileSync(path.join(f.root, 'result.txt'), 'utf8'), 'verified output');
       assert.equal((await f.state()).finalization.acceptanceResults[0], true);
       assert.equal((await f.api.execute('workflow_operations', { id: 'project' })).operations.length, 3);
-      assert.equal(f.api.definitions.length, 22);
+      assert.equal(f.api.definitions.length, WORKFLOW_TOOL_DEFINITIONS.length+PROJECT_ENGINE_TOOL_DEFINITIONS.length);
+      for(const name of ['workflow_roadmap','workflow_plan_insert','workflow_plan_edit','workflow_plan_prioritize'])
+        assert.equal(f.api.definitions.some(tool=>tool.name===name),true,name);
       assert.equal(f.api.definitions.some(tool => tool.name === 'workflow_needs_chat'), true);
       assert.equal(f.api.definitions.some(tool => tool.name === 'workflow_plan_extend'), false);
     } finally { await f.dispose(); }
@@ -380,48 +438,6 @@ if (['--crash-extension', '--crash-before-extension', '--crash-extension-extra']
       assert.equal(f.effects, 0);
       assert.deepEqual(f.persisted().checks, checks);
     } finally { await f.dispose(); }
-  });
-
-  const team = { workers: [{ id: 'reader', role: 'Inspect the evidence' }, { id: 'reviewer', role: 'Review acceptance and safety' }], maxParallel: 2 };
-
-  test('team reserves all calls before workers and executes only the coordinator proposal', { timeout: 6000 }, async () => {
-    const entered = deferred(), release = deferred();
-    let active = 0, maximum = 0, advice;
-    const reservations = [];
-    const f = fixture({ runner: { team }, planner: async context => {
-      if (context.collaboration.phase === 'worker') {
-        reservations.push(f.persisted().plannerCalls);
-        active++; maximum = Math.max(maximum, active);
-        await new Promise(resolve => setTimeout(resolve, 20));
-        active--;
-        return call('write_text', { path: `${context.collaboration.id}.txt`, content: 'Worker advice must not execute' });
-      }
-      advice = context.collaboration;
-      entered.resolve(); await release.promise;
-      return call('write_text', { path: 'result.txt', content: 'verified output' });
-    } });
-    let pending;
-    try {
-      await f.create(); await f.start({ maxPlannerCalls: 3 });
-      pending = f.tick(); await entered.promise;
-      assert.equal(f.plans, 3);
-      assert.deepEqual(reservations, [3, 3]);
-      assert.equal((await f.status()).plannerCalls, 3);
-      assert.equal(f.effects, 0);
-      assert.equal(fs.existsSync(path.join(f.root, 'result.txt')), false);
-      assert.equal(maximum, 2);
-      assert.equal(advice.adviceTrust, 'untrusted');
-      assert.equal(advice.workerProposals.length, 2);
-      release.resolve();
-      assert.equal((await pending).status, 'QUEUED', f.dispatchErrors.join('\n'));
-      assert.equal(f.effects, 1);
-      assert.equal(fs.existsSync(path.join(f.root, 'reader.txt')), false);
-      assert.equal(fs.existsSync(path.join(f.root, 'reviewer.txt')), false);
-      const final = await f.tick();
-      assert.equal(final.status, 'COMPLETED', JSON.stringify({ code: final.lastCode, verification: final.verification }));
-      assert.equal(final.plannerCalls, 3);
-      assert.equal(f.plans, 3);
-    } finally { release.resolve(); await pending; await f.dispose(); }
   });
 
   test('insufficient team call budget prevents every worker and coordinator call', async () => {
