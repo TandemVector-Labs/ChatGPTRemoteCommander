@@ -13,7 +13,7 @@ test('Windows native handle-relative read prototype: pinned parents, no reparse,
   // Each build uses a separate output and intermediate root; never mix
   // the race-instrumented test binary with the ordinary Release executable.
   const build=(name,defines)=>{
-   const output=path.join(work,name,'bin'),intermediate=path.join(work,name,'obj');
+   const output=path.join(work,name,'bin')+path.sep,intermediate=path.join(work,name,'obj')+path.sep;
    fs.mkdirSync(output,{recursive:true});fs.mkdirSync(intermediate,{recursive:true});
    const args=['build',project,'-c','Release','--nologo','-v','quiet',
     '-p:OutputPath='+output,'-p:BaseIntermediateOutputPath='+intermediate,
