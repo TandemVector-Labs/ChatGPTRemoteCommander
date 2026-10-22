@@ -150,3 +150,52 @@ test('durable worker refuses a staging symlink swapped at descriptor open',t=>{
   assert.equal(JSON.parse(fs.readFileSync(record,'utf8')).status,'FAILED');
  }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
+
+test('job-status never consumes a post-check substituted record symlink',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-record-swap-'));
+ try{
+  const jobDir=path.join(root,'jobs','Linux'),id='record-swap-001';
+  fs.mkdirSync(jobDir,{recursive:true});
+  const record=path.join(jobDir,id+'.json'),outside=path.join(root,'outside.json'),probe=path.join(root,'link-probe');
+  const safe={schema:'ctmesh-durable-v1',id,peer:'Linux',status:'QUEUED',bytes:4,createdAt:new Date().toISOString()};
+  const fake={...safe,status:'PUBLISHED'};
+  fs.writeFileSync(record,JSON.stringify(safe));
+  fs.writeFileSync(outside,JSON.stringify(fake));
+  try{fs.symlinkSync(outside,probe,'file');fs.unlinkSync(probe);}
+  catch(e){if(['EPERM','EACCES','ENOTSUP'].includes(e.code)){t.skip('Symlink creation unavailable');return;}throw e;}
+  const hook=path.join(root,'swap-hook.cjs');
+  fs.writeFileSync(hook,[
+   "const fs=require('node:fs');",
+   "const rd=fs.readFileSync,op=fs.openSync;",
+   "let swapped=false;",
+   "function replace(file){if(!swapped&&String(file)===process.env.RC_RECORD){",
+   " swapped=true; fs.renameSync(file,file+'.checked');",
+   " fs.symlinkSync(process.env.RC_OUTSIDE,file,'file');",
+   "}}",
+   "fs.readFileSync=function(file,...rest){replace(file);return rd.call(this,file,...rest);};",
+   "fs.openSync=function(file,...rest){replace(file);return op.call(this,file,...rest);};"
+  ].join('\n'));
+  const r=spawnSync(process.execPath,[cli,'job-status','--peer','Linux','--id',id],{
+   encoding:'utf8',timeout:6000,
+   env:{...process.env,NODE_OPTIONS:'--require '+hook,COMMANDER_TRANSFER_HOME:root,
+    RC_RECORD:record,RC_OUTSIDE:outside}});
+  assert.notEqual(r.status,0,'A substituted record must fail closed, not return forged PUBLISHED state: '+r.stdout);
+  assert.equal(fs.readFileSync(outside,'utf8'),JSON.stringify(fake));
+  assert.deepEqual(JSON.parse(fs.readFileSync(record+'.checked','utf8')),safe);
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('job-status refuses an oversized journal without reading or parsing it',()=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-record-bounds-'));
+ try{
+  const jobDir=path.join(root,'jobs','Linux');
+  fs.mkdirSync(jobDir,{recursive:true});
+  const record=path.join(jobDir,'oversized-001.json');
+  fs.writeFileSync(record,' '.repeat(131073));
+  const r=spawnSync(process.execPath,[cli,'job-status','--peer','Linux','--id','oversized-001'],{
+   encoding:'utf8',timeout:6000,env:{...process.env,COMMANDER_TRANSFER_HOME:root}});
+  assert.notEqual(r.status,0,r.stdout);
+  assert.match(r.stderr,/UNTRUSTED_JOB_RECORD/);
+  assert.equal(fs.statSync(record).size,131073);
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});

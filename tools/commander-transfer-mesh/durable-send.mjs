@@ -70,7 +70,37 @@ function safePaths(peer,id){
   assertManagedEntry(file,false);
  return {jobDir,stageDir,record,lock,part,destination};
 }
-const recordRead=p=>JSON.parse(fs.readFileSync(p.record,'utf8'));
+// Do not reopen a preflight-checked journal via a pathname. A peer that can
+// replace a managed record between lstat and read must not forge job status.
+// Keep the journal bounded and attach bytes to a stable regular-file descriptor.
+function recordRead(p){
+ const before=fs.lstatSync(p.record);
+ assertion(before.isFile()&&!before.isSymbolicLink()&&before.nlink===1&&
+   before.size>=1&&before.size<=131072,'UNTRUSTED_JOB_RECORD');
+ const flags=fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW??0)|(fs.constants.O_NONBLOCK??0);
+ const fd=fs.openSync(p.record,flags);
+ try{
+  const opened=fs.fstatSync(fd);
+  assertion(opened.isFile()&&opened.nlink===1&&opened.size===before.size&&
+    opened.dev===before.dev&&opened.ino===before.ino,
+    'UNTRUSTED_JOB_RECORD');
+  const bytes=Buffer.alloc(opened.size);
+  let at=0;
+  while(at<bytes.length){
+   const n=fs.readSync(fd,bytes,at,bytes.length-at,at);
+   assertion(n>0,'UNTRUSTED_JOB_RECORD');
+   at+=n;
+  }
+  const after=fs.fstatSync(fd),named=fs.lstatSync(p.record);
+  assertion(after.dev===opened.dev&&after.ino===opened.ino&&after.size===opened.size&&
+    after.mtimeMs===opened.mtimeMs&&after.ctimeMs===opened.ctimeMs&&
+    named.isFile()&&!named.isSymbolicLink()&&named.nlink===1&&
+    named.dev===opened.dev&&named.ino===opened.ino&&named.size===opened.size&&
+    named.mtimeMs===opened.mtimeMs&&named.ctimeMs===opened.ctimeMs,
+    'UNTRUSTED_JOB_RECORD');
+  return JSON.parse(bytes.toString('utf8'));
+ }finally{fs.closeSync(fd);}
+}
 function atomicRename(from,to){
  let last;
  const sleeper=new Int32Array(new SharedArrayBuffer(4));
