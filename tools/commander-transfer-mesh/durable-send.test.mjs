@@ -396,3 +396,52 @@ test('publish recovery refuses an oversized existing manifest before parsing',()
   assert.ok(fs.statSync(manifest).size>131072);
  }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
+
+test('recovery must not hash a post-preflight swapped external published payload',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-payload-hash-swap-'));
+ try{
+  const id='payload-swap-001',peer='Linux',
+    destination=path.join(root,'pairs',peer,'transfers',id),
+    jobs=path.join(root,'jobs',peer),
+    sourceDir=path.join(root,'source');
+  fs.mkdirSync(destination,{recursive:true});
+  fs.mkdirSync(jobs,{recursive:true});fs.mkdirSync(sourceDir);
+  const source=path.join(sourceDir,'input.bin');
+  const bytes=Buffer.from('TRUSTED_SOURCE_PAYLOAD');
+  fs.writeFileSync(source,bytes);
+  const published=path.join(destination,'payload.bin');
+  fs.writeFileSync(published,Buffer.from('UNTRUSTED_PAYLOAD_DATA'));
+  const external=path.join(root,'external-payload.bin');
+  fs.writeFileSync(external,bytes);
+  const probe=path.join(root,'symlink-probe');
+  try{fs.symlinkSync(external,probe,'file');fs.unlinkSync(probe);}
+  catch(e){if(['EPERM','EACCES','ENOTSUP'].includes(e.code)){t.skip('Symlinks unavailable');return;}throw e;}
+  const info=fs.statSync(source);
+  const journal={schema:'ctmesh-durable-v1',id,peer,from:'PC',path:source,
+    sourceRoot:sourceDir,name:path.basename(source),bytes:info.size,
+    mtimeMs:info.mtimeMs,ino:info.ino,dev:info.dev,
+    copiedBytes:0,status:'INTERRUPTED',createdAt:new Date().toISOString()};
+  const rec=path.join(jobs,id+'.json');fs.writeFileSync(rec,JSON.stringify(journal));
+  const hook=path.join(root,'payload-hash-hook.cjs');
+  fs.writeFileSync(hook,[
+   "const fs=require('node:fs');",
+   "const open=fs.openSync;",
+   "let swapped=false;",
+   "fs.openSync=function(file,flags,...rest){",
+   "if(!swapped&&String(file)===process.env.RC_PAYLOAD){",
+   " swapped=true;fs.renameSync(file,file+'.checked');",
+   " fs.symlinkSync(process.env.RC_EXTERNAL,file,'file');",
+   "}",
+   "return open.call(this,file,flags,...rest);",
+   "};"
+  ].join('\n'));
+  const r=spawnSync(process.execPath,[cli,'work','--peer',peer,'--id',id],{
+   encoding:'utf8',timeout:6500,env:{...process.env,NODE_OPTIONS:'--require '+hook,
+    COMMANDER_TRANSFER_HOME:root,RC_PAYLOAD:published,RC_EXTERNAL:external}});
+  assert.equal(r.status,0,r.stderr);
+  const after=JSON.parse(fs.readFileSync(rec,'utf8'));
+  assert.equal(after.status,'FAILED',
+    'Swapped outside payload may not be treated as a verified published artifact');
+  assert.deepEqual(fs.readFileSync(external),bytes);
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
