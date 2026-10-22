@@ -228,6 +228,25 @@ export function isolateWindowsAdaptiveTeamRegression(command){
   return exact+' && '+parts.join(' && ');
 }
 
+/**
+ * Keep the strict 2500ms NEEDS_CHAT/DEFERRED delivery assertion intact while
+ * isolating the entire fixture before high-volume hosted Windows test batches.
+ * No retry, timeout extension, skip, or duplicate test is permitted.
+ */
+export function isolateWindowsWorkflowConversationRegression(command){
+  if(typeof command!=='string'||!command)throw new Error('CI_CONVERSATION_COMMAND_INVALID');
+  const file='test/workflow-conversation.test.mjs';
+  if(command.split(file).length-1!==1)throw new Error('CI_CONVERSATION_CARDINALITY');
+  const parts=command.split(' && ');
+  const index=parts.findIndex(part=>part.startsWith('node --test --test-concurrency=1 ')&&part.includes(' '+file));
+  if(index<0)throw new Error('CI_CONVERSATION_BATCH_NOT_FOUND');
+  const original=parts[index],remainder=original.replace(' '+file,'');
+  if(original===remainder||remainder.includes(file)||!remainder.startsWith('node --test --test-concurrency=1 test/'))
+    throw new Error('CI_CONVERSATION_ISOLATION_INVALID');
+  parts[index]=remainder;
+  return 'node --test --test-concurrency=1 '+file+' && '+parts.join(' && ');
+}
+
 export function parseQualificationArgs(argv){
   const out={script:null,concurrency:null,prioritizeSensitive:false};
   for(let i=0;i<argv.length;i++){
@@ -261,6 +280,7 @@ function run(){
     command=isolateWindowsLeaseRegression(command);
     command=isolateWindowsWorkflowPlanRegression(command);
     command=isolateWindowsAsyncHttpRegression(command);
+    command=isolateWindowsWorkflowConversationRegression(command);
     command=isolateWindowsAdaptiveTeamRegression(command);
   }
   if(process.platform==='win32'&&args.script==='test'&&process.env.RC_QUALIFICATION_RUN_ID)
