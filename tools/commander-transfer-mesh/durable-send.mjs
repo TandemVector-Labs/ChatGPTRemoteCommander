@@ -273,7 +273,7 @@ function inspect(p){
  if(['COPYING','VERIFYING','QUEUED'].includes(j.status) && (
     (j.pid && !running(j.pid)) ||
     (!j.pid && Date.now()-Date.parse(j.createdAt)>30000 && (
-      !fs.existsSync(p.lock)||!running(JSON.parse(fs.readFileSync(p.lock,'utf8')).pid)
+      !fs.existsSync(p.lock)||!running(recordRead({record:p.lock}).pid)
     ))
   )){
   j.status='INTERRUPTED';j.errorCode='WORKER_EXITED';save(p,j);
@@ -296,7 +296,7 @@ try{
   assertion(within(real,allow),'SOURCE_PATH_NOT_ALLOWED');
   const st=fs.lstatSync(real);assertion(st.isFile()&&!st.isSymbolicLink(),'SOURCE_NOT_REGULAR');
   assertion(!/[\\/:*?"<>|\x00-\x1f]/.test(path.basename(real)),'UNSAFE_FILENAME');
-  const node=JSON.parse(fs.readFileSync(path.join(root,'node.json'),'utf8'));
+  const node=recordRead({record:path.join(root,'node.json')});
   assertion(peers.includes(node.alias)&&node.alias!==peer,'LOCAL_IDENTITY_INVALID');
   const jobsRoot=path.join(root,'jobs');
   fs.mkdirSync(jobsRoot,{recursive:true});
@@ -324,7 +324,7 @@ try{
  }else if(command==='resume'){
   const j=inspect(p);
   assertion(['FAILED','INTERRUPTED'].includes(j.status),'NOT_RESUMABLE');
-  if(fs.existsSync(p.lock)){const old=JSON.parse(fs.readFileSync(p.lock,'utf8'));assertion(!running(old.pid),'JOB_STILL_RUNNING');fs.rmSync(p.lock);}
+  if(fs.existsSync(p.lock)){const old=recordRead({record:p.lock});assertion(!running(old.pid),'JOB_STILL_RUNNING');fs.rmSync(p.lock);}
   checkInput(j);
   j.status='QUEUED';j.errorCode=null;j.pid=null;save(p,j);
   launch(p);reply(summary(j));
