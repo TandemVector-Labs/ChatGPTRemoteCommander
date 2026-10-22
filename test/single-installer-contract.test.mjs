@@ -128,6 +128,7 @@ test('Windows source fetches allow only the legacy or organization repository', 
 test('hosted canaries select the organizational source rather than implicit legacy default', () => {
   const expected='REMOTE_COMMANDER_REPO_URL: https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git';
   assert.ok(read('.github/workflows/server-install-canary.yml').includes(expected));
+  assert.ok(read('.github/workflows/server-install-canary.yml').includes('-e REMOTE_COMMANDER_REPO_URL="$REMOTE_COMMANDER_REPO_URL"'), 'Docker must receive the candidate source explicitly');
   assert.ok(read('.github/workflows/windows-updater-e2e-r157.yml').includes(expected));
   const linux=read('server-install-linux.sh');
   assert.ok(linux.includes('REMOTE_COMMANDER_REPO_URL'), 'Linux installer must inherit same explicit source');
