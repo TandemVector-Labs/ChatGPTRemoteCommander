@@ -1,6 +1,7 @@
 import test from 'node:test';
 import './windows-owner-gui-ipc-contract.test.mjs';
 import './windows-owner-gui-bridge-status.test.mjs';
+import './windows-owner-gui-status-provider.test.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';

@@ -52,3 +52,24 @@ This hook is not a persistent service, deployment recipe, automatic session
 handoff, GUI takeover bridge, or an authorization to merge into protected main.
 A packaged trusted provider, owner enrollment and full session-switch/lease
 lifecycle review remain required for production.
+
+## Protected binary admission (installer prerequisite)
+
+The optional status provider deliberately refuses to execute native code from
+the user's source checkout or mutable profile. A candidate DLL must be placed
+by a trusted installer under Program Files/TandemVector-Labs/RemoteCommander
+and its SHA-256 pinned by that trusted installer. Files with unexpected hash,
+missing/untrusted paths, symlinks, overlong descriptors or unexpected protocol
+values fail closed. The shipped source-stage default has no pinned digest and
+therefore leaves this provider DISABLED, even if the opt-in GUI status flag is
+set. It must not be described as a working automatic GUI session bridge.
+
+Operator enrollment must create a read-only descriptor containing only
+{schema, pipe, ownerSid, keyFile} and an NTFS ACL-protected short-lived key
+readable to the exact owner and SYSTEM, never a raw key in chat, logs or a CLI
+argument. The .NET client verifies signed status; the GUI controller still
+refuses Session 0 native availability and all GUI input leases.
+
+Installer packaging, binary pin provisioning, privilege boundaries, agent
+lifecycle/session switches, owner opt-in and independent security review remain
+release gates. No auto-start or Task Scheduler persistence is provided here.

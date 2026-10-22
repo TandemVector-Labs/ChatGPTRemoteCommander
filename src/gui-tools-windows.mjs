@@ -6,6 +6,7 @@ import { performance } from 'node:perf_hooks';
 import { GUI_RULES, guiError, guiToolDefinitions, validateGuiInput } from './gui-contract.mjs';
 import { createGuiProcessClient, runGuiProcess } from './gui-process.mjs';
 import { createGuiInputIncidentStore } from './gui-incident-store.mjs';
+import { createWindowsOwnerGuiStatusProvider } from './windows-owner-gui-status-provider.mjs';
 export { guiToolDefinitions };
 
 const project = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -209,5 +210,13 @@ export function createGuiController({ platform = process.platform, now = () => p
   }
   return { execute };
 }
-const controller = createGuiController();
+const controller = createGuiController({
+  // Disabled until an installer pins a verified native binary under Program Files.
+  // Never execute a user-writable developer build as SYSTEM.
+  ownerSessionStatusProbe: createWindowsOwnerGuiStatusProvider({
+    dllPath: path.win32.join(process.env.ProgramFiles || 'C:/Program Files',
+      'TandemVector-Labs', 'RemoteCommander', 'OwnerSessionBridge.dll'),
+    expectedDllSha256: null
+  })
+});
 export async function executeGuiTool(ctx, name, input) { return controller.execute(ctx, name, input); }
