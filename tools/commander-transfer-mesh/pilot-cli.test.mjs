@@ -85,6 +85,56 @@ test('untrusted peer and malformed transfer ID rejected',()=>{
   }
  });
 });
+test('oversized untrusted incoming manifest is rejected before parsing',()=>{
+ withFixtures((src,dst)=>{
+  const id='oversize-manifest-001';send(src,id,Buffer.from('legitimate payload'));
+  const folder=mirror(src,dst,id);
+  fs.writeFileSync(path.join(folder,'manifest.json'),'x'.repeat(16385));
+  const r=run(dst,'status','--peer','PC','--id',id);
+  assert.notEqual(r.status,0);
+  assert.match(r.stderr,/Untrusted transfer manifest/);
+ });
+});
+
+test('incoming manifest cannot be swapped to external symlink before JSON read',t=>{
+ withFixtures((src,dst)=>{
+  const id='manifest-race-read-001';
+  send(src,id,Buffer.from('valid signed-by-hash payload'));
+  const folder=mirror(src,dst,id),manifest=path.join(folder,'manifest.json');
+  const outside=path.join(dst,'outside-fake-manifest.json');
+  const original=JSON.parse(fs.readFileSync(manifest,'utf8'));
+  fs.writeFileSync(outside,JSON.stringify({...original,name:'attacker-forged.bin'}));
+  const testLink=path.join(dst,'manifest-symlink-probe');
+  try{fs.symlinkSync(outside,testLink,'file');fs.unlinkSync(testLink);}
+  catch(e){if(['EPERM','EACCES','ENOTSUP'].includes(e.code)){t.skip('File symlinks unavailable');return;}throw e;}
+  const marker=path.join(dst,'manifest-race.marker'),preload=path.join(dst,'manifest-race-hook.cjs');
+  fs.writeFileSync(preload,[
+   "const fs=require('node:fs'),mod=require('node:module');",
+   "const old=fs.readFileSync;let done=false;",
+   "fs.readFileSync=function(file,...args){",
+   "if(!done&&String(file)===process.env.RC_MANIFEST){done=true;",
+   "fs.renameSync(file,file+'.original');",
+   "fs.symlinkSync(process.env.RC_EXTERNAL,file,'file');",
+   "fs.writeFileSync(process.env.RC_MARKER,'SWAP_FIRED');",
+   "}return old.call(this,file,...args);};",
+   "mod.syncBuiltinESMExports();"
+  ].join('\n'));
+  const result=spawnSync(process.execPath,['--require',preload,cli,'status',
+    '--peer','PC','--id',id],{encoding:'utf8',timeout:15000,env:{...process.env,
+    COMMANDER_TRANSFER_HOME:dst,RC_MANIFEST:manifest,RC_EXTERNAL:outside,RC_MARKER:marker}});
+  if(fs.existsSync(marker)){
+   assert.notEqual(result.status,0,'An external valid-looking manifest cannot choose received filename');
+   assert.match(result.stderr,/Untrusted transfer manifest|ELOOP|Untrusted manifest/);
+  }else{
+   // A descriptor-bound implementation never calls the pathname-based
+   // readFileSync hook, so the malicious replacement cannot be performed.
+   assert.equal(result.status,0,result.stderr);
+   assert.equal(JSON.parse(result.stdout).name,original.name);
+  }
+  assert.equal(JSON.parse(fs.readFileSync(outside,'utf8')).name,'attacker-forged.bin');
+ });
+});
+
 test('incoming payload cannot be swapped to external symlink just before hash opens it',t=>{
  withFixtures((src,dst)=>{
   const id='hash-race-payload-001',data=Buffer.from('same payload but external authority');
