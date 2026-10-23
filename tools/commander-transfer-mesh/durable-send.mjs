@@ -293,8 +293,30 @@ function hash(file){
  }finally{fs.closeSync(fd);}
 }
 function noExistingArtifact(p){assertion(!fs.existsSync(p.destination),'TRANSFER_ALREADY_PUBLISHED');}
+// Create staging parents through held Linux directory FDs, so a swapped
+// ancestor cannot redirect mkdir outside the operator's private root.
+// Windows retains its separate protected-ACL admission requirement.
+function ensureStageDirectory(folder){
+ if(process.platform!=='linux'){fs.mkdirSync(folder,{recursive:true});return;}
+ withLinuxPinnedPath(folder,(pinned)=>{
+  try{fs.mkdirSync(pinned,{mode:0o700});}
+  catch(e){if(e.code!=='EEXIST')throw e;}
+  const st=fs.lstatSync(pinned);
+  assertion(st.isDirectory()&&!st.isSymbolicLink()&&
+    st.uid===process.getuid()&&(st.mode&0o077)===0,
+    'UNTRUSTED_MANAGED_ANCESTOR');
+ });
+}
 function copyJob(p,j){
- fs.mkdirSync(p.stageDir,{recursive:true});
+ if(process.platform==='linux'){
+  ensureStageDirectory(path.join(root,'staging'));
+  ensureStageDirectory(p.stageDir);
+ }else fs.mkdirSync(p.stageDir,{recursive:true});
+ // Keep the staging parent inode held for the entire copy/hash/rename,
+ // not just a preflight lstat: public directory names can change mid-job.
+ return withLinuxPinnedPath(p.part,(part)=>copyJobWithPinnedPart(p,j,part));
+}
+function copyJobWithPinnedPart(p,j,part){
  const source=checkInput(j);
  const existingPayload=path.join(p.destination,'payload.bin');
  const existingManifest=path.join(p.destination,'manifest.json');
@@ -312,7 +334,7 @@ function copyJob(p,j){
  // Pin the resumed part and the source to the files checked by preflight.
  // An attacker must not be able to swap a named part for a symlink between
  // lstat and open, causing writes outside the operator's private staging root.
- const existingPart=fs.existsSync(p.part)?fs.lstatSync(p.part):null;
+ const existingPart=fs.existsSync(part)?fs.lstatSync(part):null;
  if(existingPart)assertion(existingPart.isFile()&&!existingPart.isSymbolicLink()&&existingPart.nlink===1,'BAD_PARTIAL_FILE');
  const inputFlags=fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW??0)|(fs.constants.O_NONBLOCK??0);
  const input=fs.openSync(source,inputFlags);
@@ -322,8 +344,8 @@ function copyJob(p,j){
   assertion(sourceInfo.isFile()&&sourceInfo.dev===j.dev&&sourceInfo.ino===j.ino&&
     sourceInfo.size===j.bytes&&sourceInfo.mtimeMs===j.mtimeMs,'SOURCE_CHANGED');
   const resumeFlags=fs.constants.O_RDWR|(fs.constants.O_NOFOLLOW??0)|(fs.constants.O_NONBLOCK??0);
-  out=fs.openSync(p.part,existingPart?resumeFlags:'wx+',0o600);
-  const opened=fs.fstatSync(out),named=fs.lstatSync(p.part);
+  out=fs.openSync(part,existingPart?resumeFlags:'wx+',0o600);
+  const opened=fs.fstatSync(out),named=fs.lstatSync(part);
   assertion(opened.isFile()&&opened.nlink===1&&named.isFile()&&!named.isSymbolicLink()&&
     named.nlink===1&&opened.dev===named.dev&&opened.ino===named.ino&&
     (!existingPart||(opened.dev===existingPart.dev&&opened.ino===existingPart.ino&&
@@ -346,7 +368,7 @@ function copyJob(p,j){
  }finally{if(out!==undefined)fs.closeSync(out);fs.closeSync(input);}
  checkInput(j);
  j.status='VERIFYING';j.copiedBytes=j.bytes;save(p,j);
- const sourceSha=hash(source),partSha=hash(p.part);
+ const sourceSha=hash(source),partSha=hash(part);
  assertion(sourceSha===partSha,'STAGING_HASH_MISMATCH');
  checkInput(j);
  const recent=recordRead(p);
@@ -358,7 +380,7 @@ function copyJob(p,j){
   assertion(fs.readdirSync(p.destination).length===0,'TRANSFER_ALREADY_PUBLISHED');
  }else fs.mkdirSync(p.destination,{recursive:false});
  const payload=path.join(p.destination,'payload.bin');
- atomicRename(p.part,payload);
+ atomicRename(part,payload);
  const manifest={schema:'ctmesh-v1',id:j.id,from:j.from,to:j.peer,name:j.name,bytes:j.bytes,sha256:sourceSha,createdAt:j.createdAt};
  fs.writeFileSync(path.join(p.destination,'manifest.json'),JSON.stringify(manifest)+'\n',{flag:'wx',mode:0o600});
  j.sha256=sourceSha;j.status='PUBLISHED';save(p,j);

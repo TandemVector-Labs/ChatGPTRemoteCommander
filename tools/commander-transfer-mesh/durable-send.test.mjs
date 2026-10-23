@@ -127,12 +127,12 @@ test('durable worker refuses a staging symlink swapped at descriptor open',t=>{
   fs.writeFileSync(record,JSON.stringify(j));
   const hookPath=path.join(root,'swap-hook.cjs');
   fs.writeFileSync(hookPath,[
-   "const fs=require('node:fs');",
+   "const fs=require('node:fs'),path=require('node:path');",
    "const orig=fs.openSync;",
    "let swapped=false;",
    "fs.openSync=function(file,flags,...rest){",
    " const rw=flags==='r+'||(typeof flags==='number'&&(flags&fs.constants.O_RDWR)===fs.constants.O_RDWR);",
-   " if(!swapped&&rw&&String(file)===process.env.RC_SWAP_PART){",
+   " if(!swapped&&rw&&path.basename(String(file))===path.basename(process.env.RC_SWAP_PART)){",
    "   swapped=true;",
    "   fs.renameSync(file,file+'.checked');",
    "   fs.symlinkSync(process.env.RC_SWAP_TARGET,file,'file');",
