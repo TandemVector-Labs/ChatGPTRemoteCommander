@@ -237,3 +237,44 @@ test('POSIX incident pending refuses FIFO and symlink-to-FIFO without blocking',
  assert.equal(directFifo.status,0,'direct FIFO must fail before blocking: '+String(directFifo.error||directFifo.stderr));
  assert.match(directFifo.stdout,/SAFE_DENY/);
 }));
+
+test('resolving stale GUI incident never deletes a newly substituted pending incident',()=>ownFile(async file=>{
+ const store=createGuiInputIncidentStore({file});
+ const stale=await store.begin('gui_mouse_click');
+ const replacementId='bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+ const originalUnlink=fs.unlink,originalRename=fs.rename;
+ let changed=false;
+ const substitute=async()=>{
+  if(changed)return;
+  changed=true;
+  await originalRename.call(fs,file,file+'.former');
+  await fs.writeFile(file,JSON.stringify({
+   schema:'rc-gui-pending-input-v1',status:'PENDING_NATIVE_EFFECT',
+   tool:'gui_mouse_click',id:replacementId,startedUtc:new Date().toISOString()
+  })+'\n',{mode:0o600});
+ };
+ fs.unlink=async function(f,...args){
+  if(String(f)===file)await substitute();
+  return originalUnlink.call(this,f,...args);
+ };
+ fs.rename=async function(from,to,...args){
+  if(String(from)===file && String(to).includes('.gui-incident-resolving-'))
+   await substitute();
+  return originalRename.call(this,from,to,...args);
+ };
+ try{
+  await assert.rejects(store.resolve(stale),/GUI_INCIDENT_RESOLUTION_MISMATCH|GUI_INCIDENT_STORAGE_UNAVAILABLE/);
+ }finally{fs.unlink=originalUnlink;fs.rename=originalRename;}
+ assert.equal(changed,true,'Actual rename/unlink boundary must be exercised');
+ assert.equal((await store.pending()).id,replacementId,
+  'The new uncertain native-effect record must survive an old acknowledgement');
+}));
+test('crash-left GUI incident guard fails closed instead of clearing on restart',()=>ownFile(async file=>{
+ const s=createGuiInputIncidentStore({file});
+ const receipt=await s.begin('gui_mouse_click');
+ await fs.writeFile(file+'.exclusive-incident-v1','interrupted operation',{flag:'wx',mode:0o600});
+ const restarted=createGuiInputIncidentStore({file});
+ await assert.rejects(restarted.pending(),/GUI_INCIDENT_STORAGE_UNAVAILABLE/);
+ await assert.rejects(restarted.begin('gui_key_press'),/GUI_INCIDENT_STORAGE_UNAVAILABLE/);
+ await assert.rejects(restarted.resolve(receipt),/GUI_INCIDENT_STORAGE_UNAVAILABLE/);
+}));
