@@ -6,6 +6,9 @@ import path from 'node:path';
 import { createTransferMeshTools } from '../src/transfer-tools.mjs';
 
 test('GREEN: native child rejects substituted destination after Core admission', async (t) => {
+  // This fixture substitutes a Windows directory junction. Linux admission has
+  // a separate capability and descriptor-bound path security contract.
+  if(process.platform!=='win32')return t.skip('Win32 junction/NT handle race fixture');
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(),'rc-dest-swap-qa-'));
   const a = path.join(sandbox,'a'), b=path.join(sandbox,'b'), outside=path.join(sandbox,'outside');
   const src=path.join(a,'inputs'), dstRoot=path.join(b,'outputs'), dest=path.join(dstRoot,'allowed');
