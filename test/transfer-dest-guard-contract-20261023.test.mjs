@@ -14,6 +14,9 @@ test('portable Win32 native directory guard exactly matches reviewed source',()=
  assert.equal(normalized(Buffer.from(m[1],'base64').toString('utf16le')),normalized(guard),
   'portable PowerShell guard must match reviewed source after canonical EOL normalization');
  assert.match(guard,/GetFileInformationByHandleEx/);
+ assert.match(guard,/NtCreateFile/);
+ assert.match(guard,/RootDirectory=parent\.DangerousGetHandle\(\)/);
+ assert.match(guard,/0x200021/);
  assert.match(guard,/0x02200000/);
- assert.match(guard,/Open\(path,0x100080,3,/);
+ assert.match(guard,/NtCreateFile\(out SafeFileHandle h,0x1000A0/);
 });
