@@ -522,3 +522,45 @@ test('Windows cold-start scheduler keeps WorkflowPlan first and adaptive immedia
   // therefore first. Both run exactly once, preserving all other coverage.
   assert.match(read('test/project-adaptive.test.mjs'),/\{ timeout: 6000 \}/);
 });
+test('R470 fail-closed Windows check qualification emits only redacted evidence',t=>{
+  if(process.platform!=='win32')return t.skip('PowerShell fixture is Windows-only');
+  const sha='604ed6a8a0e0f95197fabcc92d93537142017a0b';
+  const script=path.join(root,'tools','diagnose-updater-gate-r470.ps1');
+  const secret='ghp_CHECK_SENTINEL_NEVER_APPEAR';
+  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'rc-r470-check-phase-'));
+  try{
+    const dir=path.join(tmp,'STATE','ChatGPTRemoteCommander','update-logs');
+    fs.mkdirSync(dir,{recursive:true});
+    const basename='qualification-output-qualification-check-'+sha.slice(0,12)+'-fixture.stdout.log';
+    fs.writeFileSync(path.join(dir,basename),[
+      'TAP version 13',
+      'not ok 17 - owner private password '+secret,
+      'failureType: testTimeoutFailure',
+      '# tests 17','# pass 16','# fail 1',
+      'Authorization: Bearer '+secret,
+      'C:\\Private\\Owner\\path'
+    ].join('\n'));
+    const r=spawnSync('pwsh.exe',['-NoProfile','-NonInteractive','-File',script,
+      '-Root',tmp,'-ExpectedCommit',sha,'-Scope',
+      'READ_ONLY_HOSTED_V025W_ROLLBACK_QUALIFICATION_FAILURE',
+      '-Gate','check'],{encoding:'utf8',timeout:15000});
+    assert.equal(r.status,0,r.stderr||r.stdout);
+    const raw=fs.readFileSync(path.join(tmp,'DIAGNOSTIC_R470.json'),'utf8');
+    assert.ok(!raw.includes(secret),'do not persist bearer-like contents');
+    assert.ok(!raw.includes(tmp),'do not persist private filesystem path');
+    assert.ok(!raw.includes('password'),'do not persist arbitrary check test names');
+    const data=JSON.parse(raw);
+    assert.equal(data.gate,'check');
+    assert.equal(data.matchingLogCount,1);
+    assert.equal(data.status,'TAP_SUMMARY_EXTRACTED');
+    assert.equal(data.tapCounts.fail,'1');
+    assert.equal(data.failureTests[0].index,17);
+    assert.equal(data.failureTests[0].publicTestName,'REDACTED_CHECK_TEST_NAME');
+    assert.equal(data.rawLogIncluded,false);
+    const runner=read('test/release-rollback-windows-v01025.ps1');
+    assert.ok(runner.includes("gate=(check|test) "),'select failure gate, not first successful check');
+    assert.ok(runner.includes('-Gate $failedGate'),'enforce source-specific gate selection');
+    assert.ok(runner.includes('$report.gate -cne $failedGate'),'read back gate identity');
+    assert.ok(runner.includes("if($failedGate -eq 'test')"),'check must not emit raw-case output');
+  }finally{fs.rmSync(tmp,{recursive:true,force:true});}
+});
