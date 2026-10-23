@@ -254,11 +254,11 @@ test('resolving stale GUI incident never deletes a newly substituted pending inc
   })+'\n',{mode:0o600});
  };
  fs.unlink=async function(f,...args){
-  if(String(f)===file)await substitute();
+  if(path.basename(String(f))===path.basename(file))await substitute();
   return originalUnlink.call(this,f,...args);
  };
  fs.rename=async function(from,to,...args){
-  if(String(from)===file && String(to).includes('.gui-incident-resolving-'))
+  if(path.basename(String(from))===path.basename(file) && String(to).includes('.gui-incident-resolving-'))
    await substitute();
   return originalRename.call(this,from,to,...args);
  };
