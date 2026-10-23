@@ -156,6 +156,41 @@ function recordRead(p){
   }
  }
 }
+
+function retireLockGeneration(lock,expected){
+ // Identity-checked rename is a retirement transaction, not pathname unlink.
+ // If a new owner wins the name just before rename, never delete that inode.
+ assertion(expected&&expected.isFile()&&!expected.isSymbolicLink()&&expected.nlink===1,'JOB_LOCK_UNTRUSTED');
+ const same=(a,b)=>a.isFile()&&!a.isSymbolicLink()&&a.nlink===1&&
+  a.dev===b.dev&&a.ino===b.ino&&a.size===b.size&&a.mtimeMs===b.mtimeMs;
+ let named;
+ try{named=fs.lstatSync(lock);}
+ catch{throw Error('JOB_LOCK_GENERATION_CHANGED');}
+ assertion(same(named,expected),'JOB_LOCK_GENERATION_CHANGED');
+ const retired=lock+'.retired-'+crypto.randomUUID();
+ try{fs.renameSync(lock,retired);}
+ catch{throw Error('JOB_LOCK_GENERATION_CHANGED');}
+ let moved;
+ try{moved=fs.lstatSync(retired);}
+ catch{throw Error('JOB_LOCK_GENERATION_CHANGED');}
+ if(!same(moved,expected)){
+  let restored=false;
+  try{fs.linkSync(retired,lock);restored=true;}catch{}
+  if(restored){
+   try{fs.unlinkSync(retired);}catch{}
+  }else{
+   // Keep unexpected generation in quarantine; never remove its contents.
+   try{
+    const guard=fs.openSync(lock,'wx',0o600);
+    try{fs.writeSync(guard,'UNTRUSTED_LOCK_RETIRED\n');fs.fsyncSync(guard);}
+    finally{fs.closeSync(guard);}
+   }catch{}
+  }
+  throw Error('JOB_LOCK_GENERATION_CHANGED');
+ }
+ fs.unlinkSync(retired);
+}
+
 function atomicRename(from,to){
  let last;
  const sleeper=new Int32Array(new SharedArrayBuffer(4));
@@ -329,15 +364,22 @@ function copyJob(p,j){
  j.sha256=sourceSha;j.status='PUBLISHED';save(p,j);
 }
 function worker(p){
- let lockFd;
+ let lockFd,ownedLock;
  try{
   lockFd=fs.openSync(p.lock,'wx',0o600);
   fs.writeFileSync(lockFd,JSON.stringify({pid:process.pid})+'\n');
+  fs.fsyncSync(lockFd);
+  ownedLock=fs.fstatSync(lockFd);
   const j=recordRead(p);
   assertion(['QUEUED','INTERRUPTED','FAILED'].includes(j.status),'JOB_NOT_RUNNABLE');
   try{copyJob(p,j);}catch(e){j.status='FAILED';j.errorCode=String(e?.message||e).slice(0,100);save(p,j);}
  }catch(e){if(e.code!=='EEXIST')throw e;}
- finally{if(lockFd!==undefined){fs.closeSync(lockFd);fs.rmSync(p.lock,{force:true});}}
+ finally{
+  if(lockFd!==undefined){
+   fs.closeSync(lockFd);
+   retireLockGeneration(p.lock,ownedLock);
+  }
+ }
 }
 function inspect(p){
  const j=recordRead(p);
@@ -390,9 +432,10 @@ try{
     j={schema:'ctmesh-durable-v1',id,peer,from:node.alias,path:real,sourceRoot:allow,name:path.basename(real),
       bytes:st.size,mtimeMs:st.mtimeMs,ino:st.ino,dev:st.dev,copiedBytes:0,status:'QUEUED',createdAt:new Date().toISOString()};
     fs.writeFileSync(p.record,JSON.stringify(j)+'\n',{flag:'wx',mode:0o600});
-  }finally{
-    fs.closeSync(admissionFd);
-    fs.rmSync(admissionLock,{force:true});
+   }finally{
+   const ownedAdmission=fs.fstatSync(admissionFd);
+   fs.closeSync(admissionFd);
+   retireLockGeneration(admissionLock,ownedAdmission);
   }
   launch(p);
   reply(summary(j));
@@ -402,7 +445,13 @@ try{
  }else if(command==='resume'){
   const j=inspect(p);
   assertion(['FAILED','INTERRUPTED'].includes(j.status),'NOT_RESUMABLE');
-  if(fs.existsSync(p.lock)){const old=recordRead({record:p.lock});assertion(!running(old.pid),'JOB_STILL_RUNNING');fs.rmSync(p.lock);}
+  if(fs.existsSync(p.lock)){
+   const previous=fs.lstatSync(p.lock);
+   assertion(previous.isFile()&&!previous.isSymbolicLink()&&previous.nlink===1,'JOB_LOCK_UNTRUSTED');
+   const old=recordRead({record:p.lock});
+   assertion(!running(old.pid),'JOB_STILL_RUNNING');
+   retireLockGeneration(p.lock,previous);
+  }
   checkInput(j);
   j.status='QUEUED';j.errorCode=null;j.pid=null;save(p,j);
   launch(p);reply(summary(j));
