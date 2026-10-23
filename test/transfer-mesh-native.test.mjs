@@ -162,3 +162,45 @@ test('stale receive-lock reclamation never removes an atomically replaced active
   assert.equal(fs.existsSync(lock),true,'Fresh active receive lock must not be deleted');
  });
 });
+
+test('receive completion cannot unlink a fresh replacement owner lock',async()=>{
+ await fixture(async(a,b)=>{
+  const id='race-release-001',source=path.join(a.src,'release-lock-source.dat');
+  fs.writeFileSync(source,'verified-receive-content');
+  assert.equal((await a.tools.execute('transfer_mesh_send',{peer:'Linux',path:source,id})).status,'QUEUED');
+  const dir=path.join(b.root,'pairs','PC','transfers',id);
+  fs.mkdirSync(path.dirname(dir),{recursive:true});
+  fs.cpSync(path.join(a.root,'pairs','Linux','transfers',id),dir,{recursive:true});
+  const lock=path.join(b.dest,'.ctmesh-'+id+'.lock'),marker=path.join(b.root,'release-injection-fired');
+  const hook=path.join(b.root,'release-lock-hook.cjs');
+  fs.writeFileSync(hook,[
+   "const fs=require('node:fs'),mod=require('node:module');",
+   "const oldUnlink=fs.unlinkSync,oldRename=fs.renameSync;let fired=false;",
+   "fs.writeFileSync(process.env.CTMESH_RELEASE_RACE_MARKER+'.loaded','YES');",
+   "function swap(file){fired=true;oldRename.call(fs,file,file+'.prior-owner');",
+   " const record=JSON.parse(fs.readFileSync(file+'.prior-owner','utf8'));",
+   " fs.writeFileSync(file,JSON.stringify({...record,pid:process.pid})+'\\n');",
+   " fs.writeFileSync(process.env.CTMESH_RELEASE_RACE_MARKER,'REPLACED');}",
+   "fs.unlinkSync=function(file,...args){",
+   " if(!fired&&String(file)===process.env.CTMESH_RELEASE_RACE_LOCK)swap(String(file));",
+   " return oldUnlink.call(this,file,...args);};",
+   "fs.renameSync=function(from,to,...args){",
+   " if(!fired&&String(from)===process.env.CTMESH_RELEASE_RACE_LOCK&&",
+   " String(to).includes('.release-retire-'))swap(String(from));",
+   " return oldRename.call(this,from,to,...args);};",
+   "mod.syncBuiltinESMExports();"
+  ].join('\n'));
+  const result=spawnSync(process.execPath,[
+   '--require',hook,path.join(b.root,'transfer.mjs'),
+   'receive','--peer','PC','--id',id,'--dest',b.dest
+  ],{encoding:'utf8',timeout:15000,env:{...process.env,
+   COMMANDER_TRANSFER_HOME:b.root,
+   CTMESH_RELEASE_RACE_LOCK:lock,
+   CTMESH_RELEASE_RACE_MARKER:marker}});
+  assert.equal(fs.existsSync(marker+'.loaded'),true,'Child preload must run');
+  assert.equal(fs.existsSync(marker),true,'Race must trigger at actual release boundary');
+  assert.equal(fs.existsSync(lock),true,'Fresh active lock B must be preserved');
+  assert.notEqual(result.status,0,'Released owner cannot claim success after its lock was replaced');
+  assert.match(result.stderr,/Receive lock changed|Untrusted receive lock/);
+ });
+});
