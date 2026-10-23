@@ -52,7 +52,7 @@ jobs:
             if(Get-Command node.exe -ErrorAction SilentlyContinue){throw 'NODE_SHOULD_BE_HIDDEN_FOR_CANARY'}
             if(Get-Command git.exe -ErrorAction SilentlyContinue){throw 'GIT_SHOULD_BE_HIDDEN_FOR_CANARY'}
             $installDir=Join-Path $env:RUNNER_TEMP 'rc-server-app'
-            & $script -SourceRef $env:RC_SOURCE_REF -ExpectedCommit $env:RC_EXPECTED_COMMIT -InstallDir $installDir -NoStartServer -GuiControl Off
+            & $script -SourceRef $env:RC_SOURCE_REF -RepoUrl 'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git' -ExpectedCommit $env:RC_EXPECTED_COMMIT -InstallDir $installDir -NoStartServer -GuiControl Off
             $manifestPath=Join-Path $env:ProgramData 'ChatGPTRemoteCommander\server-install-allowlist.json'
             $manifest=Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
             if($manifest.resolvedCommit -ne $env:RC_EXPECTED_COMMIT){throw 'MANIFEST_COMMIT_MISMATCH'}
@@ -80,7 +80,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker run --rm             -e RC_SOURCE_REF="$RC_SOURCE_REF"             -e RC_EXPECTED_COMMIT="$RC_EXPECTED_COMMIT"             -v "$GITHUB_WORKSPACE:/src:ro"             ubuntu:24.04 bash -lc '
+          docker run --rm             -e RC_SOURCE_REF="$RC_SOURCE_REF"             -e RC_EXPECTED_COMMIT="$RC_EXPECTED_COMMIT"             -e REMOTE_COMMANDER_REPO_URL="https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git"             -v "$GITHUB_WORKSPACE:/src:ro"             ubuntu:24.04 bash -lc '
               set -euo pipefail
               bash /src/server-install-linux.sh                 --source-ref "$RC_SOURCE_REF"                 --expected-commit "$RC_EXPECTED_COMMIT"                 --install-dir /opt/chatgpt-remote-commander/app                 --no-start
               test "$(git -C /opt/chatgpt-remote-commander/app rev-parse HEAD)" = "$RC_EXPECTED_COMMIT"
