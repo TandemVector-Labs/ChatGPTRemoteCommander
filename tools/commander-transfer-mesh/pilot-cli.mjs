@@ -571,8 +571,10 @@ try{
          // Core admission already requires this destination to exist. Do not
          // create any directory by pathname before the OS directory pin is held:
          // a swapped ancestor could redirect mkdir outside the allowed root.
-         if(destIdentity)verifyDest(dest,destIdentity);
-         else fs.mkdirSync(dest,{recursive:true});
+         try{verifyDest(dest,destIdentity);}catch(e){
+          if(e.code==='ENOENT')fail('DESTINATION_MUST_EXIST');
+          throw e;
+         }
          await withPinnedDest(dest,destIdentity,async pinnedDest=>{
          const target=path.join(pinnedDest,m.name);
          if(fs.existsSync(target))fail('Destination exists; overwrite forbidden');
