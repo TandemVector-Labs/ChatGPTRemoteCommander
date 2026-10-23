@@ -7,6 +7,7 @@ import {randomUUID} from 'node:crypto';
 import {constants} from 'node:fs';
 import fs from 'node:fs/promises';
 import {assertUnredirectedDirectoryAncestors} from './managed-path-anchor.mjs';
+import {withPinnedWindowsDirectory} from './windows-directory-pin.mjs';
 
 const SCHEMA='rc-gui-pending-input-v1';
 const INPUT_TOOLS=new Set([
@@ -39,6 +40,13 @@ export function createGuiInputIncidentStore({file=defaultFile(),now=()=>new Date
   // Keep all Linux ancestor directory FDs alive until the incident operation
   // finishes. A preflight-only pathname is not safe across concurrent rename.
   async function withPinnedFolder(operation,{create=false,missingOk=false}={}){
+    if(process.platform==='win32'){
+      return withPinnedWindowsDirectory(folder,async paths=>{
+        if(!paths)return operation(null);
+        assertPrivateFolder(await fs.lstat(folder));
+        return operation({filePath:file,guardPath:guard,folderPath:folder,pinned:false});
+      },{create,missingOk});
+    }
     if(process.platform!=='linux'){
       assertUnredirectedDirectoryAncestors(folder,'GUI_INCIDENT_STORAGE_UNAVAILABLE');
       if(create)await fs.mkdir(folder,{recursive:true,mode:0o700});
