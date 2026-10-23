@@ -16,6 +16,9 @@ test('Linux published durable payload must not escape after destination ancestor
  try{
   fs.mkdirSync(path.join(root,'jobs',peer),{recursive:true});
   fs.mkdirSync(parentDir,{recursive:true});
+  // Pre-create only the external folder, so an unpinned final rename can
+  // visibly redirect its synthetic payload even without an earlier mkdir.
+  fs.mkdirSync(path.join(outside,'transfers',id),{recursive:true});
   fs.writeFileSync(path.join(root,'node.json'),JSON.stringify({alias:'PC'}));
   const source=path.join(root,'sample.dat');fs.writeFileSync(source,data);const s=fs.statSync(source);
   fs.writeFileSync(path.join(root,'jobs',peer,id+'.json'),JSON.stringify({
@@ -25,13 +28,13 @@ test('Linux published durable payload must not escape after destination ancestor
   })+'\n');
   fs.writeFileSync(hook,[
    "const fs=require('node:fs'),path=require('node:path'),m=require('node:module');",
-   "const mkdir=fs.mkdirSync,rename=fs.renameSync;let swapped=false;",
-   "fs.mkdirSync=function(name,...args){",
-   "if(!swapped&&path.basename(String(name))==='transfers'){swapped=true;",
+   "const rename=fs.renameSync;let swapped=false;",
+   "fs.renameSync=function(from,to,...args){",
+   "if(!swapped&&path.basename(String(to))==='payload.bin'){swapped=true;",
    "rename(process.env.RC_PARENT,process.env.RC_PARENT+'.original');",
    "fs.symlinkSync(process.env.RC_OUTSIDE,process.env.RC_PARENT,'dir');",
    "fs.writeFileSync(process.env.RC_MARK,'swapped');",
-   "}return mkdir.call(this,name,...args);",
+   "}return rename.call(this,from,to,...args);",
    "};m.syncBuiltinESMExports();"
   ].join('\n'));
   const res=spawnSync(process.execPath,[cli,'work','--peer',peer,'--id',id],{
@@ -42,7 +45,8 @@ test('Linux published durable payload must not escape after destination ancestor
   assert.equal(fs.existsSync(mark),true,'actual worker must reach post-copy publication hook; '+res.stderr);
   assert.equal(fs.existsSync(path.join(outside,'transfers',id,'payload.bin')),false,
     'worker must not publish outside operator trust root');
-  assert.deepEqual(fs.readdirSync(outside),[],'no external directory should be created');
+  assert.deepEqual(fs.readdirSync(path.join(outside,'transfers',id)),[],
+    'no synthetic transfer bytes may reach the pre-existing external destination');
  }finally{
   fs.rmSync(root,{recursive:true,force:true,maxRetries:5,retryDelay:50});
   fs.rmSync(outside,{recursive:true,force:true,maxRetries:5,retryDelay:50});
