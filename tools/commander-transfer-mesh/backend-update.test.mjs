@@ -14,7 +14,7 @@ const shaFile=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).di
 // The historically field-verified V2 pilot (sha256: 3d7c740fcf8b43bfce4f3a470d286b0de6cc6c59b1aeeeef624381b74c1cca66)
 // remains a distinct, unmodified authority in docs/RELEASE_AUTHORITY.md.
 // This source hash does not authorize a new host installation.
-const expectedCandidate='9ed60f81f0d4ed61743fc90825e79b3e1a0edd2a7435d70c661fce43549ab43e';
+const expectedCandidate='3192c4985b5c88e543a2871a0cd379d0d80760730760502934f8b17968840d17';
 const proc=(...args)=>spawnSync(process.execPath,[tool,...args],{encoding:'utf8',timeout:15000,windowsHide:true});
 function fixture(callback){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'rc-r16-backend-tx-'));
