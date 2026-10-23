@@ -220,29 +220,71 @@ function receiveLock(lockFile,{peer,id,sha256}){
 // Bind the outgoing source's bytes to the regular-file inode checked before
 // staging. Node copyFileSync(path, ...) otherwise follows a symlink substituted
 // after the initial lstat, allowing an unrelated file to be queued as trusted.
-function copyOutgoingVerifiedSource(file,temp,initial){
+// Core may select a source only inside an allowlisted root. Revalidate that
+// trust boundary in the child after spawn: a source ancestor may change after
+// Core's realpath/allowlist check but before Pilot first sees the pathname.
+function withLinuxPinnedAllowedSource(file,scope,read){
+ if(process.platform!=='linux'||!scope)return read(file);
+ const root=scope.root,rel=path.relative(root,file);
+ if(!path.isAbsolute(root)||!rel||rel==='..'||rel.startsWith('..'+path.sep)||
+    path.isAbsolute(rel))fail('SOURCE_OUTSIDE_APPROVED_ROOT');
+ const parts=rel.split(path.sep);
+ if(parts.some(p=>!p||p==='.'||p==='..'))fail('SOURCE_OUTSIDE_APPROVED_ROOT');
+ const flags=fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_NOFOLLOW;
+ const fds=[];
+ try{
+  const before=fs.lstatSync(root,{bigint:true});
+  if(!before.isDirectory()||before.isSymbolicLink()||
+     before.dev!==scope.rootDev||before.ino!==scope.rootIno)
+   fail('SOURCE_ROOT_IDENTITY_CHANGED');
+  const rootFd=fs.openSync(root,flags);
+  fds.push(rootFd);
+  const opened=fs.fstatSync(rootFd,{bigint:true});
+  if(!opened.isDirectory()||opened.dev!==before.dev||opened.ino!==before.ino)
+   fail('SOURCE_ROOT_IDENTITY_CHANGED');
+  for(const part of parts.slice(0,-1)){
+   let fd;
+   try{fd=fs.openSync('/proc/self/fd/'+fds.at(-1)+'/'+part,flags);}
+   catch(e){if(['ELOOP','ENOTDIR','ENOENT'].includes(e.code))
+    fail('SOURCE_OUTSIDE_APPROVED_ROOT');throw e;}
+   fds.push(fd);
+   if(!fs.fstatSync(fd).isDirectory())fail('SOURCE_OUTSIDE_APPROVED_ROOT');
+  }
+  return read('/proc/self/fd/'+fds.at(-1)+'/'+parts.at(-1));
+ }finally{for(let i=fds.length-1;i>=0;i--)fs.closeSync(fds[i]);}
+}
+function copyOutgoingVerifiedSource(file,temp,initial,scope){
  if(process.platform!=='linux'){
   fs.copyFileSync(file,temp,fs.constants.COPYFILE_EXCL);
   return;
  }
- const flags=fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW|(fs.constants.O_NONBLOCK??0);
- const fd=fs.openSync(file,flags);
- try{
-  const opened=fs.fstatSync(fd),named=fs.lstatSync(file);
-  const same=(a,b)=>a.dev===b.dev&&a.ino===b.ino&&a.size===b.size&&
-   a.mtimeMs===b.mtimeMs&&a.ctimeMs===b.ctimeMs;
-  if(!opened.isFile()||opened.nlink!==1||!named.isFile()||
-     named.isSymbolicLink()||named.nlink!==1||
-     !same(initial,opened)||!same(opened,named))
-   fail('Source changed before pinned outgoing copy');
-  // Only the held descriptor's target may supply bytes to the managed temp.
-  fs.copyFileSync('/proc/self/fd/'+fd,temp,fs.constants.COPYFILE_EXCL);
-  const after=fs.fstatSync(fd),namedAfter=fs.lstatSync(file);
-  if(!after.isFile()||after.nlink!==1||!namedAfter.isFile()||
-     namedAfter.isSymbolicLink()||namedAfter.nlink!==1||
-     !same(opened,after)||!same(opened,namedAfter))
-   fail('Source changed during pinned outgoing copy');
- }finally{fs.closeSync(fd);}
+ const copy=(sourceName)=>{
+  const flags=fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW|(fs.constants.O_NONBLOCK??0);
+  const fd=fs.openSync(sourceName,flags);
+  try{
+   const opened=fs.fstatSync(fd),named=fs.lstatSync(sourceName);
+   const same=(a,b)=>a.dev===b.dev&&a.ino===b.ino&&a.size===b.size&&
+    a.mtimeMs===b.mtimeMs&&a.ctimeMs===b.ctimeMs;
+   if(!opened.isFile()||opened.nlink!==1||!named.isFile()||
+      named.isSymbolicLink()||named.nlink!==1||
+      !same(initial,opened)||!same(opened,named))
+    fail('Source changed before pinned outgoing copy');
+   if(scope){
+    const verified=fs.fstatSync(fd,{bigint:true});
+    if(verified.dev!==scope.sourceDev||verified.ino!==scope.sourceIno||
+       verified.size!==scope.sourceSize||verified.ctimeNs!==scope.sourceCtimeNs)
+     fail('SOURCE_ADMISSION_IDENTITY_CHANGED');
+   }
+   // Copy from the exact descriptor, never from a freshly resolved source path.
+   fs.copyFileSync('/proc/self/fd/'+fd,temp,fs.constants.COPYFILE_EXCL);
+   const after=fs.fstatSync(fd),namedAfter=fs.lstatSync(sourceName);
+   if(!after.isFile()||after.nlink!==1||!namedAfter.isFile()||
+      namedAfter.isSymbolicLink()||namedAfter.nlink!==1||
+      !same(opened,after)||!same(opened,namedAfter))
+    fail('Source changed during pinned outgoing copy');
+  }finally{fs.closeSync(fd);}
+ };
+ return withLinuxPinnedAllowedSource(file,scope,copy);
 }
 function copyVerifiedPartial(source,part,bytes){
  const flags=fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW||0);
@@ -340,12 +382,29 @@ try{
  assertManagedEntry(path.join(root,'node.json'),false);
  const self=readVerifiedJson(path.join(root,'node.json'),'Untrusted node identity').alias;
  if(!validAlias.test(self))fail('Unrecognized local device');
- if(cmd==='info'){json({schema:'ctmesh-v1',device:self,transport:'Syncthing 2.1.6',root});}
+ if(cmd==='source-admission-capabilities'){json({schema:'ctmesh-source-admission-v1',linuxPinnedRoot:true,linuxPinnedSource:true});}
+ else if(cmd==='info'){json({schema:'ctmesh-v1',device:self,transport:'Syncthing 2.1.6',root});}
  else{
    const peer=arg('peer');if(!peer)fail('Provide --peer');
    if(cmd==='send'){
      const filename=arg('path');if(!filename)fail('Provide --path');
      const file=path.resolve(filename),st=fs.lstatSync(file),name=path.basename(file);
+     const approvedSourceRoot=arg('source-root');
+     let sourceScope;
+     if(approvedSourceRoot!==undefined){
+      if(process.platform!=='linux'||!path.isAbsolute(approvedSourceRoot))
+       fail('SOURCE_ROOT_ADMISSION_INVALID');
+      const parseId=(key)=>{
+       const value=arg(key);
+       if(typeof value!=='string'||!/^(0|[1-9][0-9]*)$/.test(value))
+        fail('SOURCE_ROOT_ADMISSION_INVALID');
+       return BigInt(value);
+      };
+      sourceScope={root:path.resolve(approvedSourceRoot),
+       rootDev:parseId('root-dev'),rootIno:parseId('root-ino'),
+       sourceDev:parseId('source-dev'),sourceIno:parseId('source-ino'),
+       sourceSize:parseId('source-size'),sourceCtimeNs:parseId('source-ctime-ns')};
+     }
      if(!st.isFile()||st.isSymbolicLink()||/[\\/:*?"<>|\x00-\x1f]/.test(name))fail('Unsafe source');
      const id=arg('id',crypto.randomUUID()),p=transferPaths(peer,self,id);
      assertManagedStaging(peer,id);
@@ -362,7 +421,7 @@ try{
      // and the actual fs.copyFileSync/fs.renameSync calls.
      const sha256=withLinuxPinnedManagedPath(temp,pinnedTemp=>
       withLinuxPinnedManagedPath(p.payload,pinnedPayload=>{
-       copyOutgoingVerifiedSource(file,pinnedTemp,st);
+       copyOutgoingVerifiedSource(file,pinnedTemp,st,sourceScope);
        const after=fs.statSync(file);
        if(after.size!==st.size||after.mtimeMs!==st.mtimeMs)
         fail('Source changed while copying');

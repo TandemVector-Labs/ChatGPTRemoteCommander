@@ -111,6 +111,35 @@ export function createTransferMeshTools({ config = {} } = {}) {
       const file = allowedPath(args.path, policy.sourceRoots, 'file');
       if (fs.statSync(file).size > limits.maxSourceBytes) throw new Error('TRANSFER_SOURCE_SIZE_QUOTA');
       cmd = ['send','--peer',args.peer,'--path',file,'--id',args.id];
+      if(process.platform==='linux'){
+        let capability;
+        try{
+          capability=JSON.parse(execFileSync(process.execPath,[cli,'source-admission-capabilities'],{
+            timeout:5000,maxBuffer:8192,windowsHide:true,env:spawnEnv,encoding:'utf8'
+          }).trim());
+        }catch{throw new Error('TRANSFER_SOURCE_BACKEND_INCOMPATIBLE');}
+        if(capability?.schema!=='ctmesh-source-admission-v1'||
+           capability.linuxPinnedRoot!==true||capability.linuxPinnedSource!==true)
+          throw new Error('TRANSFER_SOURCE_BACKEND_INCOMPATIBLE');
+        const approvedRoot=policy.sourceRoots.map(canonicalExisting).find(p=>within(file,p));
+        if(!approvedRoot)throw new Error('TRANSFER_PATH_NOT_ALLOWED');
+        const rootStat=fs.lstatSync(approvedRoot,{bigint:true});
+        const sourceStat=fs.lstatSync(file,{bigint:true});
+        // Recheck the exact source inode admitted to the child; the earlier
+        // pathname stat quota check can race with a same-name replacement.
+        if(sourceStat.size>BigInt(limits.maxSourceBytes))
+          throw new Error('TRANSFER_SOURCE_SIZE_QUOTA');
+        if(!rootStat.isDirectory()||rootStat.isSymbolicLink()||
+           !sourceStat.isFile()||sourceStat.isSymbolicLink()||sourceStat.nlink!==1n||
+           canonicalExisting(file)!==file)
+          throw new Error('TRANSFER_SOURCE_IDENTITY_UNSTABLE');
+        // Child must recheck the exact root and inode admitted here.
+        // The caller's initial realpath check alone does not survive spawn.
+        cmd.push('--source-root',approvedRoot,'--root-dev',String(rootStat.dev),
+          '--root-ino',String(rootStat.ino),'--source-dev',String(sourceStat.dev),
+          '--source-ino',String(sourceStat.ino),'--source-size',String(sourceStat.size),
+          '--source-ctime-ns',String(sourceStat.ctimeNs));
+      }
     }
     if (name === 'transfer_mesh_status') {
       if (!PEERS.includes(args.peer) || !ID_PATTERN.test(args.id)) throw new Error('TRANSFER_ARGS_INVALID');
