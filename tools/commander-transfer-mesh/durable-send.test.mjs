@@ -507,3 +507,34 @@ test('Linux job-status tolerates a safe atomic journal generation replacement wi
   assert.equal(JSON.parse(result.stdout).status,'PUBLISHED');
  }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
+
+test('Linux job-status accepts safely replaced journal inode unlinked between open and fstat',t=>{
+ if(process.platform!=='linux'){t.skip('Linux inode-unlink generation race');return;}
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-journal-nlink-'));
+ try{
+  const dir=path.join(root,'jobs','Linux');fs.mkdirSync(dir,{recursive:true});
+  const id='fd-unlink-001',record=path.join(dir,id+'.json'),next=path.join(dir,'fresh.tmp');
+  const marker=path.join(root,'rotation-fired'),hook=path.join(root,'unlink-hook.cjs');
+  const previous={schema:'ctmesh-durable-v1',id,peer:'Linux',status:'QUEUED',bytes:64,copiedBytes:0,createdAt:new Date().toISOString()};
+  fs.writeFileSync(record,JSON.stringify(previous)+'\n',{mode:0o600});
+  fs.writeFileSync(next,JSON.stringify({...previous,status:'PUBLISHED',copiedBytes:64,sha256:'b'.repeat(64)})+'\n',{mode:0o600});
+  fs.writeFileSync(hook,[
+   "const fs=require('node:fs'),mod=require('node:module');",
+   "const oldOpen=fs.openSync,oldStat=fs.fstatSync;let target=null,fired=false;",
+   "fs.openSync=function(name,...args){const fd=oldOpen.call(this,name,...args);",
+   " if(String(name).endsWith('/'+process.env.RC_NAME))target=fd;return fd;};",
+   "fs.fstatSync=function(fd,...args){",
+   " if(!fired&&fd===target){fired=true;fs.renameSync(process.env.RC_NEXT,process.env.RC_RECORD);",
+   " fs.writeFileSync(process.env.RC_MARKER,'RENAME_AFTER_OPEN');}",
+   " return oldStat.call(this,fd,...args);};",
+   "mod.syncBuiltinESMExports();"
+  ].join('\n'));
+  const res=spawnSync(process.execPath,['--require',hook,cli,'job-status','--peer','Linux','--id',id],{
+   encoding:'utf8',timeout:6000,env:{...process.env,COMMANDER_TRANSFER_HOME:root,
+    RC_RECORD:record,RC_NEXT:next,RC_NAME:id+'.json',RC_MARKER:marker}
+  });
+  assert.equal(fs.existsSync(marker),true,'Controlled rename after file opening must fire');
+  assert.equal(res.status,0,'Old unlinked FD must be discarded and valid new generation reread: '+res.stderr);
+  assert.equal(JSON.parse(res.stdout).status,'PUBLISHED');
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});

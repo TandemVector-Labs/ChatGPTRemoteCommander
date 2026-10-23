@@ -108,8 +108,20 @@ function recordReadOnce(p){
  const fd=fs.openSync(name,flags);
  try{
   const opened=fs.fstatSync(fd);
-  assertion(opened.isFile()&&opened.nlink===1&&opened.size>=1&&opened.size<=131072,
+  assertion(opened.isFile()&&opened.size>=1&&opened.size<=131072,
    'UNTRUSTED_JOB_RECORD');
+  // An atomic rename can unlink the old, already-open inode just before
+  // this fstat. Never consume that detached generation; verify the new
+  // pathname is a bounded regular file in the pinned parent and reread.
+  if(process.platform==='linux'&&opened.nlink===0){
+   const current=fs.lstatSync(name);
+   assertion(opened.dev===before.dev&&opened.ino===before.ino&&
+     current.isFile()&&!current.isSymbolicLink()&&current.nlink===1&&
+     current.size>=1&&current.size<=131072&&current.dev===before.dev&&
+     current.ino!==opened.ino,'UNTRUSTED_JOB_RECORD');
+   throw Error('JOB_RECORD_ATOMIC_REPLACEMENT');
+  }
+  assertion(opened.nlink===1,'UNTRUSTED_JOB_RECORD');
   if(opened.size!==before.size||opened.dev!==before.dev||opened.ino!==before.ino)
    throw Error('JOB_RECORD_ATOMIC_REPLACEMENT');
   const bytes=Buffer.alloc(opened.size);
