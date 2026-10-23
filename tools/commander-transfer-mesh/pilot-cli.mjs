@@ -177,7 +177,8 @@ async function withPinnedDest(dest,identity,fn){
    fds.push(fs.openSync('/',flags));
    for(const part of path.resolve(dest).split(path.sep).filter(Boolean)){
     if(part==='.'||part==='..')fail('DESTINATION_ANCESTOR_REJECTED');
-    fds.push(fs.openSync('/proc/self/fd/'+fds.at(-1)+'/'+part,flags));
+    try{fds.push(fs.openSync('/proc/self/fd/'+fds.at(-1)+'/'+part,flags));}
+    catch(e){if(['ELOOP','ENOTDIR','ENOENT'].includes(e.code))fail('DESTINATION_ANCESTOR_REJECTED');throw e;}
    }
    const pinned='/proc/self/fd/'+fds.at(-1);
    // /proc/self/fd/N is a symlink by design; validate the held directory FD,
