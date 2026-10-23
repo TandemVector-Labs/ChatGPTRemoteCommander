@@ -241,8 +241,35 @@ function receiveLock(lockFile,{peer,id,sha256}){
  return ()=>{
   try{
    let current;try{current=fs.lstatSync(lockFile);}catch(e){if(e.code!=='ENOENT')throw e;}
-   if(current&&current.dev===owned.dev&&current.ino===owned.ino&&!current.isSymbolicLink())
-     fs.unlinkSync(lockFile);
+   if(!current||!current.isFile()||current.isSymbolicLink()||
+      current.nlink!==1||current.dev!==owned.dev||current.ino!==owned.ino)
+     fail('Receive lock changed during release');
+   // The lstat above is only a preflight, not deletion authority. Move the
+   // currently named generation, then verify the inode that ACTUALLY moved.
+   const retired=lockFile+'.release-retire-'+crypto.randomUUID();
+   try{fs.renameSync(lockFile,retired);}
+   catch{fail('Receive lock changed during release');}
+   let moved;
+   try{moved=fs.lstatSync(retired);}
+   catch{fail('Receive lock changed during release');}
+   if(!moved.isFile()||moved.isSymbolicLink()||moved.nlink!==1||
+      moved.dev!==owned.dev||moved.ino!==owned.ino){
+     // A newer owner's lock won the rename race. Restore without overwrite
+     // and fail closed; never delete the new owner by its old pathname.
+     let restored=false;
+     try{fs.linkSync(retired,lockFile);restored=true;}catch{}
+     if(restored){try{fs.unlinkSync(retired);}catch{}}
+     else{
+       try{
+        const guard=fs.openSync(lockFile,'wx',0o600);
+        try{fs.writeSync(guard,'UNTRUSTED_RELEASED_LOCK\\n');fs.fsyncSync(guard);}
+        finally{fs.closeSync(guard);}
+       }catch{}
+     }
+     fail('Receive lock changed during release');
+   }
+   try{fs.unlinkSync(retired);}
+   catch{fail('Receive lock changed during release');}
   }finally{fs.closeSync(fd);}
  };
 }
