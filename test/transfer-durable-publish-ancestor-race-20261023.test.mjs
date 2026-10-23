@@ -14,11 +14,11 @@ test('Linux published durable payload must not escape after destination ancestor
  const parent=path.join(root,'pairs',peer),parentDir=path.join(parent,'transfers');
  const dest=path.join(parentDir,id),mark=path.join(root,'destination-hook.mark'),hook=path.join(root,'destination-hook.cjs');
  try{
-  fs.mkdirSync(path.join(root,'jobs',peer),{recursive:true});
-  fs.mkdirSync(parentDir,{recursive:true});
+  fs.mkdirSync(path.join(root,'jobs',peer),{recursive:true,mode:0o700});
+  fs.mkdirSync(parentDir,{recursive:true,mode:0o700});
   // Pre-create only the external folder, so an unpinned final rename can
   // visibly redirect its synthetic payload even without an earlier mkdir.
-  fs.mkdirSync(path.join(outside,'transfers',id),{recursive:true});
+  fs.mkdirSync(path.join(outside,'transfers',id),{recursive:true,mode:0o700});
   fs.writeFileSync(path.join(root,'node.json'),JSON.stringify({alias:'PC'}));
   const source=path.join(root,'sample.dat');fs.writeFileSync(source,data);const s=fs.statSync(source);
   fs.writeFileSync(path.join(root,'jobs',peer,id+'.json'),JSON.stringify({
