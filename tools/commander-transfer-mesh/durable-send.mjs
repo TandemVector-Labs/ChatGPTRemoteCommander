@@ -309,17 +309,26 @@ function ensureStageDirectory(folder){
 }
 function copyJob(p,j){
  if(process.platform==='linux'){
-  ensureStageDirectory(path.join(root,'staging'));
-  ensureStageDirectory(p.stageDir);
- }else fs.mkdirSync(p.stageDir,{recursive:true});
- // Keep the staging parent inode held for the entire copy/hash/rename,
- // not just a preflight lstat: public directory names can change mid-job.
- return withLinuxPinnedPath(p.part,(part)=>copyJobWithPinnedPart(p,j,part));
+  // Prepare both the staging and publication tree through held parent FDs.
+  // All content operations below remain under private, pinned directory inodes.
+  for(const directory of [
+   path.join(root,'staging'),p.stageDir,
+   path.join(root,'pairs'),
+   path.dirname(path.dirname(p.destination)),
+   path.dirname(p.destination),p.destination
+  ])ensureStageDirectory(directory);
+ }else{
+  fs.mkdirSync(p.stageDir,{recursive:true});
+  fs.mkdirSync(path.dirname(p.destination),{recursive:true});
+ }
+ return withLinuxPinnedPath(p.part,(part)=>
+  withLinuxPinnedPath(path.join(p.destination,'payload.bin'),(payload)=>
+   copyJobWithPinnedPart(p,j,part,path.dirname(payload))));
 }
-function copyJobWithPinnedPart(p,j,part){
+function copyJobWithPinnedPart(p,j,part,destination){
  const source=checkInput(j);
- const existingPayload=path.join(p.destination,'payload.bin');
- const existingManifest=path.join(p.destination,'manifest.json');
+ const existingPayload=path.join(destination,'payload.bin');
+ const existingManifest=path.join(destination,'manifest.json');
  if(fs.existsSync(existingPayload)){
   assertion(fs.lstatSync(existingPayload).isFile(),'PUBLISHED_PAYLOAD_INVALID');
   const verified=hash(source);
@@ -373,16 +382,18 @@ function copyJobWithPinnedPart(p,j,part){
  checkInput(j);
  const recent=recordRead(p);
  if(['CANCEL_REQUESTED','CANCELLED'].includes(recent.status)){j.status='CANCELLED';save(p,j);return;}
- fs.mkdirSync(path.dirname(p.destination),{recursive:true});
- if(fs.existsSync(p.destination)){
-  const entry=fs.lstatSync(p.destination);
-  assertion(entry.isDirectory()&&!entry.isSymbolicLink(),'TRANSFER_PUBLICATION_PATH_UNSAFE');
-  assertion(fs.readdirSync(p.destination).length===0,'TRANSFER_ALREADY_PUBLISHED');
- }else fs.mkdirSync(p.destination,{recursive:false});
- const payload=path.join(p.destination,'payload.bin');
+ if(fs.existsSync(destination)){
+  // On Linux destination is /proc/self/fd/N, the intentional link to the
+  // already-open O_DIRECTORY|O_NOFOLLOW descriptor. Check its target inode.
+  const entry=process.platform==='linux'?fs.statSync(destination):fs.lstatSync(destination);
+  assertion(entry.isDirectory()&&(process.platform==='linux'||!entry.isSymbolicLink()),
+    'TRANSFER_PUBLICATION_PATH_UNSAFE');
+  assertion(fs.readdirSync(destination).length===0,'TRANSFER_ALREADY_PUBLISHED');
+ }else fs.mkdirSync(destination,{recursive:false});
+ const payload=path.join(destination,'payload.bin');
  atomicRename(part,payload);
  const manifest={schema:'ctmesh-v1',id:j.id,from:j.from,to:j.peer,name:j.name,bytes:j.bytes,sha256:sourceSha,createdAt:j.createdAt};
- fs.writeFileSync(path.join(p.destination,'manifest.json'),JSON.stringify(manifest)+'\n',{flag:'wx',mode:0o600});
+ fs.writeFileSync(path.join(destination,'manifest.json'),JSON.stringify(manifest)+'\n',{flag:'wx',mode:0o600});
  j.sha256=sourceSha;j.status='PUBLISHED';save(p,j);
 }
 function worker(p){

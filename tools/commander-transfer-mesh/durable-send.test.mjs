@@ -52,7 +52,7 @@ test('durable job stages multi-MiB file without synchronous RPC timeout and publ
   // Crash at publish boundary: payload exists, journal incomplete, manifest absent.
   const recover={...original,id:'durable-boundary-003',sha256:null,status:'INTERRUPTED',copiedBytes:payload.length,pid:null};
   fs.writeFileSync(path.join(jobDir,'durable-boundary-003.json'),JSON.stringify(recover));
-  const partialDest=path.join(root,'pairs','Linux','transfers','durable-boundary-003');fs.mkdirSync(partialDest);
+  const partialDest=path.join(root,'pairs','Linux','transfers','durable-boundary-003');fs.mkdirSync(partialDest,{mode:0o700});
   fs.copyFileSync(file,path.join(partialDest,'payload.bin'));
   call(root,'resume','--peer','Linux','--id','durable-boundary-003');
   const repaired=await done(root,'Linux','durable-boundary-003');
