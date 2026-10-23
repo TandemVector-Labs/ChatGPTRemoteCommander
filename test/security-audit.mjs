@@ -40,10 +40,30 @@ for (const expectedIgnored of ['config.local.json', '.env', 'connections.local.j
   if (ignored.status !== 0) findings.push({ scope: 'CURRENT', type: 'Expected ignore missing', location: expectedIgnored });
 }
 
+// Report only provenance. Never print matching bytes, context, raw paths or tokens.
+// The existing regexes and fail-closed HISTORY admission remain unchanged.
+function historyProvenance(history, match) {
+  const index = match.index;
+  const lineStart = history.lastIndexOf('\n', index) + 1;
+  const linePrefix = history.slice(lineStart, index + 1);
+  const kind = linePrefix.startsWith('+') ? 'added' :
+    linePrefix.startsWith('-') ? 'removed' : 'context-or-metadata';
+  const blockStart = history.lastIndexOf('\ncommit ', index);
+  const commitStart = blockStart >= 0 ? blockStart + 1 :
+    (history.startsWith('commit ') ? 0 : -1);
+  const commit = commitStart >= 0 ?
+    /^commit ([0-9a-f]{40})\b/.exec(history.slice(commitStart, commitStart + 55))?.[1] ?? null : null;
+  return { commit, kind, acrossLines: /\r?\n/.test(match[0]) };
+}
+
 const history = git(['log', '--all', '-p', '--no-color', '--no-ext-diff']);
-for (const [type, pattern] of patterns) {
+for (const [index, [type, pattern]] of patterns.entries()) {
   pattern.lastIndex = 0;
-  if (pattern.test(history)) findings.push({ scope: 'HISTORY', type, location: 'git log --all -p' });
+  const match = pattern.exec(history);
+  if (match) findings.push({
+    scope: 'HISTORY', type, ruleId: 'H' + String(index + 1).padStart(2, '0'),
+    location: 'git log --all -p', provenance: historyProvenance(history, match)
+  });
 }
 const emails = [...new Set(git(['log', '--all', '--format=%ae%n%ce']).split(/\r?\n/).filter(Boolean))].sort();
 if (emails.length) {
