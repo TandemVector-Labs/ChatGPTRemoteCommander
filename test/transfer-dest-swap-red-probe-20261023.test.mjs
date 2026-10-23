@@ -32,16 +32,12 @@ test('GREEN: native child rejects substituted destination after Core admission',
     fs.writeFileSync(hook,[
       "const fs=require('node:fs'),path=require('node:path');",
       "fs.writeFileSync(process.env.RC_DEST_SWAP_MARKER+'.loaded',process.argv.join('|'));",
-      "const original=fs.lstatSync;let swapped=false;",
-      "fs.lstatSync=function(dir,...args){",
-      " if(!swapped&&process.argv.includes('receive')&&path.resolve(String(dir)).toLowerCase()===process.env.RC_DEST_SWAP_TARGET.toLowerCase()){",
-      "  swapped=true;",
-      "  fs.renameSync(dir,String(dir)+'.original');",
-      "  fs.symlinkSync(process.env.RC_DEST_SWAP_OUTSIDE,dir,process.platform==='win32'?'junction':'dir');",
-      "  fs.writeFileSync(process.env.RC_DEST_SWAP_MARKER,'SWAPPED_BEFORE_RECEIVE');",
-      " }",
-      " return original.call(this,dir,...args);",
-      "};"
+      "if(process.argv.includes('receive')){",
+      " const dest=process.env.RC_DEST_SWAP_TARGET;",
+      " fs.renameSync(dest,dest+'.original');",
+      " fs.symlinkSync(process.env.RC_DEST_SWAP_OUTSIDE,dest,'junction');",
+      " fs.writeFileSync(process.env.RC_DEST_SWAP_MARKER,'SWAPPED_BEFORE_PILOT');",
+      "}",
     ].join('\n'));
     process.env.NODE_OPTIONS='--require='+hook;
     process.env.RC_DEST_SWAP_TARGET=dest;
