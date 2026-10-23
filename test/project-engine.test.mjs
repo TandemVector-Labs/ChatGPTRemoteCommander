@@ -237,20 +237,30 @@ test('a changed runner policy cannot resolve an old input request',async()=>{
 
 test('human WAITING_INPUT time does not consume the execution deadline',async()=>{
   const f=fixture(async()=>ask());
+  const originalNow=Date.now;
+  let simulatedWaitingMs=0;
   try{
+    // Avoid testing scheduler speed: the full Windows CI runner may need over
+    // 1000ms to reach the first WAITING_INPUT checkpoint under heavy load.
+    Date.now=()=>originalNow()+simulatedWaitingMs;
     await f.create();
-    const initial=await f.start({durationMs:1000});
+    const initial=await f.start({durationMs:30000});
     const wait=await f.tick();
     assert.equal(wait.status,'WAITING_INPUT');
     assert.ok(Number.isSafeInteger(wait.waitingStartedAt));
-    await new Promise(resolve=>setTimeout(resolve,1100));
+    // Advance virtual wall time past the entire execution budget without
+    // sleeping: only human WAITING_INPUT time should extend that deadline.
+    simulatedWaitingMs=31000;
     const state=(await f.api.execute('workflow_get',{id:'project'})).state;
     const resumed=await f.api.execute('workflow_run_resolve',{
       runId:'run-one',requestId:wait.pendingRequest.requestId,expectedRevision:state.revision,response:'Continue'
     });
     assert.equal(resumed.status,'QUEUED');
     assert.equal(resumed.waitingStartedAt,null);
-    assert.ok(resumed.totalWaitingMs>=1000);
-    assert.ok(resumed.deadline>=initial.deadline+1000);
-  }finally{await f.dispose();}
+    assert.ok(resumed.totalWaitingMs>=30000);
+    assert.ok(resumed.deadline>=initial.deadline+30000);
+  }finally{
+    Date.now=originalNow;
+    await f.dispose();
+  }
 });
