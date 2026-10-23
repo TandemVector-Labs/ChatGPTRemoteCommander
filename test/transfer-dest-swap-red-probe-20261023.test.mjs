@@ -29,9 +29,8 @@ test('GREEN: native child rejects substituted destination after Core admission',
     fs.writeFileSync(hook,[
       "const fs=require('node:fs'),path=require('node:path');",
       "fs.writeFileSync(process.env.RC_DEST_SWAP_MARKER+'.loaded',process.argv.join('|'));",
-      "const original=fs.mkdirSync;let swapped=false;",
-      "fs.mkdirSync=function(dir,...args){",
-      " fs.appendFileSync(process.env.RC_DEST_SWAP_MARKER+'.calls',String(dir)+' vs '+process.env.RC_DEST_SWAP_TARGET+'\\n');",
+      "const original=fs.lstatSync;let swapped=false;",
+      "fs.lstatSync=function(dir,...args){",
       " if(!swapped&&process.argv.includes('receive')&&path.resolve(String(dir)).toLowerCase()===process.env.RC_DEST_SWAP_TARGET.toLowerCase()){",
       "  swapped=true;",
       "  fs.renameSync(dir,String(dir)+'.original');",
@@ -53,7 +52,7 @@ test('GREEN: native child rejects substituted destination after Core admission',
     const outsideFile=path.join(outside,path.basename(file));
     const markerFired=fs.existsSync(marker);
     const escaped=fs.existsSync(outsideFile);
-    t.diagnostic(JSON.stringify({markerFired,hookLoaded:fs.existsSync(marker+'.loaded'),argv:fs.existsSync(marker+'.loaded')?fs.readFileSync(marker+'.loaded','utf8'):null,calls:fs.existsSync(marker+'.calls')?fs.readFileSync(marker+'.calls','utf8'):null,escaped,status:result?.status,error}));
+    t.diagnostic(JSON.stringify({markerFired,hookLoaded:fs.existsSync(marker+'.loaded'),escaped,status:result?.status,errorCode:(error||'').match(/CTMESH_ERROR: ([A-Z_]+)/)?.[1]||null}));
     assert.equal(markerFired,true,'attack hook reached the actual native child');
     assert.equal(escaped,false,'payload must never materialize outside the admitted destination');
     assert.equal(result,undefined,'substituted destination must not report delivered');
