@@ -125,6 +125,10 @@ export function createTransferMeshTools({ config = {} } = {}) {
         if(!approvedRoot)throw new Error('TRANSFER_PATH_NOT_ALLOWED');
         const rootStat=fs.lstatSync(approvedRoot,{bigint:true});
         const sourceStat=fs.lstatSync(file,{bigint:true});
+        // Recheck the exact source inode admitted to the child; the earlier
+        // pathname stat quota check can race with a same-name replacement.
+        if(sourceStat.size>BigInt(limits.maxSourceBytes))
+          throw new Error('TRANSFER_SOURCE_SIZE_QUOTA');
         if(!rootStat.isDirectory()||rootStat.isSymbolicLink()||
            !sourceStat.isFile()||sourceStat.isSymbolicLink()||sourceStat.nlink!==1n||
            canonicalExisting(file)!==file)

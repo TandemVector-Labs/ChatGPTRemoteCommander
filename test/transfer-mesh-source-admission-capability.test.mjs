@@ -30,3 +30,32 @@ test('Linux Core refuses legacy Pilot before sensitive send is invoked',async t=
   assert.equal(fs.existsSync(marker),false,'Unqualified backend must never execute send');
  }finally{fs.rmSync(root,{recursive:true,force:true});fs.rmSync(allowed,{recursive:true,force:true});}
 });
+
+test('Linux Core rechecks size limit on the exact inode admitted to Pilot after race',async t=>{
+ if(process.platform!=='linux'){t.skip('Linux synthetic source admission');return;}
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-quota-control-'));
+ const allow=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-quota-allow-'));
+ const source=path.join(allow,'source.bin'), replacement=path.join(allow,'replacement.bin'),id='quota-swap-001';
+ const cli=path.resolve(import.meta.dirname,'../tools/commander-transfer-mesh/pilot-cli.mjs');
+ const originalStat=fs.statSync;let fired=false;
+ try{
+  fs.writeFileSync(path.join(root,'node.json'),JSON.stringify({schema:'ctmesh-node-v1',alias:'PC'}));
+  fs.copyFileSync(cli,path.join(root,'transfer.mjs'));
+  fs.writeFileSync(source,Buffer.alloc(8,65));
+  fs.writeFileSync(replacement,Buffer.alloc(2048,66));
+  const api=createTransferMeshTools({config:{powerMode:{enabled:true},
+   transferMesh:{enabled:true,root,sourceRoots:[allow],destinationRoots:[allow],maxSourceBytes:16}}});
+  fs.statSync=function(p,...args){const out=originalStat.call(this,p,...args);
+   if(!fired&&p===source){fired=true;
+    fs.renameSync(source,source+'.original');fs.renameSync(replacement,source);}
+   return out;};
+  let result,error;
+  try{result=await api.execute('transfer_mesh_send',{peer:'Linux',path:source,id});}
+  catch(e){error=e;}
+  assert.equal(fired,true,'Attacker must replace source after initial size check');
+  const payload=path.join(root,'pairs','Linux','transfers',id,'payload.bin');
+  const oversized=fs.existsSync(payload)&&originalStat(payload).size>16;
+  assert.equal(oversized,false,'Oversized bytes must not be staged; status='+result?.status+' error='+error?.message);
+  assert.match(error?.message??'',/TRANSFER_SOURCE_SIZE_QUOTA/,'Reject oversized admitted inode');
+ }finally{fs.statSync=originalStat;fs.rmSync(root,{recursive:true,force:true});fs.rmSync(allow,{recursive:true,force:true});}
+});
