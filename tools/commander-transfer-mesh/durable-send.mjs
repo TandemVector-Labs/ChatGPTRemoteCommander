@@ -138,8 +138,9 @@ function recordRead(p){
  for(let attempt=0;attempt<4;attempt++){
   try{return recordReadOnce(p);}
   catch(e){
-   if(process.platform!=='linux'||e?.message!=='JOB_RECORD_ATOMIC_REPLACEMENT')throw e;
-   if(attempt===3)throw Error('UNTRUSTED_JOB_RECORD');
+   if(e?.message!=='JOB_RECORD_ATOMIC_REPLACEMENT')throw e;
+   // Other platforms retain their existing fail-closed public error contract.
+   if(process.platform!=='linux'||attempt===3)throw Error('UNTRUSTED_JOB_RECORD');
   }
  }
 }
