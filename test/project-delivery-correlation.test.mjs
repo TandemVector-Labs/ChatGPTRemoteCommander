@@ -148,8 +148,11 @@ test('EXHAUSTED project state becomes a durable delivery event', async () => {
   const root=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'rc-project-delivery-exhausted-')));
   const deliveryRoot=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'rc-project-delivery-exhausted-private-')));
   const deliveryStore=new DeliveryStore({directory:deliveryRoot,scope:'profile-exhausted',forbiddenRoots:[root]});
+  // This fixture tests action exhaustion, not elapsed-time expiry. Keep the
+  // existing 30s test-policy maximum so Windows runner contention cannot
+  // exhaust the wall clock before the second bounded workflow tick.
   const config={allowedRoots:[root],durableWorkflows:{enabled:true,directory:path.join(root,'state'),executionTools:['read_text'],
-    runner:{enabled:true,allowedTools:['read_text'],maxActions:4,maxDurationMs:10000}}};
+    runner:{enabled:true,allowedTools:['read_text'],maxActions:4,maxDurationMs:30000}}};
   const definition={name:'read_text',inputSchema:{type:'object',properties:{path:{type:'string'}},required:['path'],additionalProperties:false}};
   const api=createWorkflowTools({config,roots:[root],device:'fixture',configSha256:'4'.repeat(64),deliveryStore,
     lookup:name=>name==='read_text'?definition:null,validateSchema:validateJsonSchema,
