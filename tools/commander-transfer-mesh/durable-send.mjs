@@ -94,7 +94,12 @@ function withLinuxPinnedPath(file,read){
 // Do not reopen a preflight-checked journal via a pathname. A peer that can
 // replace a managed record between lstat and read must not forge job status.
 // Keep the journal bounded and attach bytes to a stable regular-file descriptor.
-function recordRead(p){
+// A worker updates its owner-private journal by writing a verified regular
+// file and atomically renaming it over the previous generation. A reader must
+// not treat that legitimate *name generation* change as journal corruption.
+// Only this specific regular-inode rotation is retriable. Symlinks, in-place
+// edits, malformed files and unstable held descriptors still fail closed.
+function recordReadOnce(p){
  return withLinuxPinnedPath(p.record,(name)=>{
  const before=fs.lstatSync(name);
  assertion(before.isFile()&&!before.isSymbolicLink()&&before.nlink===1&&
@@ -103,9 +108,10 @@ function recordRead(p){
  const fd=fs.openSync(name,flags);
  try{
   const opened=fs.fstatSync(fd);
-  assertion(opened.isFile()&&opened.nlink===1&&opened.size===before.size&&
-    opened.dev===before.dev&&opened.ino===before.ino,
-    'UNTRUSTED_JOB_RECORD');
+  assertion(opened.isFile()&&opened.nlink===1&&opened.size>=1&&opened.size<=131072,
+   'UNTRUSTED_JOB_RECORD');
+  if(opened.size!==before.size||opened.dev!==before.dev||opened.ino!==before.ino)
+   throw Error('JOB_RECORD_ATOMIC_REPLACEMENT');
   const bytes=Buffer.alloc(opened.size);
   let at=0;
   while(at<bytes.length){
@@ -115,13 +121,27 @@ function recordRead(p){
   }
   const after=fs.fstatSync(fd),named=fs.lstatSync(name);
   assertion(after.dev===opened.dev&&after.ino===opened.ino&&after.size===opened.size&&
-    after.mtimeMs===opened.mtimeMs&&after.ctimeMs===opened.ctimeMs&&
-    named.isFile()&&!named.isSymbolicLink()&&named.nlink===1&&
-    named.dev===opened.dev&&named.ino===opened.ino&&named.size===opened.size&&
-    named.mtimeMs===opened.mtimeMs&&named.ctimeMs===opened.ctimeMs,
+    after.mtimeMs===opened.mtimeMs&&after.ctimeMs===opened.ctimeMs,
     'UNTRUSTED_JOB_RECORD');
+  assertion(named.isFile()&&!named.isSymbolicLink()&&named.nlink===1&&
+    named.size>=1&&named.size<=131072,'UNTRUSTED_JOB_RECORD');
+  if(named.dev!==opened.dev||named.ino!==opened.ino||
+     named.size!==opened.size||named.mtimeMs!==opened.mtimeMs||
+     named.ctimeMs!==opened.ctimeMs)
+   throw Error('JOB_RECORD_ATOMIC_REPLACEMENT');
   return JSON.parse(bytes.toString('utf8'));
  }finally{fs.closeSync(fd);} });
+}
+function recordRead(p){
+ // Retry a bounded number of safe generation swaps; never return the
+ // abandoned generation or an unvalidated replacement file.
+ for(let attempt=0;attempt<4;attempt++){
+  try{return recordReadOnce(p);}
+  catch(e){
+   if(process.platform!=='linux'||e?.message!=='JOB_RECORD_ATOMIC_REPLACEMENT')throw e;
+   if(attempt===3)throw Error('UNTRUSTED_JOB_RECORD');
+  }
+ }
 }
 function atomicRename(from,to){
  let last;
