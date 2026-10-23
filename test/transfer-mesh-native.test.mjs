@@ -132,18 +132,19 @@ test('stale receive-lock reclamation never removes an atomically replaced active
    sha256:manifest.sha256,pid:2147483647
   })+'\n');
   fs.writeFileSync(hook,[
-   "const fs=require('node:fs'),mod=require('node:module');",
+   "const fs=require('node:fs'),mod=require('node:module'),path=require('node:path');",
    "const original=fs.unlinkSync,oldRename=fs.renameSync;let fired=false;",
    "fs.writeFileSync(process.env.CTMESH_LOCK_RACE_MARKER+'.loaded','YES');",
+   "const matchLock=file=>String(file)===process.env.CTMESH_LOCK_RACE_FILE||(process.platform==='linux'&&String(file).startsWith('/proc/self/fd/')&&path.basename(String(file))===path.basename(process.env.CTMESH_LOCK_RACE_FILE));",
    "function substitute(file){fired=true;oldRename.call(fs,file,String(file)+'.reclaimed-old');",
    " const record=JSON.parse(fs.readFileSync(String(file)+'.reclaimed-old','utf8'));",
    " fs.writeFileSync(file,JSON.stringify({...record,pid:process.pid})+'\\n');",
    " fs.writeFileSync(process.env.CTMESH_LOCK_RACE_MARKER,'FRESH_LOCK_REPLACED');}",
    "fs.unlinkSync=function(file,...args){",
-   " if(!fired&&String(file)===process.env.CTMESH_LOCK_RACE_FILE)substitute(file);",
+   " if(!fired&&matchLock(file))substitute(file);",
    " return original.call(this,file,...args);};",
    "fs.renameSync=function(from,to,...args){",
-   " if(!fired&&String(from)===process.env.CTMESH_LOCK_RACE_FILE&&",
+   " if(!fired&&matchLock(from)&&",
    " String(to).includes('.stale-reclaim-'))substitute(from);",
    " return oldRename.call(this,from,to,...args);};",
    "mod.syncBuiltinESMExports();"
@@ -174,18 +175,19 @@ test('receive completion cannot unlink a fresh replacement owner lock',async()=>
   const lock=path.join(b.dest,'.ctmesh-'+id+'.lock'),marker=path.join(b.root,'release-injection-fired');
   const hook=path.join(b.root,'release-lock-hook.cjs');
   fs.writeFileSync(hook,[
-   "const fs=require('node:fs'),mod=require('node:module');",
+   "const fs=require('node:fs'),mod=require('node:module'),path=require('node:path');",
    "const oldUnlink=fs.unlinkSync,oldRename=fs.renameSync;let fired=false;",
    "fs.writeFileSync(process.env.CTMESH_RELEASE_RACE_MARKER+'.loaded','YES');",
+   "const matchLock=file=>String(file)===process.env.CTMESH_RELEASE_RACE_LOCK||(process.platform==='linux'&&String(file).startsWith('/proc/self/fd/')&&path.basename(String(file))===path.basename(process.env.CTMESH_RELEASE_RACE_LOCK));",
    "function swap(file){fired=true;oldRename.call(fs,file,file+'.prior-owner');",
    " const record=JSON.parse(fs.readFileSync(file+'.prior-owner','utf8'));",
    " fs.writeFileSync(file,JSON.stringify({...record,pid:process.pid})+'\\n');",
    " fs.writeFileSync(process.env.CTMESH_RELEASE_RACE_MARKER,'REPLACED');}",
    "fs.unlinkSync=function(file,...args){",
-   " if(!fired&&String(file)===process.env.CTMESH_RELEASE_RACE_LOCK)swap(String(file));",
+   " if(!fired&&matchLock(file))swap(String(file));",
    " return oldUnlink.call(this,file,...args);};",
    "fs.renameSync=function(from,to,...args){",
-   " if(!fired&&String(from)===process.env.CTMESH_RELEASE_RACE_LOCK&&",
+   " if(!fired&&matchLock(from)&&",
    " String(to).includes('.release-retire-'))swap(String(from));",
    " return oldRename.call(this,from,to,...args);};",
    "mod.syncBuiltinESMExports();"

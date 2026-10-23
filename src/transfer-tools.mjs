@@ -148,7 +148,14 @@ export function createTransferMeshTools({ config = {} } = {}) {
     if (name === 'transfer_mesh_receive') {
       if (!PEERS.includes(args.peer) || !ID_PATTERN.test(args.id)) throw new Error('TRANSFER_ARGS_INVALID');
       const dest = allowedPath(args.dest, policy.destinationRoots, 'directory');
-      cmd = ['receive','--peer',args.peer,'--id',args.id,'--dest',dest];
+      // Bind the exact admitted directory identity across the Core/Pilot spawn.
+      // Pilot also pins every ancestor during the write (Windows) or uses a
+      // directory descriptor (Linux); this precondition is not the race guard.
+      const destStat = fs.lstatSync(dest,{bigint:true});
+      if(!destStat.isDirectory()||destStat.isSymbolicLink())
+        throw new Error('TRANSFER_DEST_NOT_DIRECTORY');
+      cmd = ['receive','--peer',args.peer,'--id',args.id,'--dest',dest,
+        '--dest-dev',String(destStat.dev),'--dest-ino',String(destStat.ino)];
     }
     if (name === 'transfer_mesh_enqueue') {
       if (!PEERS.includes(args.peer) || !ID_PATTERN.test(args.id)) throw new Error('TRANSFER_ARGS_INVALID');
