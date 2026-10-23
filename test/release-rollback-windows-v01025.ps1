@@ -63,10 +63,15 @@ function Update([string]$Name,[string]$Sha){
     try{
       $lines=Get-Content -LiteralPath $stdout -ErrorAction Stop
       $diagnosticCommit=if($Name -eq 'PROMOTE'){$ExpectedCommit}else{$Baseline}
-      $rx='^GATE_OUTPUT_FILES runId=(qualification-test-'+$diagnosticCommit.Substring(0,12)+'-[0-9a-f]{32}) stdout=([^\r\n]+?) stderr='
-      $matches=@($lines|Where-Object {$_ -match $rx})
-      if($matches.Count -ne 1){throw 'NO_UNIQUE_TEST_OUTPUT'}
-      $null=$matches[0] -match $rx
+      $gateRx='^QUALIFICATION_FAILURE_RECORDED commit='+[regex]::Escape($diagnosticCommit)+' gate=(check|test) '
+      $failedGateLines=@($lines|Where-Object {$_ -match $gateRx})
+      if($failedGateLines.Count -ne 1){throw 'NO_UNIQUE_FAILED_GATE'}
+      $null=$failedGateLines[0] -match $gateRx
+      $failedGate=[string]$Matches[1]
+      $rx='^GATE_OUTPUT_FILES runId=(qualification-'+$failedGate+'-'+$diagnosticCommit.Substring(0,12)+'-[0-9a-f]{32}) stdout=([^\r\n]+?) stderr='
+      $matchingOutputLines=@($lines|Where-Object {$_ -match $rx})
+      if($matchingOutputLines.Count -ne 1){throw 'NO_UNIQUE_FAILED_GATE_OUTPUT'}
+      $null=$matchingOutputLines[0] -match $rx
       $id=$Matches[1];$given=[IO.Path]::GetFullPath($Matches[2])
       $inner=Join-Path $Root ('STATE\ChatGPTRemoteCommander\update-logs\qualification-output-'+$id+'.stdout.log')
       if($given -cne [IO.Path]::GetFullPath($inner)){throw 'WRONG_LOG_PATH'}
@@ -78,7 +83,8 @@ function Update([string]$Name,[string]$Sha){
       }
       $found=0
       $sawFailure=$false
-      foreach($line in [IO.File]::ReadLines($inner)){
+      if($failedGate -eq 'test'){
+        foreach($line in [IO.File]::ReadLines($inner)){
         if($line -match '^\s*(?:not ok \d+ -|#\s*(?:fail|pass|tests)\s+\d+|.*\b(?:AssertionError|ERR_TEST_FAILURE)\b)'){
           $sawFailure=$true
           $safe=($line -replace '[^A-Za-z0-9 ._:(),/\[\]-]','?')
@@ -90,19 +96,23 @@ function Update([string]$Name,[string]$Sha){
           Write-Output ('R252_QUAL_FAILURE_SOURCE_'+$found+'='+$relative)
           $found++;if($found -ge 24){break}
         }
+        }
       }
-      Write-Output ('R252_QUAL_LOG_SHA_PASS='+$sha+' markers='+$found)
+      # Check-gate output may contain private fixture labels; publish only
+      # the attested hash and R470 redacted summary, never raw check lines.
+      Write-Output ('R252_QUAL_LOG_SHA_PASS='+$sha+' gate='+$failedGate+' markers='+$found)
       # R470 is a read-only sanitized second pass over the same hashed log.
       # A distinct scope prevents conflating rollback qualification with R157.
       $diagnose=Join-Path $Source 'tools\diagnose-updater-gate-r470.ps1'
       $reportPath=Join-Path $Root 'DIAGNOSTIC_R470.json'
       if(-not(Test-Path -LiteralPath $diagnose -PathType Leaf) -or
          (Test-Path -LiteralPath $reportPath)){throw 'V025W_R470_PRESTATE_REFUSED'}
-      & pwsh.exe -NoLogo -NoProfile -NonInteractive -File $diagnose -Root $Root -ExpectedCommit $diagnosticCommit -Scope 'READ_ONLY_HOSTED_V025W_ROLLBACK_QUALIFICATION_FAILURE'
+      & pwsh.exe -NoLogo -NoProfile -NonInteractive -File $diagnose -Root $Root -ExpectedCommit $diagnosticCommit -Scope 'READ_ONLY_HOSTED_V025W_ROLLBACK_QUALIFICATION_FAILURE' -Gate $failedGate
       if($LASTEXITCODE -ne 0){throw 'V025W_R470_PARSE_FAILED'}
       $report=Get-Content -LiteralPath $reportPath -Raw -ErrorAction Stop|ConvertFrom-Json
       if($report.commit -cne $diagnosticCommit -or
          $report.scope -cne 'READ_ONLY_HOSTED_V025W_ROLLBACK_QUALIFICATION_FAILURE' -or
+         $report.gate -cne $failedGate -or
          $report.sourceSha256 -cne $sha.ToLowerInvariant() -or
          $report.matchingLogCount -ne 1 -or $report.rawLogIncluded -ne $false -or
          $report.secretsIncluded -ne $false -or $report.absolutePathsIncluded -ne $false){
