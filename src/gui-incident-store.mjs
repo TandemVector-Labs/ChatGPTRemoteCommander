@@ -36,12 +36,53 @@ export function createGuiInputIncidentStore({file=defaultFile(),now=()=>new Date
   // A crashed operation leaves the guard on disk: never reset uncertain GUI
   // state automatically on restart.
   const guard=file+'.exclusive-incident-v1';
-  async function withGuard(operation){
-    assertUnredirectedDirectoryAncestors(folder,'GUI_INCIDENT_STORAGE_UNAVAILABLE');
+  // Keep all Linux ancestor directory FDs alive until the incident operation
+  // finishes. A preflight-only pathname is not safe across concurrent rename.
+  async function withPinnedFolder(operation,{create=false,missingOk=false}={}){
+    if(process.platform!=='linux'){
+      assertUnredirectedDirectoryAncestors(folder,'GUI_INCIDENT_STORAGE_UNAVAILABLE');
+      if(create)await fs.mkdir(folder,{recursive:true,mode:0o700});
+      let st;
+      try{st=await fs.lstat(folder);}
+      catch(e){if(missingOk&&e.code==='ENOENT')return operation(null);throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');}
+      assertPrivateFolder(st);
+      return operation({filePath:file,guardPath:guard,folderPath:folder,pinned:false});
+    }
+    const opened=[];
+    try{
+      assertUnredirectedDirectoryAncestors(folder,'GUI_INCIDENT_STORAGE_UNAVAILABLE');
+      const root=path.parse(folder).root;
+      const flags=constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW;
+      let held=await fs.open(root,flags);
+      opened.push(held);
+      for(const part of path.relative(root,folder).split(path.sep).filter(Boolean)){
+        const child=path.join('/proc/self/fd',String(held.fd),part);
+        if(create){
+          try{await fs.mkdir(child,{mode:0o700});}
+          catch(e){if(e.code!=='EEXIST')throw e;}
+        }
+        held=await fs.open(child,flags);
+        opened.push(held);
+      }
+      assertPrivateFolder(await held.stat());
+      const pinned=path.join('/proc/self/fd',String(held.fd));
+      return await operation({filePath:path.join(pinned,path.basename(file)),
+        guardPath:path.join(pinned,path.basename(guard)),folderPath:pinned,pinned:true});
+    }catch(e){
+      if(missingOk&&e?.code==='ENOENT')return operation(null);
+      if(e?.guiCode)throw e;
+      throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');
+    }finally{
+      for(const held of opened.reverse()){
+        try{await held.close();}catch{throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');}
+      }
+    }
+  }
+  async function withGuard(paths,operation){
     let held;
     try{
-      assertPrivateFolder(await fs.lstat(folder));
-      held=await fs.open(guard,'wx',0o600);
+      assertPrivateFolder(await (paths.pinned?fs.stat(paths.folderPath):fs.lstat(paths.folderPath)));
+      held=await fs.open(paths.guardPath,'wx',0o600);
       await held.sync();
     }catch{try{await held?.close();}catch{}throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');}
     let preserveGuard=false;
@@ -49,19 +90,18 @@ export function createGuiInputIncidentStore({file=defaultFile(),now=()=>new Date
     finally{
       try{await held.close();}catch{preserveGuard=true;}
       if(!preserveGuard){
-        try{await fs.unlink(guard);}
+        try{await fs.unlink(paths.guardPath);}
         catch{throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');}
       }
     }
   }
-  async function pendingInternal(){
-    assertUnredirectedDirectoryAncestors(folder,'GUI_INCIDENT_STORAGE_UNAVAILABLE');
-    try{assertPrivateFolder(await fs.lstat(folder));}
+  async function pendingInternal(paths,filename=paths.filePath){
+    try{assertPrivateFolder(await (paths.pinned?fs.stat(paths.folderPath):fs.lstat(paths.folderPath)));}
     catch(e){if(e.code==='ENOENT')return null;throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');}
     // A symlink to a FIFO could block a read-only open before file identity
     // is checked. Preflight the named entry; re-validate after open as well.
     let before;
-    try{before=await fs.lstat(file);}
+    try{before=await fs.lstat(filename);}
     catch(e){if(e.code==='ENOENT')return null;throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');}
     if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1||
        before.size<1||before.size>2048)
@@ -72,11 +112,11 @@ export function createGuiInputIncidentStore({file=defaultFile(),now=()=>new Date
     // for normal file swaps but do not prove a fully race-free open.
     const flags=constants.O_RDONLY|(constants.O_NOFOLLOW??0)|(constants.O_NONBLOCK??0);
     let handle;
-    try{handle=await fs.open(file,flags);}
+    try{handle=await fs.open(filename,flags);}
     catch{throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');}
     let record;
     try{
-      const [st,named]=await Promise.all([handle.stat(),fs.lstat(file)]);
+      const [st,named]=await Promise.all([handle.stat(),fs.lstat(filename)]);
       if(!st.isFile()||!named.isFile()||named.isSymbolicLink()||
         st.nlink!==1||named.nlink!==1||st.dev!==named.dev||st.ino!==named.ino||
         st.dev!==before.dev||st.ino!==before.ino||st.size!==before.size||
@@ -106,57 +146,49 @@ export function createGuiInputIncidentStore({file=defaultFile(),now=()=>new Date
     return {id:record.id,tool:record.tool,startedUtc:record.startedUtc};
   }
   async function pending(){
-    // A crashed or concurrent resolution must never be read as "no incident".
-    try{await fs.lstat(guard);}
-    catch(e){if(e?.code==='ENOENT')return pendingInternal();}
-    throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');
+    return withPinnedFolder(async paths=>{
+      if(!paths)return null;
+      try{await fs.lstat(paths.guardPath);}
+      catch(e){if(e?.code==='ENOENT')return pendingInternal(paths);}
+      throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');
+    },{missingOk:true});
   }
   async function begin(tool){
-    assertUnredirectedDirectoryAncestors(folder,'GUI_INCIDENT_STORAGE_UNAVAILABLE');
     if(!INPUT_TOOLS.has(tool))throw fail('GUI_INCIDENT_TOOL_INVALID');
-    try{
-      await fs.mkdir(folder,{recursive:true,mode:0o700});
-      assertPrivateFolder(await fs.lstat(folder));
-    }catch{throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');}
-    return withGuard(async()=>{
-      const prior=await pendingInternal();
+    return withPinnedFolder(paths=>withGuard(paths,async()=>{
+      const prior=await pendingInternal(paths);
       if(prior)throw fail('GUI_INCIDENT_UNRESOLVED');
       try{
         const record={schema:SCHEMA,status:'PENDING_NATIVE_EFFECT',tool,id:id(),startedUtc:now()};
-        const fd=await fs.open(file,'wx',0o600);
+        const fd=await fs.open(paths.filePath,'wx',0o600);
         try{await fd.writeFile(JSON.stringify(record)+'\n','utf8');await fd.sync();}
         finally{await fd.close();}
         return {id:record.id,tool:record.tool};
       }catch(e){if(e.guiCode)throw e;throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');}
-    });
+    }),{create:true});
   }
   async function resolve(handle){
-    assertUnredirectedDirectoryAncestors(folder,'GUI_INCIDENT_STORAGE_UNAVAILABLE');
     if(!handle||typeof handle.id!=='string')throw fail('GUI_INCIDENT_HANDLE_INVALID');
-    return withGuard(async preserveGuard=>{
-      const prior=await pendingInternal();
+    return withPinnedFolder(paths=>withGuard(paths,async preserveGuard=>{
+      const prior=await pendingInternal(paths);
       if(!prior||prior.id!==handle.id||prior.tool!==handle.tool)
         throw fail('GUI_INCIDENT_RESOLUTION_MISMATCH');
-      // Move only the file currently at the pending name into an exclusive,
-      // private quarantine. Verify WHICH incident was moved before deleting.
-      // Never unlink the original pathname after a separate identity check.
-      const quarantine=path.join(folder,'.gui-incident-resolving-'+randomUUID());
-      try{await fs.rename(file,quarantine);}
+      const quarantine=path.join(paths.folderPath,'.gui-incident-resolving-'+randomUUID());
+      try{await fs.rename(paths.filePath,quarantine);}
       catch{preserveGuard();throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');}
       let moved;
-      try{moved=await createGuiInputIncidentStore({file:quarantine,now,id}).pending();}
+      try{moved=await pendingInternal(paths,quarantine);}
       catch{moved=null;}
       if(!moved||moved.id!==handle.id||moved.tool!==handle.tool){
         try{
-          // link is an exclusive restore: NEVER overwrite a newer incident.
-          await fs.link(quarantine,file);
+          await fs.link(quarantine,paths.filePath);
           await fs.unlink(quarantine);
         }catch{preserveGuard();}
         throw fail('GUI_INCIDENT_RESOLUTION_MISMATCH');
       }
       try{await fs.unlink(quarantine);}
       catch{preserveGuard();throw fail('GUI_INCIDENT_STORAGE_UNAVAILABLE');}
-    });
+    }));
   }
   return {pending,begin,resolve};
 }
