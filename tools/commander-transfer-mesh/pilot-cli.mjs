@@ -201,7 +201,36 @@ function receiveLock(lockFile,{peer,id,sha256}){
   const after=fs.lstatSync(lockFile);
   if(after.dev!==before.dev||after.ino!==before.ino||after.size!==before.size||after.mtimeMs!==before.mtimeMs)
     fail('Receive lock changed during stale-owner verification');
-  fs.unlinkSync(lockFile); // Only an exact owned lock with a confirmed dead PID.
+  // Atomically take the *named* stale-lock generation aside, then verify
+  // WHICH inode actually moved. A fresh lock can replace it after lstat.
+  // Never unlink the active lock pathname on the basis of an older lstat.
+  const quarantined=lockFile+'.stale-reclaim-'+crypto.randomUUID();
+  try{fs.renameSync(lockFile,quarantined);}
+  catch{fail('Receive lock changed during stale-owner verification');}
+  let moved;
+  try{moved=fs.lstatSync(quarantined);}
+  catch{fail('Receive lock changed during stale-owner verification');}
+  if(!moved.isFile()||moved.isSymbolicLink()||moved.nlink!==1||
+     moved.dev!==after.dev||moved.ino!==after.ino||
+     moved.size!==after.size||moved.mtimeMs!==after.mtimeMs){
+    // A new generation won the rename race. Restore it only by a
+    // destination-exclusive link; never clobber a fresher lock.
+    let restored=false;
+    try{fs.linkSync(quarantined,lockFile);restored=true;}catch{}
+    if(restored){
+      try{fs.unlinkSync(quarantined);}catch{}
+    } else {
+      // If exact restoration is impossible, retain a named fail-closed
+      // sentinel unless a concurrent owner has already created its lock.
+      try{const guard=fs.openSync(lockFile,'wx',0o600);
+       try{fs.writeSync(guard,'UNTRUSTED_RECLAIMED_LOCK\n');fs.fsyncSync(guard);}
+       finally{fs.closeSync(guard);}
+      }catch{}
+    }
+    fail('Receive lock changed during stale-owner verification');
+  }
+  try{fs.unlinkSync(quarantined);}
+  catch{fail('Receive lock changed during stale-owner verification');}
   fd=open(); // Exclusive; another concurrent reclaimer wins cleanly.
  }
  try{

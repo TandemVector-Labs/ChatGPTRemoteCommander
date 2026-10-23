@@ -4,6 +4,7 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import { createTransferMeshTools, transferMeshToolDefinitions } from '../src/transfer-tools.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -112,5 +113,52 @@ test('synchronous send obeys source size limit even when durable backend is disa
   }}});
   await assert.rejects(tools.execute('transfer_mesh_send',{peer:'Linux',path:file,id:'synchronous-quota-001'}),/TRANSFER_SOURCE_SIZE_QUOTA/);
   assert.equal(fs.existsSync(path.join(a.root,'pairs','Linux','transfers','synchronous-quota-001')),false);
+ });
+});
+
+test('stale receive-lock reclamation never removes an atomically replaced active lock',async()=>{
+ await fixture(async(a,b)=>{
+  const id='race-lock-001',source=path.join(a.src,'race-lock-source.dat');
+  fs.writeFileSync(source,'known-source-bytes');
+  assert.equal((await a.tools.execute('transfer_mesh_send',{peer:'Linux',path:source,id})).status,'QUEUED');
+  const incoming=path.join(b.root,'pairs','PC','transfers',id);
+  fs.mkdirSync(path.dirname(incoming),{recursive:true});
+  fs.cpSync(path.join(a.root,'pairs','Linux','transfers',id),incoming,{recursive:true});
+  const manifest=JSON.parse(fs.readFileSync(path.join(incoming,'manifest.json'),'utf8'));
+  const lock=path.join(b.dest,'.ctmesh-'+id+'.lock'),hook=path.join(b.root,'attack-preload.cjs');
+  const marker=path.join(b.root,'race-hook-fired');
+  fs.writeFileSync(lock,JSON.stringify({
+   schema:'ctmesh-receive-lock-v1',host:os.hostname(),peer:'PC',id,
+   sha256:manifest.sha256,pid:2147483647
+  })+'\n');
+  fs.writeFileSync(hook,[
+   "const fs=require('node:fs'),mod=require('node:module');",
+   "const original=fs.unlinkSync,oldRename=fs.renameSync;let fired=false;",
+   "fs.writeFileSync(process.env.CTMESH_LOCK_RACE_MARKER+'.loaded','YES');",
+   "function substitute(file){fired=true;oldRename.call(fs,file,String(file)+'.reclaimed-old');",
+   " const record=JSON.parse(fs.readFileSync(String(file)+'.reclaimed-old','utf8'));",
+   " fs.writeFileSync(file,JSON.stringify({...record,pid:process.pid})+'\\n');",
+   " fs.writeFileSync(process.env.CTMESH_LOCK_RACE_MARKER,'FRESH_LOCK_REPLACED');}",
+   "fs.unlinkSync=function(file,...args){",
+   " if(!fired&&String(file)===process.env.CTMESH_LOCK_RACE_FILE)substitute(file);",
+   " return original.call(this,file,...args);};",
+   "fs.renameSync=function(from,to,...args){",
+   " if(!fired&&String(from)===process.env.CTMESH_LOCK_RACE_FILE&&",
+   " String(to).includes('.stale-reclaim-'))substitute(from);",
+   " return oldRename.call(this,from,to,...args);};",
+   "mod.syncBuiltinESMExports();"
+  ].join('\n'));
+  const result=spawnSync(process.execPath,[
+   '--require',hook,path.join(b.root,'transfer.mjs'),
+   'receive','--peer','PC','--id',id,'--dest',b.dest
+  ],{encoding:'utf8',timeout:15000,env:{...process.env,
+   COMMANDER_TRANSFER_HOME:b.root,
+   CTMESH_LOCK_RACE_FILE:lock,
+   CTMESH_LOCK_RACE_MARKER:marker}});
+  assert.equal(fs.existsSync(marker+'.loaded'),true,'Preload must actually execute');
+  assert.equal(fs.existsSync(marker),true,'Race injection must run at actual lock mutation');
+  assert.notEqual(result.status,0,'Changed live lock must fail-closed: '+result.stdout);
+  assert.match(result.stderr,/Receive already owned|Untrusted receive lock|Receive lock changed/);
+  assert.equal(fs.existsSync(lock),true,'Fresh active receive lock must not be deleted');
  });
 });
