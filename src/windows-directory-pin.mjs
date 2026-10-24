@@ -19,7 +19,8 @@ async function pinnedDir(dir,operation,expected){
   });
   let ready=false,stdout='',stderr='',settled=false;
   const handshake=new Promise((resolve,reject)=>{
-    const timer=setTimeout(()=>finish(invalid()),12000);
+    // Startup can exceed 12s on a saturated hosted Windows runner. Keep a bounded, fail-closed readiness deadline.
+    const timer=setTimeout(()=>finish(invalid()),30000);
     function finish(error){
       if(settled)return;settled=true;clearTimeout(timer);
       error?reject(error):resolve();
