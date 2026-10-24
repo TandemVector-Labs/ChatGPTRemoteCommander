@@ -1,5 +1,6 @@
 param(
   [string]$SourceRef = 'v0.10.23',
+  [string]$RepoUrl = 'https://github.com/GOD13emad/ChatGPTRemoteCommander.git',
   [string]$ExpectedCommit = '',
   [ValidateSet('Power','Standard')][string]$AccessMode = 'Power',
   [ValidateSet('Auto','On','Off')][string]$GuiControl = 'Auto',
@@ -17,7 +18,7 @@ $script:BootstrapGitHubToken = [Environment]::GetEnvironmentVariable('RC_GITHUB_
 [Environment]::SetEnvironmentVariable('RC_GITHUB_API_TOKEN',$null,'Process')
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$Repo = 'https://github.com/GOD13emad/ChatGPTRemoteCommander.git'
+$Repo = $RepoUrl
 $BootstrapRoot = Join-Path $env:ProgramData 'ChatGPTRemoteCommander\bootstrap'
 $ManifestPath = Join-Path $env:ProgramData 'ChatGPTRemoteCommander\server-install-allowlist.json'
 $Downloads = Join-Path $BootstrapRoot ('downloads-' + [guid]::NewGuid().ToString('N'))
@@ -252,6 +253,7 @@ function Write-AllowlistManifest([string]$Commit,[object]$Server,[object]$Defend
 
 if (-not (Test-Administrator)) { throw 'Run this server installer from an elevated Administrator shell.' }
 if ($SourceRef -notmatch '^[A-Za-z0-9._/-]{1,128}$') { throw 'Invalid SourceRef.' }
+if ($RepoUrl -cnotin @('https://github.com/GOD13emad/ChatGPTRemoteCommander.git','https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git')) { throw 'Untrusted server repository URL.' }
 if ($ExpectedCommit -and $ExpectedCommit -notmatch '^[0-9a-fA-F]{40}$') { throw 'ExpectedCommit must be a 40-hex SHA.' }
 if ($AccessMode -eq 'Standard' -and $GuiControl -eq 'On') { throw 'GuiControl On requires AccessMode Power.' }
 
@@ -303,7 +305,7 @@ try {
 
   $installer = Join-Path $stage 'install.ps1'
   if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw 'Staged install.ps1 is missing.' }
-  $args = @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$installer,'-SourceRef',$SourceRef,'-ExpectedCommit',$resolved)
+  $args = @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$installer,'-SourceRef',$SourceRef,'-RepoUrl',$RepoUrl,'-ExpectedCommit',$resolved)
   if ($AccessMode -eq 'Power') { $args += '-PowerMode' } else { $args += '-StandardMode' }
   if ($InstallDir) { $args += @('-InstallDir',$InstallDir) }
   if (-not $NoStartServer) { $args += '-StartServer' }
