@@ -58,7 +58,7 @@ test('durable job stages multi-MiB file without synchronous RPC timeout and publ
   const repaired=await done(root,'Linux','durable-boundary-003');
   assert.equal(repaired.sha256,result.sha256);
   assert.equal(JSON.parse(fs.readFileSync(path.join(partialDest,'manifest.json'),'utf8')).sha256,result.sha256);
- }finally{fs.rmSync(root,{recursive:true,force:true});}
+ }finally{fs.rmSync(root,{recursive:true,force:true,maxRetries:10,retryDelay:100});}
 });
 test('durable enqueue refuses source outside allowlisted root',()=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-durable-deny-'));
