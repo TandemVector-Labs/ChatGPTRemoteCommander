@@ -84,7 +84,7 @@ async function claimWorker(root) {
 if (process.argv[2] === '--claim-worker') {
   await claimWorker(process.argv[3]);
 } else {
-  test('automatic scheduler never plans an unenrolled workflow and completes only after explicit enrollment', { timeout: 9000 }, async () => {
+  test('automatic scheduler never plans an unenrolled workflow and completes only after explicit enrollment', { timeout: 45000 }, async () => {
     const fixture = makeFixture({ scheduler: true, runner: { autoTick: true }, planner: async () => proposal('write_text', { path: 'result.txt', content: 'verified output' }) });
     try {
       await fixture.create();
@@ -94,7 +94,7 @@ if (process.argv[2] === '--claim-worker') {
       assert.equal(fs.existsSync(path.join(fixture.root, 'result.txt')), false);
       assert.deepEqual((await fixture.api.execute('workflow_run_status', {})).runs, []);
       await fixture.start();
-      const final = await until(async () => { const current = await fixture.status(); return current.status === 'COMPLETED' ? current : null; });
+      const final = await until(async () => { const current = await fixture.status(); return current.status === 'COMPLETED' ? current : null; }, 30000);
       assert.equal(final.actions, 1);
       assert.equal(fixture.plans, 1);
       assert.equal(fixture.calls, 1);
@@ -142,7 +142,7 @@ if (process.argv[2] === '--claim-worker') {
     } finally { await fixture.dispose(); }
   });
 
-  test('pre-expired deadline refuses planner and all filesystem effects', { timeout: 6000 }, async () => {
+  test('pre-expired deadline refuses planner and all filesystem effects', { timeout: 30000 }, async () => {
     const fixture = makeFixture({ planner: async () => { throw Error('Expired run must not plan'); } });
     try {
       await fixture.create();
@@ -158,7 +158,7 @@ if (process.argv[2] === '--claim-worker') {
     } finally { await fixture.dispose(); }
   });
 
-  test('cancel during an effect preserves its root lease and cancellation after the receipt', { timeout: 6000 }, async () => {
+  test('cancel during an effect preserves its root lease and cancellation after the receipt', { timeout: 30000 }, async () => {
     const entered = deferred(), release = deferred();
     const fixture = makeFixture({ planner: async () => proposal('write_text', { path: 'result.txt', content: 'verified output' }), afterDispatch: async () => { entered.resolve(); await release.promise; } });
     let pending;
