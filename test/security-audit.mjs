@@ -40,10 +40,46 @@ for (const expectedIgnored of ['config.local.json', '.env', 'connections.local.j
   if (ignored.status !== 0) findings.push({ scope: 'CURRENT', type: 'Expected ignore missing', location: expectedIgnored });
 }
 
+// Report only provenance. Never print matching bytes, context, raw paths or tokens.
+// The existing regexes and fail-closed HISTORY admission remain unchanged.
+function historyProvenance(history, match) {
+  const index = match.index;
+  const lineStart = history.lastIndexOf('\n', index) + 1;
+  const linePrefix = history.slice(lineStart, index + 1);
+  const kind = linePrefix.startsWith('+') ? 'added' :
+    linePrefix.startsWith('-') ? 'removed' : 'context-or-metadata';
+  const blockStart = history.lastIndexOf('\ncommit ', index);
+  const commitStart = blockStart >= 0 ? blockStart + 1 :
+    (history.startsWith('commit ') ? 0 : -1);
+  const commit = commitStart >= 0 ?
+    /^commit ([0-9a-f]{40})\b/.exec(history.slice(commitStart, commitStart + 55))?.[1] ?? null : null;
+  return { commit, kind, acrossLines: /\r?\n/.test(match[0]) };
+}
+
 const history = git(['log', '--all', '-p', '--no-color', '--no-ext-diff']);
-for (const [type, pattern] of patterns) {
-  pattern.lastIndex = 0;
-  if (pattern.test(history)) findings.push({ scope: 'HISTORY', type, location: 'git log --all -p' });
+for (const [index, [type, pattern]] of patterns.entries()) {
+  // Preserve the existing detection and fail-closed outcome. Count additional
+  // matches so an early synthetic fixture cannot mask later historical secrets.
+  // Bound metadata reporting and traversal to avoid exposing matching bytes or
+  // allowing an adversarial history to exhaust the audit runner.
+  const globalPattern = new RegExp(pattern.source, pattern.flags.replace(/g/g, '') + 'g');
+  const samples = [];
+  const seen = new Set();
+  let matchCount = 0, moreThanLimit = false;
+  for (const match of history.matchAll(globalPattern)) {
+    if (++matchCount > 10000) { moreThanLimit = true; break; }
+    if (samples.length < 8) {
+      const p = historyProvenance(history, match);
+      const signature = [p.commit, p.kind, p.acrossLines].join(':');
+      if (!seen.has(signature)) { seen.add(signature); samples.push(p); }
+    }
+  }
+  if (matchCount) findings.push({
+    scope: 'HISTORY', type, ruleId: 'H' + String(index + 1).padStart(2, '0'),
+    location: 'git log --all -p', provenance: samples[0] || null,
+    matchCount: moreThanLimit ? null : matchCount,
+    moreThanLimit, otherProvenance: samples.slice(1)
+  });
 }
 const emails = [...new Set(git(['log', '--all', '--format=%ae%n%ce']).split(/\r?\n/).filter(Boolean))].sort();
 if (emails.length) {

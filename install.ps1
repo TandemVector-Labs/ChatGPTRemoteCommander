@@ -11,11 +11,12 @@ param(
   [switch]$SkipTunnelClient,
   [string]$TunnelClientVersion = '0.0.15',
   [string]$SourceRef = 'v0.10.23',
+  [string]$RepoUrl = 'https://github.com/GOD13emad/ChatGPTRemoteCommander.git',
   [string]$ExpectedCommit = ''
 )
 $ErrorActionPreference = 'Stop'
 
-$Repo = 'https://github.com/GOD13emad/ChatGPTRemoteCommander.git'
+$Repo = $RepoUrl
 
 if ($PowerMode -and $StandardMode) {
   throw 'Use only one of -PowerMode or -StandardMode.'
@@ -28,6 +29,9 @@ if ($GuiControl -and $StandardMode) {
 }
 if ($SourceRef -notmatch '^[A-Za-z0-9._/-]{1,128}$') {
   throw 'Invalid -SourceRef.'
+}
+if ($RepoUrl -cnotin @('https://github.com/GOD13emad/ChatGPTRemoteCommander.git','https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git')) {
+  throw 'Untrusted installer repository URL.'
 }
 if ($ExpectedCommit -and $ExpectedCommit -notmatch '^[0-9a-fA-F]{40}$') {
   throw 'Invalid -ExpectedCommit SHA.'
