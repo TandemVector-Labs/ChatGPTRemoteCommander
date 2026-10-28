@@ -7,6 +7,32 @@ param(
   [ValidateSet('None','AfterBaselineMove','AfterCandidateMove')][string]$TestFailurePoint='None'
 )
 $ErrorActionPreference='Stop'
+
+function Assert-CorePublicInstallContext {
+  param([string]$IdentitySid,[string]$ProfilePath,[string]$RoamingAppData,[string]$LocalAppData,[int]$SessionId)
+  if($IdentitySid -eq 'S-1-5-18'){throw 'CORE_PUBLIC_INSTALL_SYSTEM_CONTEXT'}
+  if($IdentitySid -in @('S-1-5-19','S-1-5-20')){throw 'CORE_PUBLIC_INSTALL_SERVICE_CONTEXT'}
+  # Session 0 is reserved for services; omitted SessionId defaults to zero (fail closed).
+  if($SessionId -le 0){throw 'CORE_PUBLIC_INSTALL_NONINTERACTIVE_SESSION'}
+  if([string]::IsNullOrWhiteSpace($IdentitySid) -or [string]::IsNullOrWhiteSpace($ProfilePath) -or
+     [string]::IsNullOrWhiteSpace($RoamingAppData) -or [string]::IsNullOrWhiteSpace($LocalAppData)){
+    throw 'CORE_PUBLIC_INSTALL_IDENTITY_INCOMPLETE'
+  }
+  foreach($path in @($ProfilePath,$RoamingAppData,$LocalAppData)){
+    if($path -match '(?i)(^|[\\/])ServiceProfiles([\\/]|$)'){
+      throw 'CORE_PUBLIC_INSTALL_SERVICEPROFILE_PATH'
+    }
+    if($path -match '(?i)(^|[\\/])systemprofile([\\/]|$)'){
+      throw 'CORE_PUBLIC_INSTALL_SYSTEMPROFILE_PATH'
+    }
+  }
+}
+
+if(-not $NoPublicIntegration -and -not $StageOnly){
+  $CurrentWindowsIdentity=[Security.Principal.WindowsIdentity]::GetCurrent()
+  Assert-CorePublicInstallContext -IdentitySid $CurrentWindowsIdentity.User.Value -ProfilePath $env:USERPROFILE -RoamingAppData $env:APPDATA -LocalAppData $env:LOCALAPPDATA -SessionId ([Diagnostics.Process]::GetCurrentProcess().SessionId)
+}
+
 $RepoRoot=(Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $Version=((Get-Content (Join-Path $RepoRoot 'package.json') -Raw | ConvertFrom-Json).version)
 if(-not $SourceDir){$SourceDir=Join-Path $RepoRoot 'dist\desktop\remote-commander-windows-x64'}
@@ -211,17 +237,44 @@ if($NoPublicIntegration){
   return
 }
 
+function Assert-CoreStartMenuShortcut {
+  param(
+    [string]$Path,
+    [string]$ExpectedTarget,
+    [string]$ExpectedWorkingDirectory,
+    [string]$ExpectedIcon,
+    [object]$Shell
+  )
+  if(-not(Test-Path -LiteralPath $Path -PathType Leaf)){throw 'CORE_SHORTCUT_MISSING'}
+  if(-not(Test-Path -LiteralPath $ExpectedTarget -PathType Leaf)){throw 'CORE_SHORTCUT_EXE_MISSING'}
+  $actual=$Shell.CreateShortcut($Path)
+  $expected=[IO.Path]::GetFullPath($ExpectedTarget)
+  if(-not $actual.TargetPath -or
+     -not [string]::Equals([IO.Path]::GetFullPath($actual.TargetPath),$expected,[StringComparison]::OrdinalIgnoreCase)){
+    throw 'CORE_SHORTCUT_TARGET_MISMATCH'
+  }
+  if(-not(Test-Path -LiteralPath $actual.TargetPath -PathType Leaf)){throw 'CORE_SHORTCUT_TARGET_MISSING'}
+  if(-not [string]::Equals($actual.WorkingDirectory,$ExpectedWorkingDirectory,[StringComparison]::OrdinalIgnoreCase)){
+    throw 'CORE_SHORTCUT_WORKDIR_MISMATCH'
+  }
+  if(-not [string]::Equals($actual.IconLocation,$ExpectedIcon,[StringComparison]::OrdinalIgnoreCase)){
+    throw 'CORE_SHORTCUT_ICON_MISMATCH'
+  }
+  if($actual.Arguments){throw 'CORE_SHORTCUT_UNEXPECTED_ARGUMENTS'}
+}
+
 $Wsh=New-Object -ComObject WScript.Shell
-$Icon=(Join-Path $Current 'RemoteCommander.exe')+',0'
+$DashboardTarget=Join-Path $Current 'RemoteCommander.exe'
+$Icon=$DashboardTarget+',0'
 $DashboardShortcut=Join-Path $StartMenu 'Remote Commander.lnk'
 $s=$Wsh.CreateShortcut($DashboardShortcut)
-$s.TargetPath=Join-Path $Current 'RemoteCommander.exe'
+$s.TargetPath=$DashboardTarget
 $s.Arguments=''
 $s.WorkingDirectory=$Current
 $s.IconLocation=$Icon
 $s.Description='Remote Commander'
 $s.Save()
-if(-not(Test-Path -LiteralPath $DashboardShortcut -PathType Leaf)){throw 'Remote Commander Start Menu shortcut was not created.'}
+Assert-CoreStartMenuShortcut $DashboardShortcut $DashboardTarget $Current $Icon $Wsh
 
 # Historical internal tools are implementation details, not separate Start Menu applications.
 foreach($legacy in @(
@@ -249,11 +302,13 @@ throw 'R219_UNINSTALL_REFUSED_NO_ACCEPTED_RETIREMENT_PLAN: Use transactional in-
 New-Item -Path $Reg -Force | Out-Null
 New-ItemProperty -Path $Reg -Name DisplayName -Value 'Remote Commander' -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $Reg -Name DisplayVersion -Value $Version -PropertyType String -Force | Out-Null
-New-ItemProperty -Path $Reg -Name Publisher -Value 'Remote Commander' -PropertyType String -Force | Out-Null
+New-ItemProperty -Path $Reg -Name Publisher -Value 'TandemVector Labs' -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $Reg -Name InstallLocation -Value $InstallRoot -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $Reg -Name DisplayIcon -Value $Icon -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $Reg -Name UninstallString -Value ('"'+$Pwsh+'" -NoProfile -File "'+$Uninstall+'"') -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $Reg -Name NoModify -Value 1 -PropertyType DWord -Force | Out-Null
 New-ItemProperty -Path $Reg -Name NoRepair -Value 1 -PropertyType DWord -Force | Out-Null
 
+# Check again after registry updates: link file existence alone cannot prove a valid launch target.
+Assert-CoreStartMenuShortcut $DashboardShortcut $DashboardTarget $Current $Icon $Wsh
 Write-Output "REMOTE_COMMANDER_DESKTOP_INSTALL_PASS version=$Version mode=$Mode install=$InstallRoot shortcuts=1 dashboard=$DashboardShortcut"

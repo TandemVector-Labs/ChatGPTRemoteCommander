@@ -70,6 +70,34 @@ for f in install.ps1 install.sh install-work-plugin.ps1 install-work-plugin.sh s
 done
 cp "$ROOT/tools/generate-device-plugin.mjs" "$installer_stage/tools/generate-device-plugin.mjs"
 cp "$OUT/plugin-template.zip" "$installer_stage/plugin-template.zip"
+# Versioned release ZIP wizards must bind the SAME immutable source identity
+# as the self-extracting Linux .run and compiled Windows EXE.
+python3 - "$installer_stage" "$VERSION" "$COMMIT" <<'PIN_WIZARDS'
+from pathlib import Path
+import re, sys
+stage, version, commit = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+assert re.fullmatch(r"[0-9a-f]{40}", commit), "release commit required"
+assert re.fullmatch(r"[0-9]+[.][0-9]+[.][0-9]+", version), "release version required"
+pw = stage / "setup-wizard.ps1"
+script = pw.read_text()
+old = "$args=@('-StartServer')"
+new = "$args=@('-StartServer','-SourceRef','v" + version + "','-ExpectedCommit','" + commit + "')"
+assert script.count(old) == 1, "Windows wizard install invocation changed"
+pw.write_text(script.replace(old,new))
+sh = stage / "setup-wizard.sh"
+script = sh.read_text()
+header = "#!/usr/bin/env bash\n"
+assert script.startswith(header), "Linux wizard shebang changed"
+assert "REMOTE_COMMANDER_SOURCE_REF=" not in script and "REMOTE_COMMANDER_EXPECTED_COMMIT=" not in script
+pinned = ("export REMOTE_COMMANDER_SOURCE_REF='v" + version + "'\n"
+          "export REMOTE_COMMANDER_EXPECTED_COMMIT='" + commit + "'\n")
+# Some standard ZIP extractors do not restore executable permission bits.
+# Execute the Bash installer via the interpreter, independent of chmod.
+call = '  "$INSTALLER" "$' + '{args[@]}"'
+assert script.count(call) == 1, "Linux installer invocation changed"
+script = script.replace(call, '  bash "$INSTALLER" "$' + '{args[@]}"')
+sh.write_text(header + pinned + script[len(header):])
+PIN_WIZARDS
 cat > "$installer_stage/README-INSTALL.txt" <<EOF
 ChatGPT Remote Commander v$VERSION
 Release commit: $COMMIT
@@ -111,7 +139,7 @@ zip_tree "$installer_stage" "$OUT/ChatGPT-Remote-Commander-v$VERSION-Installer.z
 
 windows_stage="$TMP/windows-setup"
 mkdir -p "$windows_stage"
-cp "$ROOT/setup-wizard.ps1" "$windows_stage/setup-wizard.ps1"
+cp "$installer_stage/setup-wizard.ps1" "$windows_stage/setup-wizard.ps1"
 cp "$ROOT/install.ps1" "$windows_stage/install.ps1"
 cat > "$windows_stage/SETUP.cmd" <<'CMD'
 @echo off
@@ -149,7 +177,7 @@ cp "$OUT/ChatGPT-Remote-Commander-Windows-Setup-v$VERSION.zip" "$OUT/ChatGPT-Rem
 
 linux_stage="$TMP/linux-setup"
 mkdir -p "$linux_stage"
-cp "$ROOT/setup-wizard.sh" "$linux_stage/setup-wizard.sh"
+cp "$installer_stage/setup-wizard.sh" "$linux_stage/setup-wizard.sh"
 cp "$ROOT/install.sh" "$linux_stage/install.sh"
 cat > "$linux_stage/SETUP.sh" <<'SH'
 #!/usr/bin/env bash

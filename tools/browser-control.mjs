@@ -3,12 +3,24 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { terminateProcessesUsingBrowserProfile } from '../src/browser-owned-processes.mjs';
+import { randomBytes } from 'node:crypto';
+import { terminateProcessesUsingBrowserProfile, waitForBrowserDevToolsPort } from '../src/browser-owned-processes.mjs';
 import { createInterface } from 'node:readline';
+import { BrowserChatTargetObserver } from '../src/browser-native-chat-observer.mjs';
 
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const safeCode=e=>/^[A-Z][A-Z0-9_]{1,79}$/.test(e?.browserCode??e?.message??'')?(e.browserCode??e.message):'BROWSER_NATIVE_FAILED';
 const fail=code=>Object.assign(new Error(code),{browserCode:code});
+function serializePageValue(value){
+  const literal=JSON.stringify(value);
+  if(typeof literal!=='string')throw fail('BROWSER_INPUT_INVALID');
+  // Escape script-breaking HTML delimiters and JS line separators AFTER JSON encoding.
+  // Based on CodeQL js/bad-code-sanitization; preserve the original string's JS value.
+  return literal.replace(/</g,'\\u003c')
+    .replace(/>/g,'\\u003e')
+    .replace(/\u2028/g,'\\u2028')
+    .replace(/\u2029/g,'\\u2029');
+}
 const redactUrl=value=>{
  try{
   const u=new URL(String(value));
@@ -44,7 +56,8 @@ function detectBrowser(explicit){
  return candidates.find(exists)??null;
 }
 class Cdp {
- constructor(url){this.url=url;this.ws=null;this.seq=0;this.pending=new Map();}
+ constructor(url){this.url=url;this.ws=null;this.seq=0;this.pending=new Map();this.listeners=new Map();}
+ on(method,listener){this.listeners.set(method,listener);}
  async open(){
   const ws=new WebSocket(this.url);this.ws=ws;
   await new Promise((resolve,reject)=>{
@@ -54,7 +67,8 @@ class Cdp {
   });
   ws.addEventListener('message',ev=>{
    let m;try{m=JSON.parse(String(ev.data));}catch{return;}
-   if(!m.id||!this.pending.has(m.id))return;
+   if(!m.id){try{this.listeners.get(m.method)?.(m.params??{});}catch{}return;}
+   if(!this.pending.has(m.id))return;
    const p=this.pending.get(m.id);this.pending.delete(m.id);clearTimeout(p.timer);
    if(m.error)p.reject(fail('BROWSER_CDP_COMMAND_FAILED'));else p.resolve(m.result??{});
   });
@@ -80,15 +94,8 @@ async function portAlive(port){
  try{const c=new AbortController();const t=setTimeout(()=>c.abort(),350);const r=await fetch('http://127.0.0.1:'+port+'/json/version',{signal:c.signal});clearTimeout(t);return r.ok;}catch{return false;}
 }
 async function waitForPortFile(file,child){
- for(let i=0;i<240;i++){
-  if(child.exitCode!==null)throw fail('BROWSER_LAUNCH_FAILED');
-  if(fs.existsSync(file)){
-   const lines=fs.readFileSync(file,'utf8').trim().split(/\r?\n/);const port=Number(lines[0]);
-   if(Number.isInteger(port)&&port>0)return port;
-  }
-  await sleep(25);
- }
- throw fail('BROWSER_DEVTOOLS_TIMEOUT');
+ try{return await waitForBrowserDevToolsPort(file,child);}
+ catch(error){throw fail(error?.message==='BROWSER_LAUNCH_FAILED'?'BROWSER_LAUNCH_FAILED':'BROWSER_DEVTOOLS_TIMEOUT');}
 }
 async function evaluate(expression,{returnByValue=true,timeoutMs=30000}={}){
  if(!browser?.cdp||!browser.sessionId)throw fail('BROWSER_SESSION_NOT_RUNNING');
@@ -175,13 +182,29 @@ async function startBrowser(req){
  if(headless)args.unshift('--headless=new');
  args.push('about:blank');
  let child;try{child=spawn(executable,args,{stdio:['ignore','ignore','ignore'],windowsHide:headless,shell:false});}catch{throw fail('BROWSER_LAUNCH_FAILED');}
- browser={child,cdp:null,sessionId:null,targetId:null,profileDir,isolated:req.isolated===true,executable,product:null,port:null,headless};
+ browser={child,cdp:null,sessionId:null,targetId:null,profileDir,isolated:req.isolated===true,executable,product:null,port:null,headless,managedTabs:new Map()};
  try{
   const port=await waitForPortFile(portFile,child);browser.port=port;
   let version;try{version=await (await fetch('http://127.0.0.1:'+port+'/json/version')).json();}catch{throw fail('BROWSER_DEVTOOLS_UNAVAILABLE');}
   if(typeof version.webSocketDebuggerUrl!=='string')throw fail('BROWSER_DEVTOOLS_UNAVAILABLE');
   browser.product=version.Browser??null;
   const cdp=new Cdp(version.webSocketDebuggerUrl);browser.cdp=cdp;await cdp.open();
+  const observer=new BrowserChatTargetObserver();
+  browser.chatObserver=observer;
+  cdp.on('Target.targetCreated',p=>observer.ingest(p.targetInfo));
+  cdp.on('Target.targetInfoChanged',p=>observer.ingest(p.targetInfo));
+  cdp.on('Target.targetDestroyed',p=>{
+    observer.destroyed(p.targetId);
+    for(const [ref,id] of browser?.managedTabs??[])if(id===p.targetId)browser.managedTabs.delete(ref);
+  });
+  try {
+    await cdp.send('Target.setDiscoverTargets',{discover:true},undefined,5000);
+    const existing=await cdp.send('Target.getTargets',{},undefined,5000);
+    for(const info of existing.targetInfos??[])observer.ingest(info);
+    observer.setReady(true);
+  } catch {
+    observer.setReady(false,'TARGET_DISCOVERY_UNAVAILABLE');
+  }
   const target=await cdp.send('Target.createTarget',{url:'about:blank'});browser.targetId=target.targetId;
   const attached=await cdp.send('Target.attachToTarget',{targetId:target.targetId,flatten:true});browser.sessionId=attached.sessionId;
   await cdp.send('Page.enable',{},browser.sessionId);
@@ -218,10 +241,53 @@ async function handle(req){
     headless:browser?.headless??null,foreground:browser?browser.headless===false:false,
     backgroundOnly:browser?browser.headless===true:true,userDesktopTouched:browser?browser.headless===false:false,savedPasswordStoreAccess:false};
   }
+  case 'chat_tabs':{
+   if(!browser)throw fail('BROWSER_SESSION_NOT_RUNNING');
+   const observer=browser.chatObserver;
+   if(!observer)return {ok:false,ready:false,reason:'OBSERVER_NOT_READY'};
+   try {
+     const targetResult=await browser.cdp.send('Target.getTargets',{},undefined,5000);
+     observer.reconcile(targetResult.targetInfos??[]);
+     observer.setReady(true);
+   } catch {
+     observer.setReady(false,'TARGET_RECONCILIATION_UNAVAILABLE');
+   }
+   const managed=browser.managedTabs;
+   const live=new Set((await browser.cdp.send('Target.getTargets',{},undefined,5000)).targetInfos?.map(x=>x.targetId)??[]);
+   for(const [ref,id] of managed)if(!live.has(id))managed.delete(ref);
+   return {...observer.snapshot(),maxManagedTabs:16,
+     managedTabs:[...managed.keys()].map(tabRef=>({tabRef}))};
+  }
+  case 'chat_tab_open':{
+   if(!browser?.cdp)throw fail('BROWSER_SESSION_NOT_RUNNING');
+   if(browser.managedTabs.size>=16)throw fail('BROWSER_CHAT_TABS_LIMIT');
+   let u;try{u=new URL(req.url);}catch{throw fail('BROWSER_CHAT_URL_NOT_ALLOWED');}
+   if(u.protocol!=='https:'||!['chatgpt.com','chat.openai.com'].includes(u.hostname)||
+     u.username||u.password||u.port||u.search||u.hash||
+     !(u.pathname==='/'||/^\/(?:g\/[^/?#]{1,120}\/)?c\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/?$/i.test(u.pathname)))
+     throw fail('BROWSER_CHAT_URL_NOT_ALLOWED');
+   const target=await browser.cdp.send('Target.createTarget',{url:u.href},undefined,10000);
+   if(typeof target.targetId!=='string')throw fail('BROWSER_CHAT_TARGET_CREATE_FAILED');
+   const tabRef=randomBytes(16).toString('hex');
+   browser.managedTabs.set(tabRef,target.targetId);
+   browser.chatObserver?.ingest({targetId:target.targetId,type:'page',url:u.href});
+   return {ok:true,tabRef,owned:true,profileScope:'COMMANDER_ONLY',maxManagedTabs:16};
+  }
+  case 'chat_tab_close':{
+   if(!browser?.cdp)throw fail('BROWSER_SESSION_NOT_RUNNING');
+   const targetId=browser.managedTabs.get(req.tabRef);
+   if(!targetId)throw fail('BROWSER_CHAT_TAB_NOT_OWNED');
+   const res=await browser.cdp.send('Target.closeTarget',{targetId},undefined,8000);
+   if(res.success!==true)throw fail('BROWSER_CHAT_TAB_CLOSE_FAILED');
+   browser.chatObserver?.destroyed(targetId);
+   browser.managedTabs.delete(req.tabRef);
+   return {ok:true,closed:true,scope:'COMMANDER_ONLY'};
+  }
   case 'start':return startBrowser(req);
   case 'end':await closeBrowser();return {ok:true,closed:true};
   case 'relaunch':{
    if(!browser)throw fail('BROWSER_SESSION_NOT_RUNNING');
+   if(browser.managedTabs?.size)throw fail('BROWSER_MULTITAB_RELAUNCH_UNSUPPORTED');
    let resume=null;
    try{const current=await evaluate('location.href');const u=new URL(current);if(['http:','https:'].includes(u.protocol)&&!u.username&&!u.password)resume=u.href;}catch{}
    const prior={profileDir:browser.profileDir,isolated:browser.isolated,executable:browser.executable};
@@ -281,12 +347,12 @@ async function handle(req){
    return {ok:true,data,mimeType:format==='png'?'image/png':'image/jpeg',bytes:bytes.length,url:current.url,urlQueryRedacted:current.queryRedacted,urlFragmentRedacted:current.fragmentRedacted,title:await evaluate('document.title'),background:true};
   }
   case 'fill':{
-   const sel=JSON.stringify(req.selector),txt=JSON.stringify(req.text);
+   const sel=serializePageValue(req.selector),txt=serializePageValue(req.text);
    const expr=`(()=>{const el=document.querySelector(${sel});if(!el)return {ok:false,code:'BROWSER_SELECTOR_NOT_FOUND'};if(el.disabled||el.readOnly)return {ok:false,code:'BROWSER_ELEMENT_NOT_EDITABLE'};if(el.tagName==='INPUT'&&(el.type||'').toLowerCase()==='file')return {ok:false,code:'BROWSER_FILE_INPUT_NOT_ALLOWED'};const v=${txt};if(el.isContentEditable){el.textContent=v;}else if(el.tagName==='SELECT'){el.value=v;}else{const proto=el.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;const set=Object.getOwnPropertyDescriptor(proto,'value')?.set;if(set)set.call(el,v);else el.value=v;}el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return {ok:true,tag:el.tagName.toLowerCase(),type:(el.type||null)};})()`;
    const v=await evaluate(expr);if(!v?.ok)throw fail(v?.code??'BROWSER_FILL_FAILED');return {ok:true,filled:true,selector:req.selector,background:true,valueReturned:false};
   }
   case 'click':{
-   const sel=JSON.stringify(req.selector);
+   const sel=serializePageValue(req.selector);
    const expr=`(()=>{const el=document.querySelector(${sel});if(!el)return {ok:false,code:'BROWSER_SELECTOR_NOT_FOUND'};if(el.disabled)return {ok:false,code:'BROWSER_ELEMENT_DISABLED'};el.scrollIntoView({block:'center',inline:'center'});el.click();return {ok:true,tag:el.tagName.toLowerCase()};})()`;
    const v=await evaluate(expr);if(!v?.ok)throw fail(v?.code??'BROWSER_CLICK_FAILED');await sleep(50);return {ok:true,clicked:true,selector:req.selector,background:true,verificationRequired:true};
   }
@@ -294,9 +360,9 @@ async function handle(req){
    const timeout=Math.max(100,Math.min(30000,req.timeoutMs??5000)),until=Date.now()+timeout;
    while(Date.now()<until){
     let ok=false;
-    if(req.selector!==undefined){const s=JSON.stringify(req.selector);ok=await evaluate(`!!document.querySelector(${s})`);}
-    else if(req.textIncludes!==undefined){const t=JSON.stringify(req.textIncludes);ok=await evaluate(`(document.body?.innerText??'').includes(${t})`);}
-    else if(req.urlIncludes!==undefined){const u=JSON.stringify(req.urlIncludes);ok=await evaluate(`location.href.includes(${u})`);}
+    if(req.selector!==undefined){const s=serializePageValue(req.selector);ok=await evaluate(`!!document.querySelector(${s})`);}
+    else if(req.textIncludes!==undefined){const t=serializePageValue(req.textIncludes);ok=await evaluate(`(document.body?.innerText??'').includes(${t})`);}
+    else if(req.urlIncludes!==undefined){const u=serializePageValue(req.urlIncludes);ok=await evaluate(`location.href.includes(${u})`);}
     if(ok)return {ok:true,matched:true,background:true};await sleep(75);
    }
    throw fail('BROWSER_WAIT_TIMEOUT');

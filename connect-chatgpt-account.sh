@@ -65,6 +65,7 @@ read -r -s -p "Paste Runtime API key for this account (hidden): " RUNTIME_KEY
 echo
 [[ -n "$RUNTIME_KEY" ]] || { echo "Runtime API key is empty" >&2; exit 1; }
 
+unset OPENAI_API_KEY  # Never let an ambient OpenAI API key override this account/profile Runtime key.
 export CONTROL_PLANE_API_KEY="$RUNTIME_KEY"
 trap 'unset CONTROL_PLANE_API_KEY RUNTIME_KEY' EXIT
 LISTEN="127.0.0.1:${HEALTH_PORT}"
