@@ -95,6 +95,22 @@ class LinuxGtkPreviewArchiveTests(unittest.TestCase):
             self.assertTrue(dangling.is_symlink())
             self.assertFalse((root / "no-file.zip").exists())
 
+    def test_reject_ancestor_symlink_even_when_final_parent_is_private(self):
+        with tempfile.TemporaryDirectory(prefix="rc-gtk-qa-ancestor-") as tmp:
+            root = pathlib.Path(tmp)
+            actual = root / "actual"
+            actual.mkdir(mode=0o700)
+            sub = actual / "private"
+            sub.mkdir(mode=0o700)
+            alias = root / "alias"
+            alias.symlink_to(actual, target_is_directory=True)
+            # The last parent component is a real, owner-private directory;
+            # an earlier symlink is still a redirect that must be rejected.
+            output = alias / "private" / "out.zip"
+            result = build(output)
+            self.assertEqual(result.returncode, 2, result.stdout)
+            self.assertFalse((sub / "out.zip").exists())
+
     def test_exclusive_archive_creation_rejects_post_validation_symlink_swap(self):
         import importlib.util
         from unittest.mock import patch
