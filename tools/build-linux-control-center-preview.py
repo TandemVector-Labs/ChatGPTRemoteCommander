@@ -134,7 +134,9 @@ def pack(output: Path):
     parent_fd = open_private_output_parent(output.parent)
     try:
         name = output.name
-        if not name or name in (".", "..") or "/" in name or "\\" in name:
+        # A QA ZIP is not an arbitrary user-chosen filesystem object name.
+        # Bound length and allow only one portable, separator-free component.
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}\.zip", name, flags=re.ASCII) is None:
             raise ValueError("OUTPUT_NAME_INVALID")
         flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
         descriptor = os.open(name, flags, 0o600, dir_fd=parent_fd)
