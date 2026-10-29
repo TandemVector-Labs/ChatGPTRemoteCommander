@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import vm from 'node:vm';
 
 const browserHelpers=[
  'tools/browser-control.mjs',
@@ -19,6 +18,20 @@ const malicious=[
  'nested\n</ScRiPt> \u2029',
  '',
 ];
+const fail=code=>Object.assign(new Error(code),{browserCode:code});
+// Execute only this audited, static test helper. Compare the exact source of each
+// browser CLI function to this implementation so no untrusted source is evaluated.
+function serializePageValue(value){
+  const literal=JSON.stringify(value);
+  if(typeof literal!=='string')throw fail('BROWSER_INPUT_INVALID');
+  // Escape script-breaking HTML delimiters and JS line separators AFTER JSON encoding.
+  // Based on CodeQL js/bad-code-sanitization; preserve the original string's JS value.
+  return literal.replace(/</g,'\\u003c')
+    .replace(/>/g,'\\u003e')
+    .replace(/\u2028/g,'\\u2028')
+    .replace(/\u2029/g,'\\u2029');
+}
+
 for(const file of browserHelpers){
  test(file+' uses a post-JSON script literal encoder in every dynamic browser action',()=>{
   const src=fs.readFileSync(new URL('../'+file,import.meta.url),'utf8');
@@ -28,8 +41,8 @@ for(const file of browserHelpers){
    assert.ok(src.includes('serializePageValue(req.'+key+')'),'missing '+key);
    assert.equal(src.includes('JSON.stringify(req.'+key+')'),false,'raw interpolation '+key);
   }
-  const context={fail:code=>Object.assign(new Error(code),{browserCode:code})};
-  const literal=vm.runInNewContext(definition[0]+'\n serializePageValue;',context);
+  assert.equal(definition[0],serializePageValue.toString(), 'browser CLI helper must equal the audited, static implementation');
+  const literal=serializePageValue;
   for(const input of malicious){
    const code=literal(input);
    assert.equal(typeof code,'string');
