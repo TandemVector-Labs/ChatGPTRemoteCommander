@@ -218,3 +218,12 @@ test('BootCore never executes owner-configured paths or owner-writable tunnel bi
     'BOOT_RECOVERY_MACHINE_PRIMARY_PRIVILEGED'
   ]) assert.ok(trust.includes(marker),marker);
 });
+
+
+test('user-session handoff refuses unknown service state before considering SYSTEM shutdown', () => {
+  const script=fs.readFileSync(path.join(repo,'handoff-user-session-windows.ps1'),'utf8');
+  assert.match(script,/HANDOFF_STATUS_INCOMPLETE/u);
+  assert.match(script,/HANDOFF_STATUS_INVALID/u);
+  assert.match(script,/return \[pscustomobject\]@\{active=1;leases=1\}/u);
+  assert.doesNotMatch(script,/return \[pscustomobject\]@\{active=0;leases=0\}/u);
+});
