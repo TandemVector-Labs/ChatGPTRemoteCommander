@@ -66,20 +66,39 @@ def ensure_parents(prefix: Path):
             ordinary(directory, directory=True)
 
 
-def read_payload(folder: Path):
+def read_payload(folder: Path, *, with_raw=False):
+    """Pin the source directory and its member descriptors before reading.
+
+    Validate the actual opened objects (not a path checked before the open):
+    this denies a symlink substituted between metadata inspection and read.
+    """
     ordinary(folder, directory=True)
-    names = set()
-    raw = {}
-    for child in folder.iterdir():
-        if child.name not in FILES:
+    root_fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        root_stat = os.fstat(root_fd)
+        if (root_stat.st_uid != os.getuid() or not stat.S_ISDIR(root_stat.st_mode)
+                or root_stat.st_mode & 0o022):
+            refuse("OWNER_OR_FILE_KIND")
+        names = set(os.listdir(root_fd))
+        if names - FILES:
             refuse("UNKNOWN_MEMBER")
-        ordinary(child)
-        if child.stat().st_size > 1_048_576:
-            refuse("OVERSIZED_MEMBER")
-        names.add(child.name)
-        raw[child.name] = child.read_bytes()
-    if names != FILES:
-        refuse("MEMBERS_INCOMPLETE")
+        if names != FILES:
+            refuse("MEMBERS_INCOMPLETE")
+        raw = {}
+        for name in sorted(FILES):
+            with os.fdopen(os.open(name, os.O_RDONLY | os.O_NOFOLLOW,
+                                   dir_fd=root_fd), "rb") as stream:
+                opened = os.fstat(stream.fileno())
+                if (opened.st_uid != os.getuid() or not stat.S_ISREG(opened.st_mode)
+                        or opened.st_mode & 0o022):
+                    refuse("OWNER_OR_FILE_KIND")
+                if opened.st_size > 1_048_576:
+                    refuse("OVERSIZED_MEMBER")
+                raw[name] = stream.read(1_048_577)
+                if len(raw[name]) > 1_048_576:
+                    refuse("OVERSIZED_MEMBER")
+    finally:
+        os.close(root_fd)
     doc = json.loads(raw["MANIFEST.json"])
     if doc.get("schema") != 1 or doc.get("product") != "remote-commander-linux-control-center-qa-preview":
         refuse("MANIFEST_IDENTITY")
@@ -110,7 +129,7 @@ def read_payload(folder: Path):
             refuse("CHECKSUM_MISMATCH")
     if seen != expected_names:
         refuse("CHECKSUM_INVENTORY")
-    return doc
+    return (doc, raw) if with_raw else doc
 
 
 def remove_owned(folder: Path):
@@ -131,7 +150,9 @@ def safe_children(prefix):
 
 
 def install(source: Path, prefix: Path):
-    incoming = read_payload(source)
+    # Use the *same verified bytes* to stage the copy. Never reopen the source
+    # by its pathname after the descriptor-pinned verification.
+    incoming, source_bytes = read_payload(source, with_raw=True)
     safe_children(prefix)
     current, previous = prefix / "current", prefix / "previous"
     if current.exists():
@@ -148,7 +169,7 @@ def install(source: Path, prefix: Path):
     try:
         for file in sorted(FILES):
             destination = stage / file
-            destination.write_bytes((source / file).read_bytes())
+            destination.write_bytes(source_bytes[file])
             destination.chmod(0o700 if file == "run-control-center.sh" else 0o600)
         read_payload(stage)
         if current.exists():
