@@ -106,14 +106,14 @@ function Assert-RcSystemTaskInstallTrust([string]$RuntimeRoot, [string]$OwnerPro
 # Explicitly bind privileged task and child runtime binaries to machine-only
 # installations. A valid publisher signature is required for the two EXEs;
 # npm.cmd and its adjacent npm-cli.js are protected by recursive path checks.
-function Get-RcTrustedSystemBinaries([string]$OwnerProfile) {
+function Get-RcTrustedSystemBinaries([string]$OwnerUserProfile) {
   $pf=Get-RcMachineProgramFiles
   $pwsh=Join-Path $pf 'PowerShell\7\pwsh.exe'
   $node=Join-Path $pf 'nodejs\node.exe'
   $npm=Join-Path $pf 'nodejs\npm.cmd'
   $npmCli=Join-Path $pf 'nodejs\node_modules\npm\bin\npm-cli.js'
   foreach($binary in @($pwsh,$node,$npm,$npmCli)){
-    Assert-RcProtectedMachinePath $binary $OwnerProfile
+    Assert-RcProtectedMachinePath $binary $OwnerUserProfile
   }
   foreach($check in @(
     @{Path=$pwsh;Publisher='Microsoft Corporation'},
