@@ -17,6 +17,8 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+# The QA preview has one official artifact basename; callers select the directory.
+QA_ARCHIVE_NAME = "Remote-Commander-Linux-Control-Center-QA.zip"
 SOURCES = (
     "desktop/linux-control-center/control_center.py",
     "desktop/linux-control-center/dashboard_ui.py",
@@ -133,13 +135,10 @@ def pack(output: Path):
     # The filename is only the final component, never an unchecked relative path.
     parent_fd = open_private_output_parent(output.parent)
     try:
-        name = output.name
-        # A QA ZIP is not an arbitrary user-chosen filesystem object name.
-        # Bound length and allow only one portable, separator-free component.
-        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}\.zip", name, flags=re.ASCII) is None:
+        if output.name != QA_ARCHIVE_NAME:
             raise ValueError("OUTPUT_NAME_INVALID")
         flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-        descriptor = os.open(name, flags, 0o600, dir_fd=parent_fd)
+        descriptor = os.open(QA_ARCHIVE_NAME, flags, 0o600, dir_fd=parent_fd)
         with os.fdopen(descriptor, "w+b") as output_stream:
             with zipfile.ZipFile(output_stream, "w", compression=zipfile.ZIP_DEFLATED,
                                  compresslevel=9) as dest:
