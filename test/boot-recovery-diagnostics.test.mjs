@@ -49,3 +49,25 @@ test('BootRecovery installer surfaces structured probe failure and task last-res
     "$probe.PSObject.Properties.Name -contains 'error'"
   ]) assert.equal(t.includes(required),true,'missing '+required);
 });
+
+test('SYSTEM BootRecovery install rejects untrusted owner paths before any mutation', () => {
+  const source=fs.readFileSync(path.join(repo,'enable-boot-recovery.ps1'),'utf8');
+  for(const required of [
+    'BOOT_RECOVERY_MACHINE_APP_ROOT_REQUIRED',
+    'BOOT_RECOVERY_SYSTEM_EXECUTABLE_WRITABLE',
+    'BOOT_RECOVERY_SYSTEM_EXECUTABLE_REPARSE_POINT',
+    'BOOT_RECOVERY_MACHINE_CREDENTIAL_STORAGE_MIGRATION_REQUIRED',
+    'Assert-RcSystemTaskInstallTrust $Root $OwnerUserProfile',
+    'Assert-RcProtectedMachinePath $binary $OwnerUserProfile'
+  ]) assert.ok(source.includes(required), 'missing '+required);
+  const rootGate=source.indexOf('Assert-RcSystemTaskInstallTrust $Root $OwnerUserProfile');
+  const credentialGate=source.indexOf("throw 'BOOT_RECOVERY_MACHINE_CREDENTIAL_STORAGE_MIGRATION_REQUIRED'");
+  for(const mutation of ['New-Item -ItemType Directory -Force -Path $VarDir',
+    'Convert-OneCredential $profile','Register-ScheduledTask -TaskName $BootTaskName',
+    'Start-ScheduledTask -TaskName $BootTaskName']){
+    assert.ok(rootGate>=0 && rootGate<source.indexOf(mutation),'root gate must precede '+mutation);
+    assert.ok(credentialGate>=0 && credentialGate<source.indexOf(mutation),'credential gate must precede '+mutation);
+  }
+  assert.ok(!source.includes('$Root = if((Test-Path -LiteralPath $stableSupervisor'),
+    'legacy user-writable runtime fallback must not survive');
+});
