@@ -1,0 +1,5 @@
+# Independent review ownership for repository changes.
+# Actual review and last-push approval are enforced by the protected-main ruleset.
+* @GOD13emad @mohammadmohammadzadeh19960-code
+# The review-ownership policy itself must also be owned.
+/.github/CODEOWNERS @GOD13emad @mohammadmohammadzadeh19960-code
