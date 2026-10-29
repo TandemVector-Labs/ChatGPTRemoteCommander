@@ -168,3 +168,29 @@ test('SYSTEM executable ACL denies arbitrary SID mutators, generic rights and fo
   assert.equal(r.status,0,r.stderr||r.stdout);
   assert.match(r.stdout,/SYSTEM_EXECUTABLE_ARBITRARY_SID_FAIL_CLOSED_PASS/u);
 });
+
+test('SYSTEM BootRecovery pins vendor-signed machine binaries and rejects spoofed ProgramFiles or PATH', () => {
+  const source=fs.readFileSync(path.join(repo,'enable-boot-recovery.ps1'),'utf8');
+  for(const marker of [
+    'function Get-RcMachineProgramFiles',
+    'SpecialFolder]::ProgramFiles',
+    'BOOT_RECOVERY_PROGRAMFILES_ENV_MISMATCH',
+    'function Get-RcTrustedSystemBinaries',
+    "PowerShell\\7\\pwsh.exe",
+    "nodejs\\node.exe",
+    "nodejs\\npm.cmd",
+    "nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+    'BOOT_RECOVERY_SYSTEM_BINARY_SIGNATURE_UNTRUSTED',
+    'Get-AuthenticodeSignature',
+    'Get-RcTrustedSystemBinaries $OwnerUserProfile'
+  ]) assert.ok(source.includes(marker),'missing '+marker);
+  for(const unsafe of [
+    '(Get-Command pwsh.exe -ErrorAction Stop).Source',
+    '(Get-Command node.exe -ErrorAction Stop).Source',
+    '(Get-Command npm.cmd -ErrorAction Stop).Source'
+  ]) assert.equal(source.includes(unsafe),false,'PATH fallback '+unsafe);
+  const admission=source.indexOf('Assert-RcSystemTaskInstallTrust $Root $OwnerUserProfile');
+  const failClosed=source.indexOf("throw 'BOOT_RECOVERY_MACHINE_CREDENTIAL_STORAGE_MIGRATION_REQUIRED'");
+  const register=source.indexOf('Register-ScheduledTask -TaskName $BootTaskName');
+  assert.ok(admission>=0 && admission<failClosed && failClosed<register,'retain fail-closed registration');
+});
