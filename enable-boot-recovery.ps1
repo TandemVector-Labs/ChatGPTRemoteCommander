@@ -16,14 +16,42 @@ if ([Security.Principal.WindowsIdentity]::GetCurrent().IsSystem) { throw 'BOOT_R
 
 # No SYSTEM task may execute code that a medium-integrity owner process can
 # replace. This is an admission guard, NOT a migration of existing live tasks.
+# Only SYSTEM, local Administrators and Windows TrustedInstaller may own or
+# mutate privileged executable files/ancestors. ACL checks are read-only and
+# intentionally fail closed for custom and unresolvable privileged SIDs.
+function Assert-RcSystemExecutableAcl($Acl) {
+  $trustedSids=@('S-1-5-18','S-1-5-32-544',
+    'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+  try {$ownerSid=([Security.Principal.NTAccount]$Acl.Owner).Translate([Security.Principal.SecurityIdentifier]).Value}
+  catch {throw 'BOOT_RECOVERY_SYSTEM_EXECUTABLE_OWNER_UNRESOLVED'}
+  if($ownerSid -notin $trustedSids){throw 'BOOT_RECOVERY_SYSTEM_EXECUTABLE_OWNER_UNTRUSTED'}
+  $writeMask=[int64]([Security.AccessControl.FileSystemRights]::WriteData -bor
+    [Security.AccessControl.FileSystemRights]::AppendData -bor
+    [Security.AccessControl.FileSystemRights]::Delete -bor
+    [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+    [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+    [Security.AccessControl.FileSystemRights]::TakeOwnership -bor
+    [Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+    [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
+    0x50000000) # GenericAll and GenericWrite, even before access-mask expansion.
+  foreach($ace in $Acl.Access){
+    if($ace.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow){continue}
+    # InheritOnly is not effective on this directory; independently audit
+    # all descendants of the machine app before accepting the SYSTEM task.
+    if(($ace.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0){continue}
+    if((([int64]$ace.FileSystemRights) -band $writeMask) -eq 0){continue}
+    try {$sid=$ace.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value}
+    catch {throw 'BOOT_RECOVERY_SYSTEM_EXECUTABLE_ACL_UNREADABLE'}
+    if($sid -notin $trustedSids){throw 'BOOT_RECOVERY_SYSTEM_EXECUTABLE_WRITABLE'}
+  }
+}
+
 function Assert-RcProtectedMachinePath([string]$Candidate, [string]$OwnerProfile) {
   $programFiles = [IO.Path]::GetFullPath($env:ProgramFiles).TrimEnd('\')
   $target = [IO.Path]::GetFullPath($Candidate).TrimEnd('\')
   if (-not $target.StartsWith($programFiles + '\',[StringComparison]::OrdinalIgnoreCase)) {
     throw 'BOOT_RECOVERY_SYSTEM_EXECUTABLE_UNTRUSTED_LOCATION'
   }
-  $ownerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-  $untrusted = @('S-1-1-0','S-1-5-11','S-1-5-32-545',$ownerSid)
   $current = $target
   while ($current.Length -ge $programFiles.Length) {
     $item=Get-Item -LiteralPath $current -Force -ErrorAction Stop
@@ -31,29 +59,7 @@ function Assert-RcProtectedMachinePath([string]$Candidate, [string]$OwnerProfile
       throw 'BOOT_RECOVERY_SYSTEM_EXECUTABLE_REPARSE_POINT'
     }
     $acl=Get-Acl -LiteralPath $current -ErrorAction Stop
-    try {$ownerAclSid=$acl.Owner.Translate([Security.Principal.SecurityIdentifier]).Value}
-    catch {$ownerAclSid=([Security.Principal.NTAccount]$acl.Owner).Translate([Security.Principal.SecurityIdentifier]).Value}
-    if($current -ine $programFiles -and $ownerAclSid -eq $ownerSid){
-      throw 'BOOT_RECOVERY_SYSTEM_EXECUTABLE_OWNER_UNTRUSTED'
-    }
-    foreach($ace in $acl.Access){
-      if($ace.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow){continue}
-      try {$sid=$ace.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value}
-      catch {throw 'BOOT_RECOVERY_SYSTEM_EXECUTABLE_ACL_UNREADABLE'}
-      if($sid -notin $untrusted){continue}
-      $rights=[int64]$ace.FileSystemRights
-      $writeMask=[int64]([Security.AccessControl.FileSystemRights]::WriteData -bor
-        [Security.AccessControl.FileSystemRights]::AppendData -bor
-        [Security.AccessControl.FileSystemRights]::Delete -bor
-        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
-        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-        [Security.AccessControl.FileSystemRights]::TakeOwnership -bor
-        [Security.AccessControl.FileSystemRights]::WriteAttributes -bor
-        [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes)
-      if(($rights -band $writeMask) -ne 0){
-        throw 'BOOT_RECOVERY_SYSTEM_EXECUTABLE_WRITABLE'
-      }
-    }
+    Assert-RcSystemExecutableAcl $acl
     if($current -ieq $programFiles){break}
     $parent=Split-Path -Parent $current
     if($parent -eq $current -or -not $parent){throw 'BOOT_RECOVERY_SYSTEM_ROOT_ESCAPE'}
