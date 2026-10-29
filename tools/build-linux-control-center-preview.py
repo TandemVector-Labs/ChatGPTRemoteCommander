@@ -102,20 +102,36 @@ def pack(output: Path):
         f"{hashlib.sha256(raw).hexdigest()}  {name}\n"
         for name, raw in sorted(entries.items())
     ).encode("utf-8")
-    if output.is_symlink() or output.exists():
-        raise ValueError("OUTPUT_EXISTS_OR_IS_SYMLINK")
-    if not output.parent.is_dir() or output.parent.is_symlink():
-        raise ValueError("OUTPUT_DIRECTORY_MISSING_OR_SYMLINK")
-    with zipfile.ZipFile(output, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as dest:
-        for name, raw in sorted(entries.items()):
-            info = zipfile.ZipInfo(prefix + name, date_time=timestamp)
-            info.compress_type = zipfile.ZIP_DEFLATED
-            info.external_attr = (0o755 if name.endswith(".sh") else 0o644) << 16
-            info.create_system = 3
-            dest.writestr(info, raw, compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+    # Pin the intended output parent and create a brand-new member exclusively.
+    # The filename is only the final component, never an unchecked relative path.
+    parent_fd = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        parent = os.fstat(parent_fd)
+        if (parent.st_uid != os.getuid() or not stat.S_ISDIR(parent.st_mode)
+                or parent.st_mode & 0o022):
+            raise ValueError("OUTPUT_DIRECTORY_UNTRUSTED")
+        name = output.name
+        if not name or name in (".", "..") or "/" in name or "\\" in name:
+            raise ValueError("OUTPUT_NAME_INVALID")
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        descriptor = os.open(name, flags, 0o600, dir_fd=parent_fd)
+        with os.fdopen(descriptor, "w+b") as output_stream:
+            with zipfile.ZipFile(output_stream, "w", compression=zipfile.ZIP_DEFLATED,
+                                 compresslevel=9) as dest:
+                for member, raw in sorted(entries.items()):
+                    info = zipfile.ZipInfo(prefix + member, date_time=timestamp)
+                    info.compress_type = zipfile.ZIP_DEFLATED
+                    info.external_attr = (0o755 if member.endswith(".sh") else 0o644) << 16
+                    info.create_system = 3
+                    dest.writestr(info, raw, compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+            output_stream.flush()
+            output_stream.seek(0)
+            digest = hashlib.file_digest(output_stream, "sha256").hexdigest()
+    finally:
+        os.close(parent_fd)
     print(
         f"LINUX_CONTROL_CENTER_QA_BUNDLE_PASS version={version} commit={commit}"
-        f" members={len(entries)} sha256={hashlib.sha256(output.read_bytes()).hexdigest()}"
+        f" members={len(entries)} sha256={digest}"
     )
 
 
