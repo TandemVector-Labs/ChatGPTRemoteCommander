@@ -37,6 +37,33 @@ def checked_git(*args):
     return result.stdout.strip()
 
 
+def open_private_output_parent(parent: Path):
+    """Walk each absolute parent component without following intermediate links.
+
+    Opening the entire path with O_NOFOLLOW protects only its final component;
+    pin every ancestor descriptor to prevent redirects through an earlier one.
+    """
+    if not parent.is_absolute():
+        raise ValueError("OUTPUT_PARENT_NOT_ABSOLUTE")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open("/", flags)
+    try:
+        for component in parent.parts[1:]:
+            if component in ("", ".", "..", "/"):
+                raise ValueError("OUTPUT_PARENT_INVALID_COMPONENT")
+            child_fd = os.open(component, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child_fd
+        actual = os.fstat(fd)
+        if (actual.st_uid != os.getuid() or not stat.S_ISDIR(actual.st_mode)
+                or actual.st_mode & 0o022):
+            raise ValueError("OUTPUT_DIRECTORY_UNTRUSTED")
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def pack(output: Path):
     version = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["version"]
     stable_semver = re.fullmatch(r"\d+\.\d+\.\d+", version)
@@ -104,12 +131,8 @@ def pack(output: Path):
     ).encode("utf-8")
     # Pin the intended output parent and create a brand-new member exclusively.
     # The filename is only the final component, never an unchecked relative path.
-    parent_fd = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    parent_fd = open_private_output_parent(output.parent)
     try:
-        parent = os.fstat(parent_fd)
-        if (parent.st_uid != os.getuid() or not stat.S_ISDIR(parent.st_mode)
-                or parent.st_mode & 0o022):
-            raise ValueError("OUTPUT_DIRECTORY_UNTRUSTED")
         name = output.name
         if not name or name in (".", "..") or "/" in name or "\\" in name:
             raise ValueError("OUTPUT_NAME_INVALID")
