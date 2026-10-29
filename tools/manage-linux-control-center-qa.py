@@ -66,7 +66,7 @@ def ensure_parents(prefix: Path):
             ordinary(directory, directory=True)
 
 
-def read_payload(folder: Path):
+def read_payload(folder: Path, *, with_raw=False):
     """Pin the source directory and its member descriptors before reading.
 
     Validate the actual opened objects (not a path checked before the open):
@@ -129,7 +129,7 @@ def read_payload(folder: Path):
             refuse("CHECKSUM_MISMATCH")
     if seen != expected_names:
         refuse("CHECKSUM_INVENTORY")
-    return doc
+    return (doc, raw) if with_raw else doc
 
 
 def remove_owned(folder: Path):
@@ -150,7 +150,9 @@ def safe_children(prefix):
 
 
 def install(source: Path, prefix: Path):
-    incoming = read_payload(source)
+    # Use the *same verified bytes* to stage the copy. Never reopen the source
+    # by its pathname after the descriptor-pinned verification.
+    incoming, source_bytes = read_payload(source, with_raw=True)
     safe_children(prefix)
     current, previous = prefix / "current", prefix / "previous"
     if current.exists():
@@ -167,7 +169,7 @@ def install(source: Path, prefix: Path):
     try:
         for file in sorted(FILES):
             destination = stage / file
-            destination.write_bytes((source / file).read_bytes())
+            destination.write_bytes(source_bytes[file])
             destination.chmod(0o700 if file == "run-control-center.sh" else 0o600)
         read_payload(stage)
         if current.exists():
