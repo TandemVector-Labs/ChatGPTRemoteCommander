@@ -67,11 +67,40 @@ def validated_sandbox(raw_root: str, raw_temp: str) -> Path:
     try:
         if os.path.realpath(temp) != temp or os.path.realpath(expected) != expected:
             raise SystemExit("V025C_SANDBOX_IDENTITY_FAILURE")
-        if not os.path.isdir(temp) or not os.path.isdir(expected):
-            raise SystemExit("V025C_SANDBOX_IDENTITY_FAILURE")
+        # Check the actual opened directory instead of a separate path probe.
+        checked_fd = pin_sandbox_directory(Path(expected))
+        os.close(checked_fd)
     except (OSError, ValueError):
         raise SystemExit("V025C_SANDBOX_IDENTITY_FAILURE") from None
     return Path(expected)
+
+
+def pin_sandbox_directory(sandbox: Path):
+    """Open every absolute ancestor without following symlinks.
+
+    A last-component-only O_NOFOLLOW is insufficient when a writable
+    ancestor could be replaced after lexical and realpath validation.
+    """
+    if not sandbox.is_absolute():
+        raise SystemExit("V025C_SANDBOX_IDENTITY_FAILURE")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open("/", flags)
+    try:
+        for component in sandbox.parts[1:]:
+            if component in ("", ".", "..", "/"):
+                raise SystemExit("V025C_SANDBOX_IDENTITY_FAILURE")
+            child = os.open(component, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        import stat
+        info = os.fstat(fd)
+        if (info.st_uid != os.getuid() or not stat.S_ISDIR(info.st_mode)
+                or info.st_mode & 0o022):
+            raise SystemExit("V025C_SANDBOX_OWNER_INVALID")
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def main():
@@ -110,6 +139,50 @@ def main():
                     assert str(failure) == "V025C_SANDBOX_IDENTITY_FAILURE"
                 else:
                     raise AssertionError("unsafe CI cleanup path accepted")
+            # A symlink in an *ancestor*, not just the final sandbox,
+            # cannot redirect the FD walk to another directory.
+            private_parent = r / "private-real"
+            private_parent.mkdir(mode=0o700)
+            private_child = private_parent / "remote-commander-rollback-v025l"
+            private_child.mkdir(mode=0o700)
+            alias_parent = r / "private-alias"
+            alias_parent.symlink_to(private_parent, target_is_directory=True)
+            try:
+                pin_sandbox_directory(alias_parent / private_child.name)
+            except OSError:
+                pass
+            else:
+                raise AssertionError("V025C_ANCESTOR_SYMLINK_ACCEPTED")
+            print("V025C_ANCESTOR_SYMLINK_REJECT_PASS")
+            # A substituted receipt symlink must fail rather than overwrite an
+            # unrelated synthetic file outside the pinned sandbox directory.
+            from unittest.mock import patch
+            outside = r / "unrelated-owner-data.txt"
+            outside.write_bytes(b"SYNTHETIC_OWNER_DATA_UNTOUCHED")
+            fd = open_receipt_directory(sandbox)
+            original_open = os.open
+            injected = []
+    
+            def redirect_before_create(name, flags, mode=0o777, *, dir_fd=None):
+                if name == "CLEANUP_V025C.json" and dir_fd == fd and not injected:
+                    (sandbox / name).symlink_to(outside)
+                    injected.append(True)
+                return original_open(name, flags, mode, dir_fd=dir_fd)
+    
+            try:
+                with patch("os.open", side_effect=redirect_before_create):
+                    try:
+                        write_receipt(fd, "{}\\n")
+                    except FileExistsError:
+                        pass
+                    else:
+                        raise AssertionError("replaced receipt was opened")
+            finally:
+                os.close(fd)
+            assert len(injected) == 1
+            assert outside.read_bytes() == b"SYNTHETIC_OWNER_DATA_UNTOUCHED"
+            assert (sandbox / "CLEANUP_V025C.json").is_symlink()
+            print("V025C_RECEIPT_SYMLINK_RACE_REJECT_PASS")
         print("V025C_IDENTITY_PURE_TEST_PASS")
         return
     if os.getenv("CI") != "true" or not os.getenv("RUNNER_TEMP") or not os.getenv("GITHUB_WORKSPACE"):
@@ -117,9 +190,36 @@ def main():
     if not args.root:
         raise SystemExit("V025C_ROOT_REQUIRED")
     sandbox = validated_sandbox(args.root, os.environ["RUNNER_TEMP"])
-    receipt = sandbox / "CLEANUP_V025C.json"
-    if "CLEANUP_V025C.json" in os.listdir(sandbox):
-        raise SystemExit("V025C_NO_BLIND_REWRITE")
+    # Pin the validated sandbox and keep this descriptor across the entire
+    # bounded cleanup. The receipt cannot be redirected by swapping its path.
+    root_fd = open_receipt_directory(sandbox)
+    try:
+        return perform_cleanup(sandbox, root_fd)
+    finally:
+        os.close(root_fd)
+
+
+def open_receipt_directory(sandbox: Path):
+    fd = pin_sandbox_directory(sandbox)
+    try:
+        if "CLEANUP_V025C.json" in os.listdir(fd):
+            raise SystemExit("V025C_NO_BLIND_REWRITE")
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def write_receipt(root_fd, payload):
+    # Filename is fixed; O_EXCL and dir_fd pin both creation and destination.
+    file_fd = os.open("CLEANUP_V025C.json",
+                      os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                      0o600, dir_fd=root_fd)
+    with os.fdopen(file_fd, "w", encoding="utf-8") as output:
+        output.write(payload)
+
+
+def perform_cleanup(sandbox: Path, root_fd):
     before = list_owned(sandbox)
     for pid in before:
         if pid in list_owned(sandbox):
@@ -144,8 +244,7 @@ def main():
         "externalNodeProcessesTouched": False, "root": str(sandbox)
     }
     payload = json.dumps(record, indent=2) + "\n"
-    with receipt.open("x", encoding="utf-8") as output:
-        output.write(payload)
+    write_receipt(root_fd, payload)
     print("V025C_CLEANUP_STATUS=" + record["status"] + " receiptSha="
           + hashlib.sha256(payload.encode("utf-8")).hexdigest())
     if after:

@@ -27,7 +27,7 @@ class UserLocalLifecycleTests(unittest.TestCase):
         self.home = self.base / "home"
         self.home.mkdir(mode=0o700)
         self.scope = self.home / ".local/share/RemoteCommander-ControlCenter-QA-Only"
-        bundle = self.base / "bundle.zip"
+        bundle = self.base / "Remote-Commander-Linux-Control-Center-QA.zip"
         r = subprocess.run([sys.executable, str(BUILD), "--output", str(bundle)],
                            capture_output=True, text=True, timeout=15)
         self.assertEqual(r.returncode, 0, r.stderr)
