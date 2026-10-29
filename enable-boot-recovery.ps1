@@ -46,8 +46,21 @@ function Assert-RcSystemExecutableAcl($Acl) {
   }
 }
 
+# Resolve the OS-known machine Program Files root rather than trusting an
+# owner-modifiable environment variable or PATH for privileged task admission.
+function Get-RcMachineProgramFiles {
+  $known=[Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+  if([string]::IsNullOrWhiteSpace($known) -or [string]::IsNullOrWhiteSpace($env:ProgramFiles)){
+    throw 'BOOT_RECOVERY_PROGRAMFILES_UNRESOLVED'
+  }
+  $actual=[IO.Path]::GetFullPath($known).TrimEnd('\')
+  $fromEnv=[IO.Path]::GetFullPath($env:ProgramFiles).TrimEnd('\')
+  if($actual -ine $fromEnv){throw 'BOOT_RECOVERY_PROGRAMFILES_ENV_MISMATCH'}
+  return $actual
+}
+
 function Assert-RcProtectedMachinePath([string]$Candidate, [string]$OwnerProfile) {
-  $programFiles = [IO.Path]::GetFullPath($env:ProgramFiles).TrimEnd('\')
+  $programFiles = Get-RcMachineProgramFiles
   $target = [IO.Path]::GetFullPath($Candidate).TrimEnd('\')
   if (-not $target.StartsWith($programFiles + '\',[StringComparison]::OrdinalIgnoreCase)) {
     throw 'BOOT_RECOVERY_SYSTEM_EXECUTABLE_UNTRUSTED_LOCATION'
@@ -68,7 +81,7 @@ function Assert-RcProtectedMachinePath([string]$Candidate, [string]$OwnerProfile
 }
 
 function Assert-RcSystemTaskInstallTrust([string]$RuntimeRoot, [string]$OwnerProfile) {
-  $requiredRoot=[IO.Path]::GetFullPath((Join-Path $env:ProgramFiles 'ChatGPTRemoteCommander\machine-app')).TrimEnd('\')
+  $requiredRoot=[IO.Path]::GetFullPath((Join-Path (Get-RcMachineProgramFiles) 'ChatGPTRemoteCommander\machine-app')).TrimEnd('\')
   if([IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\') -ine $requiredRoot){
     throw 'BOOT_RECOVERY_MACHINE_APP_ROOT_REQUIRED'
   }
@@ -90,6 +103,32 @@ function Assert-RcSystemTaskInstallTrust([string]$RuntimeRoot, [string]$OwnerPro
   }
 }
 
+# Explicitly bind privileged task and child runtime binaries to machine-only
+# installations. A valid publisher signature is required for the two EXEs;
+# npm.cmd and its adjacent npm-cli.js are protected by recursive path checks.
+function Get-RcTrustedSystemBinaries([string]$OwnerProfile) {
+  $pf=Get-RcMachineProgramFiles
+  $pwsh=Join-Path $pf 'PowerShell\7\pwsh.exe'
+  $node=Join-Path $pf 'nodejs\node.exe'
+  $npm=Join-Path $pf 'nodejs\npm.cmd'
+  $npmCli=Join-Path $pf 'nodejs\node_modules\npm\bin\npm-cli.js'
+  foreach($binary in @($pwsh,$node,$npm,$npmCli)){
+    Assert-RcProtectedMachinePath $binary $OwnerProfile
+  }
+  foreach($check in @(
+    @{Path=$pwsh;Publisher='Microsoft Corporation'},
+    @{Path=$node;Publisher='OpenJS Foundation'}
+  )){
+    $signature=Get-AuthenticodeSignature -LiteralPath $check.Path -ErrorAction Stop
+    $publisher='^CN='+[regex]::Escape([string]$check.Publisher)+'(?:,|$)'
+    if($signature.Status -ne 'Valid' -or -not $signature.SignerCertificate -or
+       [string]$signature.SignerCertificate.Subject -notmatch $publisher){
+      throw 'BOOT_RECOVERY_SYSTEM_BINARY_SIGNATURE_UNTRUSTED'
+    }
+  }
+  return [pscustomobject]@{Pwsh=$pwsh;Node=$node;Npm=$npm}
+}
+
 $SourceRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $OwnerUserProfile = [IO.Path]::GetFullPath($OwnerUserProfile)
 if ([IO.Path]::GetFullPath($env:USERPROFILE) -ne $OwnerUserProfile) {
@@ -97,7 +136,7 @@ if ([IO.Path]::GetFullPath($env:USERPROFILE) -ne $OwnerUserProfile) {
 }
 $OwnerLocal = Join-Path $OwnerUserProfile 'AppData\Local'
 $OwnerRoaming = Join-Path $OwnerUserProfile 'AppData\Roaming'
-$MachineRoot = Join-Path $env:ProgramFiles 'ChatGPTRemoteCommander\machine-app'
+$MachineRoot = Join-Path (Get-RcMachineProgramFiles) 'ChatGPTRemoteCommander\machine-app'
 $Root = $MachineRoot
 # Before any directory creation, DPAPI conversion, probe task, registry or
 # live task update, reject a user-writable SYSTEM execution graph.
@@ -120,13 +159,10 @@ foreach($p in @($CredDir,$ProfileDir,$Supervisor,$Handoff)){
   if(-not(Test-Path -LiteralPath $p)){throw "BOOT_RECOVERY_REQUIRED_PATH_MISSING $p"}
 }
 
-$pwsh = (Get-Command pwsh.exe -ErrorAction Stop).Source
-$node = (Get-Command node.exe -ErrorAction Stop).Source
-$npm = (Get-Command npm.cmd -ErrorAction Stop).Source
-# Task action and child runtime binaries must also resist normal-user writes.
-foreach($binary in @($pwsh,$node,$npm)){
-  Assert-RcProtectedMachinePath $binary $OwnerUserProfile
-}
+$trustedRuntime = Get-RcTrustedSystemBinaries $OwnerUserProfile
+$pwsh = $trustedRuntime.Pwsh
+$node = $trustedRuntime.Node
+$npm = $trustedRuntime.Npm
 $ownerIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $ownerName = $ownerIdentity.Name
 
