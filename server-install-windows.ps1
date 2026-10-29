@@ -19,6 +19,16 @@ $script:BootstrapGitHubToken = [Environment]::GetEnvironmentVariable('RC_GITHUB_
 
 $Repo = if ([string]::IsNullOrWhiteSpace($env:REMOTE_COMMANDER_REPO_URL)) { 'https://github.com/GOD13emad/ChatGPTRemoteCommander.git' } else { $env:REMOTE_COMMANDER_REPO_URL.Trim() }
 if ($Repo -notmatch '^https://github[.]com/(?:GOD13emad|TandemVector-Labs)/ChatGPTRemoteCommander[.]git$') { throw 'Unapproved source repository URL' }
+# Restrict any CI fork selection to an exact same-repository SHA-pinned canary.
+if ([Environment]::GetEnvironmentVariable('RC_GITHUB_CI_FORK_SOURCE','Process') -eq '1') {
+  if ($env:GITHUB_ACTIONS -ne 'true' -or
+      $env:GITHUB_REPOSITORY -ne 'TandemVector-Labs/ChatGPTRemoteCommander' -or
+      $ExpectedCommit -notmatch '^[0-9a-fA-F]{40}$' -or
+      $SourceRef -notmatch '^[A-Za-z0-9._/-]{1,128}$') {
+    throw 'CI_FORK_SOURCE_CONTEXT_DENIED'
+  }
+  $Repo = 'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git'
+}
 $BootstrapRoot = Join-Path $env:ProgramData 'ChatGPTRemoteCommander\bootstrap'
 $ManifestPath = Join-Path $env:ProgramData 'ChatGPTRemoteCommander\server-install-allowlist.json'
 $Downloads = Join-Path $BootstrapRoot ('downloads-' + [guid]::NewGuid().ToString('N'))
