@@ -1,6 +1,30 @@
 # Read-only admission for SYSTEM-only encrypted credential storage.
 # DPAPI LocalMachine alone is not authorization: every local user could decrypt
 # a readable blob. Actual readers must still use the protected machine path.
+# The parent DACL must not grant any non-privileged SID the ability to
+# delete/replace the protected child, or rewrite its security descriptor.
+# Do not rely on a fixed list of well-known user groups: local/custom SIDs
+# can have the same dangerous rights.
+function Assert-RcCredentialParentAcl($acl) {
+  $trustedSids = @('S-1-5-18','S-1-5-32-544')
+  $dangerMask = [int64]([Security.AccessControl.FileSystemRights]::Delete -bor
+    [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+    [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+    [Security.AccessControl.FileSystemRights]::TakeOwnership -bor
+    0x10000000) # GenericAll is dangerous even before Windows expands it.
+  foreach($ace in $acl.Access){
+    # InheritOnly does not apply to the ProgramData directory itself; the
+    # separately checked machine children disable ACL inheritance.
+    if(($ace.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0){continue}
+    if($ace.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow){continue}
+    try{$sid=$ace.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value}
+    catch{throw 'BOOT_RECOVERY_CREDENTIAL_ACL_UNREADABLE'}
+    if($sid -notin $trustedSids -and (([int64]$ace.FileSystemRights -band $dangerMask) -ne 0)){
+      throw 'BOOT_RECOVERY_CREDENTIAL_PARENT_DELETE_OR_DAC'
+    }
+  }
+}
+
 function Assert-RcMachineCredentialStore {
   $base = [IO.Path]::GetFullPath([Environment]::GetFolderPath('CommonApplicationData'))
   $parent = Join-Path $base 'ChatGPTRemoteCommander'
@@ -9,24 +33,12 @@ function Assert-RcMachineCredentialStore {
     throw 'BOOT_RECOVERY_PROTECTED_CREDENTIAL_ROOT_MISSING'
   }
   $allowSids = @('S-1-5-18','S-1-5-32-544')
-  $untrusted = @('S-1-1-0','S-1-5-11','S-1-5-32-545')
   $ancestor = Get-Item -LiteralPath $base -Force -ErrorAction Stop
   if(($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){
     throw 'BOOT_RECOVERY_CREDENTIAL_PARENT_REPARSE'
   }
   $ancestorAcl = Get-Acl -LiteralPath $base -ErrorAction Stop
-  $dangerMask = [int64]([Security.AccessControl.FileSystemRights]::Delete -bor
-    [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
-    [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-    [Security.AccessControl.FileSystemRights]::TakeOwnership)
-  foreach($ace in $ancestorAcl.Access){
-    if($ace.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow){continue}
-    try{$sid=$ace.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value}
-    catch{throw 'BOOT_RECOVERY_CREDENTIAL_ACL_UNREADABLE'}
-    if($sid -in $untrusted -and (([int64]$ace.FileSystemRights -band $dangerMask) -ne 0)){
-      throw 'BOOT_RECOVERY_CREDENTIAL_PARENT_DELETE_OR_DAC'
-    }
-  }
+  Assert-RcCredentialParentAcl $ancestorAcl
   foreach($entryPath in @($parent,$root)){
     $entry = Get-Item -LiteralPath $entryPath -Force -ErrorAction Stop
     if(-not $entry.PSIsContainer -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){
