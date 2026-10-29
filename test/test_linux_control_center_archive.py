@@ -95,6 +95,34 @@ class LinuxGtkPreviewArchiveTests(unittest.TestCase):
             self.assertTrue(dangling.is_symlink())
             self.assertFalse((root / "no-file.zip").exists())
 
+    def test_exclusive_archive_creation_rejects_post_validation_symlink_swap(self):
+        import importlib.util
+        from unittest.mock import patch
+        spec = importlib.util.spec_from_file_location("rc_gtk_builder_guard", BUILDER)
+        builder = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(builder)
+        with tempfile.TemporaryDirectory(prefix="rc-gtk-open-race-") as tmp:
+            root = pathlib.Path(tmp)
+            sentinel = root / "outside-sentinel.txt"
+            sentinel.write_bytes(b"SYNTHETIC_USER_WORK_UNTOUCHED")
+            output = root / "redirect.zip"
+            actual_open = builder.os.open
+            injected = []
+
+            def swap_just_before_create(path, flags, mode=0o777, *, dir_fd=None):
+                if path == output.name and dir_fd is not None and not injected:
+                    output.symlink_to(sentinel)
+                    injected.append(True)
+                return actual_open(path, flags, mode, dir_fd=dir_fd)
+
+            with patch.object(builder.os, "open", side_effect=swap_just_before_create):
+                with self.assertRaises(FileExistsError):
+                    builder.pack(output)
+            self.assertEqual(len(injected), 1)
+            self.assertTrue(output.is_symlink())
+            self.assertEqual(sentinel.read_bytes(), b"SYNTHETIC_USER_WORK_UNTOUCHED")
+
+
 
 if __name__ == "__main__":
     unittest.main()
