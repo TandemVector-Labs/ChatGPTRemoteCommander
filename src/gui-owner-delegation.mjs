@@ -21,12 +21,19 @@ export function createOwnerGuiReadOnlyProxy({
   if (!Number.isSafeInteger(port) || port < 1024 || port > 65535) throw Error('OWNER_GUI_PORT_INVALID');
   if (typeof authFile !== 'string' || !path.isAbsolute(authFile)) throw Error('OWNER_GUI_AUTH_PATH_INVALID');
   if (typeof primaryStatus !== 'function' || typeof fetchImpl !== 'function') throw Error('OWNER_GUI_DEPENDENCIES_MISSING');
-  const base = `http://127.0.0.1:${port}`;
+  // Keep scheme, destination address and RPC path source-controlled. Only a
+  // validated integer port can vary between owner-controlled local profiles.
+  const endpoint = new URL('http://127.0.0.1/mcp');
+  endpoint.port = String(port);
+  if (endpoint.protocol !== 'http:' || endpoint.hostname !== '127.0.0.1' ||
+      endpoint.pathname !== '/mcp' || endpoint.port !== String(port) ||
+      endpoint.username || endpoint.password || endpoint.search || endpoint.hash)
+    throw Error('OWNER_GUI_ENDPOINT_INVALID');
   const timeoutMs = 4000;
   async function rpc(tool, args) {
     const secret = (await readFileImpl(authFile, 'utf8')).trim();
     if (!AUTH_PATTERN.test(secret)) throw Error('OWNER_GUI_CREDENTIAL_INVALID');
-    const response = await fetchImpl(`${base}/mcp`, {
+    const response = await fetchImpl(endpoint.href, {
       method: 'POST',
       redirect: 'error',
       headers: { 'content-type': 'application/json', 'x-rc-owner-gui-auth': secret },
