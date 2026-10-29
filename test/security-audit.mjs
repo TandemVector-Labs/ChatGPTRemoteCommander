@@ -94,9 +94,9 @@ if (!probed.has('Tunnel identifier') || !probed.has('Bearer token literal')) {
 // Adversarial probe: a different bearer value at the same spoofed path and
 // historical commit identity MUST remain a finding.
 const hostileProbe = makeHistoryScanner(patterns);
-hostileProbe.write('commit 7b28ae4ffbfc3094c70647fd1ad8c4c491ba7bf5\\n');
-hostileProbe.write(knownFixtureDiff + '\\n');
-hostileProbe.write("+assert.equal(options.headers.Authorization,'Bearer " + 'Z'.repeat(30) + "');\\n");
+hostileProbe.write('commit 7b28ae4ffbfc3094c70647fd1ad8c4c491ba7bf5\n');
+hostileProbe.write(knownFixtureDiff + '\n');
+hostileProbe.write("+assert.equal(options.headers.Authorization,'Bearer " + 'Z'.repeat(30) + "');\n");
 if (!hostileProbe.finish().has('Bearer token literal') ||
     hostileProbe.recognizedFixtureCount !== 0) {
   throw new Error('SECURITY_AUDIT_EXACT_FIXTURE_FAIL_CLOSED_REGRESSION');
