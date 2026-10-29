@@ -67,11 +67,40 @@ def validated_sandbox(raw_root: str, raw_temp: str) -> Path:
     try:
         if os.path.realpath(temp) != temp or os.path.realpath(expected) != expected:
             raise SystemExit("V025C_SANDBOX_IDENTITY_FAILURE")
-        if not os.path.isdir(temp) or not os.path.isdir(expected):
-            raise SystemExit("V025C_SANDBOX_IDENTITY_FAILURE")
+        # Check the actual opened directory instead of a separate path probe.
+        checked_fd = pin_sandbox_directory(Path(expected))
+        os.close(checked_fd)
     except (OSError, ValueError):
         raise SystemExit("V025C_SANDBOX_IDENTITY_FAILURE") from None
     return Path(expected)
+
+
+def pin_sandbox_directory(sandbox: Path):
+    """Open every absolute ancestor without following symlinks.
+
+    A last-component-only O_NOFOLLOW is insufficient when a writable
+    ancestor could be replaced after lexical and realpath validation.
+    """
+    if not sandbox.is_absolute():
+        raise SystemExit("V025C_SANDBOX_IDENTITY_FAILURE")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open("/", flags)
+    try:
+        for component in sandbox.parts[1:]:
+            if component in ("", ".", "..", "/"):
+                raise SystemExit("V025C_SANDBOX_IDENTITY_FAILURE")
+            child = os.open(component, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        import stat
+        info = os.fstat(fd)
+        if (info.st_uid != os.getuid() or not stat.S_ISDIR(info.st_mode)
+                or info.st_mode & 0o022):
+            raise SystemExit("V025C_SANDBOX_OWNER_INVALID")
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def main():
@@ -110,6 +139,21 @@ def main():
                     assert str(failure) == "V025C_SANDBOX_IDENTITY_FAILURE"
                 else:
                     raise AssertionError("unsafe CI cleanup path accepted")
+            # A symlink in an *ancestor*, not just the final sandbox,
+            # cannot redirect the FD walk to another directory.
+            private_parent = r / "private-real"
+            private_parent.mkdir(mode=0o700)
+            private_child = private_parent / "remote-commander-rollback-v025l"
+            private_child.mkdir(mode=0o700)
+            alias_parent = r / "private-alias"
+            alias_parent.symlink_to(private_parent, target_is_directory=True)
+            try:
+                pin_sandbox_directory(alias_parent / private_child.name)
+            except OSError:
+                pass
+            else:
+                raise AssertionError("V025C_ANCESTOR_SYMLINK_ACCEPTED")
+            print("V025C_ANCESTOR_SYMLINK_REJECT_PASS")
             # A substituted receipt symlink must fail rather than overwrite an
             # unrelated synthetic file outside the pinned sandbox directory.
             from unittest.mock import patch
@@ -156,12 +200,8 @@ def main():
 
 
 def open_receipt_directory(sandbox: Path):
-    import stat
-    fd = os.open(sandbox, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    fd = pin_sandbox_directory(sandbox)
     try:
-        info = os.fstat(fd)
-        if info.st_uid != os.getuid() or not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o022:
-            raise SystemExit("V025C_SANDBOX_OWNER_INVALID")
         if "CLEANUP_V025C.json" in os.listdir(fd):
             raise SystemExit("V025C_NO_BLIND_REWRITE")
         return fd
