@@ -95,6 +95,18 @@ class LinuxGtkPreviewArchiveTests(unittest.TestCase):
             self.assertTrue(dangling.is_symlink())
             self.assertFalse((root / "no-file.zip").exists())
 
+    def test_reject_nonportable_or_non_zip_output_names(self):
+        with tempfile.TemporaryDirectory(prefix="rc-gtk-qa-invalid-name-") as tmp:
+            root = pathlib.Path(tmp)
+            for filename in ("bad name.zip", "invalid?.zip", "archive.txt",
+                             ".hidden.zip", "a" * 110 + ".zip"):
+                with self.subTest(filename=filename):
+                    output = root / filename
+                    result = build(output)
+                    self.assertEqual(result.returncode, 2, result.stdout)
+                    self.assertIn("OUTPUT_NAME_INVALID", result.stderr)
+                    self.assertFalse(output.exists())
+
     def test_reject_ancestor_symlink_even_when_final_parent_is_private(self):
         with tempfile.TemporaryDirectory(prefix="rc-gtk-qa-ancestor-") as tmp:
             root = pathlib.Path(tmp)
