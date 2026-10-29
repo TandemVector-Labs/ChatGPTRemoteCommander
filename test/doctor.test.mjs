@@ -9,13 +9,48 @@ import { parseArgs, runDoctor, validateEndpoint } from '../tools/doctor.mjs';
 
 test('validateEndpoint accepts loopback MCP URLs', () => {
   assert.equal(validateEndpoint('http://127.0.0.1:47831/mcp').hostname, '127.0.0.1');
-  assert.equal(validateEndpoint('http://localhost:47831/mcp').hostname, 'localhost');
+  assert.equal(validateEndpoint('http://[::1]:47831/mcp').hostname, '[::1]');
 });
 
 test('validateEndpoint rejects remote hosts and URL secrets', () => {
   assert.throws(() => validateEndpoint('https://example.com/mcp'), /loopback-only/);
   assert.throws(() => validateEndpoint('http://user:pass@127.0.0.1:47831/mcp'), /credentials/);
   assert.throws(() => validateEndpoint('http://127.0.0.1:47831/mcp?token=x'), /query/);
+});
+
+test('doctor rejects noncanonical, DNS, privileged-port and path-confusion targets', () => {
+  for (const address of [
+    'http://localhost:47831/mcp',
+    'http://example.invalid:47831/mcp',
+    'https://127.0.0.1:47831/mcp',
+    'http://0x7f000001:47831/mcp',
+    'http://127.0.0.1/mcp',
+    'http://127.0.0.1:80/mcp',
+    'http://127.0.0.1:47831/foo/mcp',
+    'http://127.0.0.1:47831/mcp/',
+    'http://127.0.0.1:47831/mcp?secret=a',
+    'http://127.0.0.1:47831/mcp#fragment',
+    'http://127.0.0.1:47831/mcp\\host',
+    'file:///etc/passwd'
+  ]) {
+    assert.throws(() => validateEndpoint(address), undefined, address);
+  }
+});
+
+test('doctor rejects unsafe endpoint before making any HTTP request', async () => {
+  let hits = 0;
+  const server = http.createServer((_req, res) => { hits += 1; res.end('{}'); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const port = server.address().port;
+    await assert.rejects(
+      () => runDoctor({ endpoint: `http://127.0.0.1:${port}/foo/mcp` }),
+      /exactly \/mcp/
+    );
+    assert.equal(hits, 0);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
 });
 
 test('parseArgs enforces timeout bounds and known arguments', () => {

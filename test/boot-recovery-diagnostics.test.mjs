@@ -34,7 +34,7 @@ test('Windows BootCore self-test writes structured integrity failure instead of 
     assert.equal(result.ok,false);
     assert.equal(result.bootCore,true);
     assert.equal(result.credentialScope,'LocalMachine');
-    assert.match(result.error,/instance config hash mismatch probe|BOOT_RECOVERY_PROTECTED_CREDENTIAL_ROOT_MISSING/u);
+    assert.match(result.error,/BOOT_RECOVERY_MACHINE_APP_ROOT_REQUIRED|BOOT_RECOVERY_PROTECTED_CREDENTIAL_ROOT_MISSING/u);
   } finally {
     fs.rmSync(owner,{recursive:true,force:true});
   }
@@ -131,4 +131,99 @@ test('machine credential ProgramData ACL rejects custom principals and GenericAl
   const r=spawnSync('pwsh.exe',['-NoLogo','-NoProfile','-NonInteractive','-Command',cmd],{encoding:'utf8',timeout:15000});
   assert.equal(r.status,0,r.stderr||r.stdout);
   assert.match(r.stdout,/MACHINE_CREDENTIAL_PARENT_ACL_NEGATIVE_PASS/u);
+});
+
+test('SYSTEM executable ACL denies arbitrary SID mutators, generic rights and foreign owners', { skip: process.platform !== 'win32' }, () => {
+  const installer=path.join(repo,'enable-boot-recovery.ps1');
+  const source=fs.readFileSync(installer,'utf8');
+  for(const required of ['function Assert-RcSystemExecutableAcl','BOOT_RECOVERY_SYSTEM_EXECUTABLE_OWNER_UNTRUSTED',
+    'BOOT_RECOVERY_SYSTEM_EXECUTABLE_WRITABLE','0x50000000','PropagationFlags]::InheritOnly']) {
+    assert.ok(source.includes(required), 'missing '+required);
+  }
+  assert.ok(!source.includes("$untrusted = @("), 'fixed SID blacklist must not survive');
+  const quoted=installer.replaceAll("'","''");
+  const cmd=[
+    "$ErrorActionPreference='Stop'",
+    "$tokens=$null;$errors=$null",
+    "$ast=[Management.Automation.Language.Parser]::ParseFile('"+quoted+"',[ref]$tokens,[ref]$errors)",
+    "if($errors.Count){throw 'INSTALLER_AST_FAIL'}",
+    "$fn=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Assert-RcSystemExecutableAcl'},$true))",
+    "if($fn.Count -ne 1){throw 'ACL_FUNCTION_NOT_UNIQUE'}",
+    ". ([ScriptBlock]::Create($fn[0].Extent.Text))",
+    "$sid=[Security.Principal.SecurityIdentifier]::new('S-1-5-32-547')",
+    "$ace=[pscustomobject]@{IdentityReference=$sid;AccessControlType=[Security.AccessControl.AccessControlType]::Allow;FileSystemRights=[int64]0;PropagationFlags=[Security.AccessControl.PropagationFlags]::None}",
+    "$acl=[pscustomobject]@{Owner='NT AUTHORITY\\SYSTEM';Access=@($ace)}",
+    "foreach($right in @([int64][Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles,[int64]0x10000000,[int64]0x40000000)){ $ace.FileSystemRights=$right; try{ Assert-RcSystemExecutableAcl $acl; throw 'WRITE_NOT_REJECTED' }catch{ if($_.Exception.Message -ne 'BOOT_RECOVERY_SYSTEM_EXECUTABLE_WRITABLE'){throw} } }",
+    "$ace.PropagationFlags=[Security.AccessControl.PropagationFlags]::InheritOnly",
+    "Assert-RcSystemExecutableAcl $acl",
+    "$ace.PropagationFlags=[Security.AccessControl.PropagationFlags]::None",
+    "$ace.FileSystemRights=[int64][Security.AccessControl.FileSystemRights]::ReadAndExecute",
+    "Assert-RcSystemExecutableAcl $acl",
+    "$acl.Owner='BUILTIN\\Users'",
+    "try{ Assert-RcSystemExecutableAcl $acl; throw 'OWNER_NOT_REJECTED' }catch{ if($_.Exception.Message -ne 'BOOT_RECOVERY_SYSTEM_EXECUTABLE_OWNER_UNTRUSTED'){throw} }",
+    "Write-Output 'SYSTEM_EXECUTABLE_ARBITRARY_SID_FAIL_CLOSED_PASS'"
+  ].join(';');
+  const r=spawnSync('pwsh.exe',['-NoLogo','-NoProfile','-NonInteractive','-Command',cmd],
+    {encoding:'utf8',timeout:15000});
+  assert.equal(r.status,0,r.stderr||r.stdout);
+  assert.match(r.stdout,/SYSTEM_EXECUTABLE_ARBITRARY_SID_FAIL_CLOSED_PASS/u);
+});
+
+test('SYSTEM BootRecovery pins vendor-signed machine binaries and rejects spoofed ProgramFiles or PATH', () => {
+  const source=fs.readFileSync(path.join(repo,'enable-boot-recovery.ps1'),'utf8');
+  for(const marker of [
+    'function Get-RcMachineProgramFiles',
+    'SpecialFolder]::ProgramFiles',
+    'BOOT_RECOVERY_PROGRAMFILES_ENV_MISMATCH',
+    'function Get-RcTrustedSystemBinaries',
+    "PowerShell\\7\\pwsh.exe",
+    "nodejs\\node.exe",
+    "nodejs\\npm.cmd",
+    "nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+    'BOOT_RECOVERY_SYSTEM_BINARY_SIGNATURE_UNTRUSTED',
+    'Get-AuthenticodeSignature',
+    'Get-RcTrustedSystemBinaries $OwnerUserProfile'
+  ]) assert.ok(source.includes(marker),'missing '+marker);
+  for(const unsafe of [
+    '(Get-Command pwsh.exe -ErrorAction Stop).Source',
+    '(Get-Command node.exe -ErrorAction Stop).Source',
+    '(Get-Command npm.cmd -ErrorAction Stop).Source'
+  ]) assert.equal(source.includes(unsafe),false,'PATH fallback '+unsafe);
+  const admission=source.indexOf('Assert-RcSystemTaskInstallTrust $Root $OwnerUserProfile');
+  const failClosed=source.indexOf("throw 'BOOT_RECOVERY_MACHINE_CREDENTIAL_STORAGE_MIGRATION_REQUIRED'");
+  const register=source.indexOf('Register-ScheduledTask -TaskName $BootTaskName');
+  assert.ok(admission>=0 && admission<failClosed && failClosed<register,'retain fail-closed registration');
+});
+
+test('BootCore never executes owner-configured paths or owner-writable tunnel binaries', () => {
+  const runtime=fs.readFileSync(path.join(repo,'windows-supervisor-runtime.ps1'),'utf8');
+  const boot=fs.readFileSync(path.join(repo,'autostart-windows.ps1'),'utf8');
+  const routing=fs.readFileSync(path.join(repo,'supervisor-routing.ps1'),'utf8');
+  const trust=fs.readFileSync(path.join(repo,'machine-runtime-trust.ps1'),'utf8');
+  for(const required of [
+    'BOOT_RECOVERY_MACHINE_APP_ROOT_REQUIRED',
+    'Assert-RcMachineRuntimeStore',
+    "Join-Path $machineRuntime 'profiles'",
+    "Join-Path $machineRuntime 'instances'"
+  ]) assert.ok(runtime.includes(required),required);
+  assert.ok(boot.includes('if($BootCore){return Get-RcMachineTunnelExecutable}'));
+  assert.ok(boot.includes("$env:REMOTE_COMMANDER_CONFIG=Join-Path $script:MachineRuntimeRoot 'primary\\config.json'"));
+  assert.ok(routing.includes("BOOT_RECOVERY_MACHINE_ROUTE_PROJECT_UNTRUSTED"));
+  assert.ok(routing.includes("BOOT_RECOVERY_MACHINE_ROUTE_CONFIG_UNTRUSTED"));
+  assert.ok(routing.includes('if($BootCore){return} # never self-update under SYSTEM'));
+  for(const marker of [
+    'BOOT_RECOVERY_MACHINE_RUNTIME_UNTRUSTED_ACE',
+    'BOOT_RECOVERY_MACHINE_RUNTIME_OWNER_UNTRUSTED',
+    'BOOT_RECOVERY_MACHINE_TUNNEL_PIN_MISMATCH',
+    'BOOT_RECOVERY_MACHINE_PRIMARY_PRIVILEGED'
+  ]) assert.ok(trust.includes(marker),marker);
+});
+
+
+test('user-session handoff refuses unknown service state before considering SYSTEM shutdown', () => {
+  const script=fs.readFileSync(path.join(repo,'handoff-user-session-windows.ps1'),'utf8');
+  assert.match(script,/HANDOFF_STATUS_INCOMPLETE/u);
+  assert.match(script,/HANDOFF_STATUS_INVALID/u);
+  assert.match(script,/return \[pscustomobject\]@\{active=1;leases=1\}/u);
+  assert.doesNotMatch(script,/return \[pscustomobject\]@\{active=0;leases=0\}/u);
 });

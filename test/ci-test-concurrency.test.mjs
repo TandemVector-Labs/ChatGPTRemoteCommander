@@ -430,6 +430,51 @@ test('R470 Node24 spec reporter failure is classified and sanitized with no raw 
   }finally{fs.rmSync(tmp,{recursive:true,force:true});}
 });
 
+test('R173 V025W diagnostic uses distinct scope, hashed synthetic spec and artifact without leaking logs',t=>{
+  if(process.platform!=='win32')return t.skip('requires native Windows PowerShell');
+  const sha='604ed6a8a0e0f95197fabcc92d93537142017a0b';
+  const secret='ghp_R173_SENSITIVE_SENTINEL_NEVER_PERSIST';
+  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'r173-v025-r470-'));
+  try{
+    const folder=path.join(tmp,'STATE','ChatGPTRemoteCommander','update-logs');
+    fs.mkdirSync(folder,{recursive:true});
+    const log=path.join(folder,'qualification-output-qualification-test-'+sha.slice(0,12)+'-fixture.stdout.log');
+    fs.writeFileSync(log,[
+      '✖ synthetic rollback test failure (3.14ms)',
+      'ℹ tests 1','ℹ pass 0','ℹ fail 1',
+      'at C:\\Private\\Owner\\location '+secret
+    ].join('\n'),'utf8');
+    const tool=path.join(root,'tools','diagnose-updater-gate-r470.ps1');
+    const scope='READ_ONLY_HOSTED_V025W_ROLLBACK_QUALIFICATION_FAILURE';
+    const proc=spawnSync('pwsh.exe',['-NoLogo','-NoProfile','-NonInteractive','-File',
+      tool,'-Root',tmp,'-ExpectedCommit',sha,'-Scope',scope],
+      {encoding:'utf8',timeout:15000});
+    assert.equal(proc.status,0,proc.stderr||proc.stdout);
+    const artifact=fs.readFileSync(path.join(tmp,'DIAGNOSTIC_R470.json'),'utf8');
+    assert.ok(!artifact.includes(secret),'do not publish raw secrets');
+    assert.ok(!artifact.includes(tmp),'do not publish private paths');
+    const report=JSON.parse(artifact);
+    assert.equal(report.status,'SPEC_SUMMARY_EXTRACTED');
+    assert.equal(report.scope,scope);
+    assert.equal(report.commit,sha);
+    assert.equal(report.matchingLogCount,1);
+    assert.equal(report.historicalFailureJob,null);
+    assert.deepEqual(report.specFailureTests,['synthetic rollback test failure']);
+    assert.equal(report.specCounts.fail,'1');
+    assert.equal(report.rawLogIncluded,false);
+    assert.equal(report.secretsIncluded,false);
+    assert.equal(report.absolutePathsIncluded,false);
+    const rollback=read('test/release-rollback-windows-v01025.ps1');
+    assert.ok(rollback.includes("-Scope '"+scope+"'"));
+    assert.ok(rollback.includes('V025W_R470_READBACK_MISMATCH'));
+    for(const wf of ['.github/workflows/release-rollback-windows-r173.yml',
+      '.github/workflows/candidate-rollback-v01025.yml']){
+      assert.ok(read(wf).includes('remote-commander-rollback-v025w/DIAGNOSTIC_R470.json'),
+        'only sanitized diagnostic receipt may be uploaded: '+wf);
+    }
+  }finally{fs.rmSync(tmp,{recursive:true,force:true});}
+});
+
 test('Windows runs exact workflow-plan races before loaded CI; strict adaptive team deadline unchanged',()=>{
   const pkg=JSON.parse(read('package.json'));
   let command=prioritizeSensitiveQualificationCommands(boundNodeTestConcurrency(pkg.scripts.test,1).command);

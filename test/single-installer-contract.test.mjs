@@ -6,6 +6,22 @@ import path from 'node:path';
 const root=path.resolve(import.meta.dirname,'..');
 const read=rel=>fs.readFileSync(path.join(root,rel),'utf8');
 
+test('renamed organization source is pinned to canonical repository in install canaries',()=>{
+  const repo='TandemVector-Labs/ChatGPTRemoteCommander';
+  const workflow=read('.github/workflows/server-install-canary.yml');
+  const windows=read('server-install-windows.ps1');
+  const installer=read('install.ps1');
+  assert.ok(workflow.includes(`github.repository == '${repo}'`));
+  assert.ok(workflow.includes(`GOD13emad/ChatGPTRemoteCommander|${repo})`));
+  assert.ok(windows.includes(`$env:GITHUB_REPOSITORY -ne '${repo}'`));
+  assert.ok(windows.includes(`$Repo = 'https://github.com/${repo}.git'`));
+  assert.ok(installer.includes(`$env:GITHUB_REPOSITORY -ne '${repo}'`));
+  assert.ok(installer.includes(`$Repo = 'https://github.com/${repo}.git'`));
+  assert.equal(workflow.includes('Usefull-Skills/ChatGPTRemoteCommander'),false);
+  assert.equal(windows.includes('Usefull-Skills/ChatGPTRemoteCommander'),false);
+  assert.equal(installer.includes('Usefull-Skills/ChatGPTRemoteCommander'),false);
+});
+
 test('single Windows installer exposes one product shell with two installation modes',()=>{
   const iss=read('installer/RemoteCommander.iss');
 

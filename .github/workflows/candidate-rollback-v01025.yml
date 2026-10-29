@@ -179,3 +179,4 @@ jobs:
             ${{ runner.temp }}/remote-commander-rollback-v025w/ROLLBACK.stderr.log
             ${{ runner.temp }}/remote-commander-rollback-v025w/ROUTE_PROMOTE.json
             ${{ runner.temp }}/remote-commander-rollback-v025w/ROUTE_ROLLBACK.json
+            ${{ runner.temp }}/remote-commander-rollback-v025w/DIAGNOSTIC_R470.json
