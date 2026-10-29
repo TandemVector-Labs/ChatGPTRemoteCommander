@@ -101,3 +101,34 @@ test('BootCore machine-scope credentials must use protected store, not owner Loc
   assert.ok(boot.includes('if(-not $SelfTest){throw}'),'no live BootCore credential-root bypass');
   assert.ok(boot.includes('exit 3'),'fail closed early selftest receipt');
 });
+
+test('machine credential ProgramData ACL rejects custom principals and GenericAll without misclassifying InheritOnly', { skip: process.platform !== 'win32' }, () => {
+  const helper=path.join(repo,'machine-credential-trust.ps1');
+  const source=fs.readFileSync(helper,'utf8');
+  assert.ok(source.includes('$sid -notin $trustedSids'));
+  assert.ok(source.includes('PropagationFlags]::InheritOnly'));
+  assert.ok(!source.includes('$untrusted ='), 'fixed three-SID allowlist is insufficient');
+  const quoted=helper.replaceAll("'","''");
+  const cmd=[
+    "$ErrorActionPreference='Stop'",
+    ". '"+quoted+"'",
+    "$sid=[Security.Principal.SecurityIdentifier]::new('S-1-5-32-547')",
+    "$ace=[pscustomobject]@{IdentityReference=$sid;AccessControlType=[Security.AccessControl.AccessControlType]::Allow;FileSystemRights=[int64]0;PropagationFlags=[Security.AccessControl.PropagationFlags]::None}",
+    "$acl=[pscustomobject]@{Owner='NT AUTHORITY\\SYSTEM';Access=@($ace)}",
+    "$denied=0",
+    "foreach($right in @([int64][Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles,[int64]0x10000000)){ $ace.FileSystemRights=$right; try{ Assert-RcCredentialParentAcl $acl; throw 'UNTRUSTED_PARENT_RIGHT_ACCEPTED' }catch{ if($_.Exception.Message -ne 'BOOT_RECOVERY_CREDENTIAL_PARENT_DELETE_OR_DAC'){ throw }; $denied++ } }",
+    "if($denied -ne 2){throw 'DANGEROUS_RIGHTS_NOT_REJECTED'}",
+    "$ace.PropagationFlags=[Security.AccessControl.PropagationFlags]::InheritOnly",
+    "Assert-RcCredentialParentAcl $acl",
+    "$ace.PropagationFlags=[Security.AccessControl.PropagationFlags]::None",
+    "$ace.FileSystemRights=[int64][Security.AccessControl.FileSystemRights]::Write",
+    "Assert-RcCredentialParentAcl $acl",
+    "$acl.Owner='BUILTIN\\Users'",
+    "try{ Assert-RcCredentialParentAcl $acl; throw 'OWNER_NOT_REJECTED' }catch{ if($_.Exception.Message -ne 'BOOT_RECOVERY_CREDENTIAL_PARENT_OWNER'){throw} }",
+    "$acl.Owner='NT AUTHORITY\\SYSTEM'",
+    "Write-Output 'MACHINE_CREDENTIAL_PARENT_ACL_NEGATIVE_PASS'"
+  ].join(';');
+  const r=spawnSync('pwsh.exe',['-NoLogo','-NoProfile','-NonInteractive','-Command',cmd],{encoding:'utf8',timeout:15000});
+  assert.equal(r.status,0,r.stderr||r.stdout);
+  assert.match(r.stdout,/MACHINE_CREDENTIAL_PARENT_ACL_NEGATIVE_PASS/u);
+});
