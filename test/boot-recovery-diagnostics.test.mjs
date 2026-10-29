@@ -71,3 +71,22 @@ test('SYSTEM BootRecovery install rejects untrusted owner paths before any mutat
   assert.ok(!source.includes('$Root = if((Test-Path -LiteralPath $stableSupervisor'),
     'legacy user-writable runtime fallback must not survive');
 });
+
+test('SYSTEM credential root verifier preserves fail-closed migration gate', () => {
+  const boot=fs.readFileSync(path.join(repo,'enable-boot-recovery.ps1'),'utf8');
+  const helper=fs.readFileSync(path.join(repo,'machine-credential-trust.ps1'),'utf8');
+  for(const phrase of [
+    'Assert-RcMachineCredentialStore',
+    'BOOT_RECOVERY_PROTECTED_CREDENTIAL_ROOT_MISSING',
+    'BOOT_RECOVERY_CREDENTIAL_ROOT_INHERITS',
+    'BOOT_RECOVERY_CREDENTIAL_ROOT_UNTRUSTED_ACE',
+    'BOOT_RECOVERY_CREDENTIAL_PARENT_DELETE_OR_DAC',
+    'BOOT_RECOVERY_CREDENTIAL_FILE_UNTRUSTED_ACE'
+  ]) assert.ok((boot+helper).includes(phrase),'missing '+phrase);
+  const rootCheck=boot.indexOf('$MachineCredentialRoot = Assert-RcMachineCredentialStore');
+  const failClosed=boot.indexOf("throw 'BOOT_RECOVERY_MACHINE_CREDENTIAL_STORAGE_MIGRATION_REQUIRED'");
+  const firstWrite=boot.indexOf('New-Item -ItemType Directory -Force -Path $VarDir');
+  assert.ok(rootCheck >= 0 && rootCheck < failClosed && failClosed < firstWrite);
+  assert.ok(!helper.includes('Unprotect(') && !helper.includes('Get-Content'),
+    'attestation must not read or decrypt credential bytes');
+});
