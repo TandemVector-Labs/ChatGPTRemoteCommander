@@ -7,6 +7,10 @@
 # can have the same dangerous rights.
 function Assert-RcCredentialParentAcl($acl) {
   $trustedSids = @('S-1-5-18','S-1-5-32-544')
+  # The directory owner can rewrite the DACL even without an explicit allow ACE.
+  try{$ownerSid=([Security.Principal.NTAccount]$acl.Owner).Translate([Security.Principal.SecurityIdentifier]).Value}
+  catch{throw 'BOOT_RECOVERY_CREDENTIAL_PARENT_OWNER_UNRESOLVED'}
+  if($ownerSid -notin $trustedSids){throw 'BOOT_RECOVERY_CREDENTIAL_PARENT_OWNER'}
   $dangerMask = [int64]([Security.AccessControl.FileSystemRights]::Delete -bor
     [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
     [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
