@@ -97,6 +97,11 @@ $Root = $MachineRoot
 # live task update, reject a user-writable SYSTEM execution graph.
 Assert-RcSystemTaskInstallTrust $Root $OwnerUserProfile
 $CredDir = Join-Path $OwnerLocal 'ChatGPTRemoteCommander\credentials'
+# Read-only security attestation for separately staged machine-only storage.
+# Do not activate boot tasks until the SYSTEM reader uses it and owner-profile
+# dependencies are removed; this is not a credential migration or copy.
+. (Join-Path $Root 'machine-credential-trust.ps1')
+$MachineCredentialRoot = Assert-RcMachineCredentialStore
 # The legacy LocalMachine-DPAPI blob sits below owner-writable ancestors.
 # Do not register SYSTEM tasks until the reader and storage are migrated.
 throw 'BOOT_RECOVERY_MACHINE_CREDENTIAL_STORAGE_MIGRATION_REQUIRED'
