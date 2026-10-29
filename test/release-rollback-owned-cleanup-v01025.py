@@ -110,35 +110,35 @@ def main():
                     assert str(failure) == "V025C_SANDBOX_IDENTITY_FAILURE"
                 else:
                     raise AssertionError("unsafe CI cleanup path accepted")
-        # A substituted receipt symlink must fail rather than overwrite an
-        # unrelated synthetic file outside the pinned sandbox directory.
-        from unittest.mock import patch
-        outside = r / "unrelated-owner-data.txt"
-        outside.write_bytes(b"SYNTHETIC_OWNER_DATA_UNTOUCHED")
-        fd = open_receipt_directory(sandbox)
-        original_open = os.open
-        injected = []
-
-        def redirect_before_create(name, flags, mode=0o777, *, dir_fd=None):
-            if name == "CLEANUP_V025C.json" and dir_fd == fd and not injected:
-                (sandbox / name).symlink_to(outside)
-                injected.append(True)
-            return original_open(name, flags, mode, dir_fd=dir_fd)
-
-        try:
-            with patch("os.open", side_effect=redirect_before_create):
-                try:
-                    write_receipt(fd, "{}\\n")
-                except FileExistsError:
-                    pass
-                else:
-                    raise AssertionError("replaced receipt was opened")
-        finally:
-            os.close(fd)
-        assert len(injected) == 1
-        assert outside.read_bytes() == b"SYNTHETIC_OWNER_DATA_UNTOUCHED"
-        assert (sandbox / "CLEANUP_V025C.json").is_symlink()
-        print("V025C_RECEIPT_SYMLINK_RACE_REJECT_PASS")
+            # A substituted receipt symlink must fail rather than overwrite an
+            # unrelated synthetic file outside the pinned sandbox directory.
+            from unittest.mock import patch
+            outside = r / "unrelated-owner-data.txt"
+            outside.write_bytes(b"SYNTHETIC_OWNER_DATA_UNTOUCHED")
+            fd = open_receipt_directory(sandbox)
+            original_open = os.open
+            injected = []
+    
+            def redirect_before_create(name, flags, mode=0o777, *, dir_fd=None):
+                if name == "CLEANUP_V025C.json" and dir_fd == fd and not injected:
+                    (sandbox / name).symlink_to(outside)
+                    injected.append(True)
+                return original_open(name, flags, mode, dir_fd=dir_fd)
+    
+            try:
+                with patch("os.open", side_effect=redirect_before_create):
+                    try:
+                        write_receipt(fd, "{}\\n")
+                    except FileExistsError:
+                        pass
+                    else:
+                        raise AssertionError("replaced receipt was opened")
+            finally:
+                os.close(fd)
+            assert len(injected) == 1
+            assert outside.read_bytes() == b"SYNTHETIC_OWNER_DATA_UNTOUCHED"
+            assert (sandbox / "CLEANUP_V025C.json").is_symlink()
+            print("V025C_RECEIPT_SYMLINK_RACE_REJECT_PASS")
         print("V025C_IDENTITY_PURE_TEST_PASS")
         return
     if os.getenv("CI") != "true" or not os.getenv("RUNNER_TEMP") or not os.getenv("GITHUB_WORKSPACE"):
