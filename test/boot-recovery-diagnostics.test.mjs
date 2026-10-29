@@ -34,7 +34,7 @@ test('Windows BootCore self-test writes structured integrity failure instead of 
     assert.equal(result.ok,false);
     assert.equal(result.bootCore,true);
     assert.equal(result.credentialScope,'LocalMachine');
-    assert.match(result.error,/instance config hash mismatch probe/u);
+    assert.match(result.error,/instance config hash mismatch probe|BOOT_RECOVERY_PROTECTED_CREDENTIAL_ROOT_MISSING/u);
   } finally {
     fs.rmSync(owner,{recursive:true,force:true});
   }
@@ -89,4 +89,15 @@ test('SYSTEM credential root verifier preserves fail-closed migration gate', () 
   assert.ok(rootCheck >= 0 && rootCheck < failClosed && failClosed < firstWrite);
   assert.ok(!helper.includes('Unprotect(') && !helper.includes('Get-Content'),
     'attestation must not read or decrypt credential bytes');
+});
+
+test('BootCore machine-scope credentials must use protected store, not owner LocalAppData', () => {
+  const runtime=fs.readFileSync(path.join(repo,'windows-supervisor-runtime.ps1'),'utf8');
+  const boot=fs.readFileSync(path.join(repo,'autostart-windows.ps1'),'utf8');
+  assert.ok(runtime.includes('BOOT_RECOVERY_MACHINE_CREDENTIAL_SCOPE_REQUIRED'));
+  assert.ok(runtime.includes('$credentials = Assert-RcMachineCredentialStore'));
+  assert.ok(runtime.includes('CredDir=$credentials'));
+  assert.ok(boot.includes('Initialize-WindowsSupervisorRuntime $Root $OwnerUserProfile ([bool]$BootCore) $CredentialScope'));
+  assert.ok(boot.includes('if(-not $SelfTest){throw}'),'no live BootCore credential-root bypass');
+  assert.ok(boot.includes('exit 3'),'fail closed early selftest receipt');
 });

@@ -1,7 +1,8 @@
 function Initialize-WindowsSupervisorRuntime(
   [string]$Root,
   [string]$OwnerUserProfile,
-  [bool]$BootCore
+  [bool]$BootCore,
+  [string]$CredentialScope = 'CurrentUser'
 ) {
   if ([string]::IsNullOrWhiteSpace($OwnerUserProfile)) { $OwnerUserProfile = $env:USERPROFILE }
   $OwnerUserProfile = [IO.Path]::GetFullPath($OwnerUserProfile)
@@ -13,9 +14,19 @@ function Initialize-WindowsSupervisorRuntime(
     $env:APPDATA = $roaming
     $env:HOME = $OwnerUserProfile
   }
+  $credentials = Join-Path $local 'ChatGPTRemoteCommander\credentials'
+  if($BootCore){
+    if($CredentialScope -ne 'LocalMachine'){
+      throw 'BOOT_RECOVERY_MACHINE_CREDENTIAL_SCOPE_REQUIRED'
+    }
+    # Machine-scope credential blobs are never read from owner-writable
+    # ancestors. Verify every entry's ACL and refuse missing/unsafe roots.
+    . (Join-Path $Root 'machine-credential-trust.ps1')
+    $credentials = Assert-RcMachineCredentialStore
+  }
   return [pscustomobject]@{
     OwnerUserProfile=$OwnerUserProfile
-    CredDir=(Join-Path $local 'ChatGPTRemoteCommander\credentials')
+    CredDir=$credentials
     ProfileDir=(Join-Path $roaming 'tunnel-client')
     InstanceRoot=(Join-Path $local 'ChatGPTRemoteCommander\instances')
   }
