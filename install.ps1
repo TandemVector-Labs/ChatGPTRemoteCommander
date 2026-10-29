@@ -15,7 +15,8 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$Repo = 'https://github.com/GOD13emad/ChatGPTRemoteCommander.git'
+$Repo = if ([string]::IsNullOrWhiteSpace($env:REMOTE_COMMANDER_REPO_URL)) { 'https://github.com/GOD13emad/ChatGPTRemoteCommander.git' } else { $env:REMOTE_COMMANDER_REPO_URL.Trim() }
+if ($Repo -notmatch '^https://github[.]com/(?:GOD13emad|TandemVector-Labs)/ChatGPTRemoteCommander[.]git$') { throw 'Unapproved source repository URL' }
 
 if ($PowerMode -and $StandardMode) {
   throw 'Use only one of -PowerMode or -StandardMode.'

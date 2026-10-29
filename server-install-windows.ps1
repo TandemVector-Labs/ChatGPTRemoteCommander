@@ -17,7 +17,8 @@ $script:BootstrapGitHubToken = [Environment]::GetEnvironmentVariable('RC_GITHUB_
 [Environment]::SetEnvironmentVariable('RC_GITHUB_API_TOKEN',$null,'Process')
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$Repo = 'https://github.com/GOD13emad/ChatGPTRemoteCommander.git'
+$Repo = if ([string]::IsNullOrWhiteSpace($env:REMOTE_COMMANDER_REPO_URL)) { 'https://github.com/GOD13emad/ChatGPTRemoteCommander.git' } else { $env:REMOTE_COMMANDER_REPO_URL.Trim() }
+if ($Repo -notmatch '^https://github[.]com/(?:GOD13emad|TandemVector-Labs)/ChatGPTRemoteCommander[.]git$') { throw 'Unapproved source repository URL' }
 $BootstrapRoot = Join-Path $env:ProgramData 'ChatGPTRemoteCommander\bootstrap'
 $ManifestPath = Join-Path $env:ProgramData 'ChatGPTRemoteCommander\server-install-allowlist.json'
 $Downloads = Join-Path $BootstrapRoot ('downloads-' + [guid]::NewGuid().ToString('N'))
