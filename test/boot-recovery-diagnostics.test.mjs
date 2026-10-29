@@ -114,7 +114,7 @@ test('machine credential ProgramData ACL rejects custom principals and GenericAl
     ". '"+quoted+"'",
     "$sid=[Security.Principal.SecurityIdentifier]::new('S-1-5-32-547')",
     "$ace=[pscustomobject]@{IdentityReference=$sid;AccessControlType=[Security.AccessControl.AccessControlType]::Allow;FileSystemRights=[int64]0;PropagationFlags=[Security.AccessControl.PropagationFlags]::None}",
-    "$acl=[pscustomobject]@{Access=@($ace)}",
+    "$acl=[pscustomobject]@{Owner='NT AUTHORITY\\SYSTEM';Access=@($ace)}",
     "$denied=0",
     "foreach($right in @([int64][Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles,[int64]0x10000000)){ $ace.FileSystemRights=$right; try{ Assert-RcCredentialParentAcl $acl; throw 'UNTRUSTED_PARENT_RIGHT_ACCEPTED' }catch{ if($_.Exception.Message -ne 'BOOT_RECOVERY_CREDENTIAL_PARENT_DELETE_OR_DAC'){ throw }; $denied++ } }",
     "if($denied -ne 2){throw 'DANGEROUS_RIGHTS_NOT_REJECTED'}",
@@ -123,6 +123,9 @@ test('machine credential ProgramData ACL rejects custom principals and GenericAl
     "$ace.PropagationFlags=[Security.AccessControl.PropagationFlags]::None",
     "$ace.FileSystemRights=[int64][Security.AccessControl.FileSystemRights]::Write",
     "Assert-RcCredentialParentAcl $acl",
+    "$acl.Owner='BUILTIN\\Users'",
+    "try{ Assert-RcCredentialParentAcl $acl; throw 'OWNER_NOT_REJECTED' }catch{ if($_.Exception.Message -ne 'BOOT_RECOVERY_CREDENTIAL_PARENT_OWNER'){throw} }",
+    "$acl.Owner='NT AUTHORITY\\SYSTEM'",
     "Write-Output 'MACHINE_CREDENTIAL_PARENT_ACL_NEGATIVE_PASS'"
   ].join(';');
   const r=spawnSync('pwsh.exe',['-NoLogo','-NoProfile','-NonInteractive','-Command',cmd],{encoding:'utf8',timeout:15000});
