@@ -34,7 +34,7 @@ test('Windows BootCore self-test writes structured integrity failure instead of 
     assert.equal(result.ok,false);
     assert.equal(result.bootCore,true);
     assert.equal(result.credentialScope,'LocalMachine');
-    assert.match(result.error,/instance config hash mismatch probe|BOOT_RECOVERY_PROTECTED_CREDENTIAL_ROOT_MISSING/u);
+    assert.match(result.error,/BOOT_RECOVERY_MACHINE_APP_ROOT_REQUIRED|BOOT_RECOVERY_PROTECTED_CREDENTIAL_ROOT_MISSING/u);
   } finally {
     fs.rmSync(owner,{recursive:true,force:true});
   }
@@ -193,4 +193,28 @@ test('SYSTEM BootRecovery pins vendor-signed machine binaries and rejects spoofe
   const failClosed=source.indexOf("throw 'BOOT_RECOVERY_MACHINE_CREDENTIAL_STORAGE_MIGRATION_REQUIRED'");
   const register=source.indexOf('Register-ScheduledTask -TaskName $BootTaskName');
   assert.ok(admission>=0 && admission<failClosed && failClosed<register,'retain fail-closed registration');
+});
+
+test('BootCore never executes owner-configured paths or owner-writable tunnel binaries', () => {
+  const runtime=fs.readFileSync(path.join(repo,'windows-supervisor-runtime.ps1'),'utf8');
+  const boot=fs.readFileSync(path.join(repo,'autostart-windows.ps1'),'utf8');
+  const routing=fs.readFileSync(path.join(repo,'supervisor-routing.ps1'),'utf8');
+  const trust=fs.readFileSync(path.join(repo,'machine-runtime-trust.ps1'),'utf8');
+  for(const required of [
+    'BOOT_RECOVERY_MACHINE_APP_ROOT_REQUIRED',
+    'Assert-RcMachineRuntimeStore',
+    "Join-Path $machineRuntime 'profiles'",
+    "Join-Path $machineRuntime 'instances'"
+  ]) assert.ok(runtime.includes(required),required);
+  assert.ok(boot.includes('if($BootCore){return Get-RcMachineTunnelExecutable}'));
+  assert.ok(boot.includes("$env:REMOTE_COMMANDER_CONFIG=Join-Path $script:MachineRuntimeRoot 'primary\\config.json'"));
+  assert.ok(routing.includes("BOOT_RECOVERY_MACHINE_ROUTE_PROJECT_UNTRUSTED"));
+  assert.ok(routing.includes("BOOT_RECOVERY_MACHINE_ROUTE_CONFIG_UNTRUSTED"));
+  assert.ok(routing.includes('if($BootCore){return} # never self-update under SYSTEM'));
+  for(const marker of [
+    'BOOT_RECOVERY_MACHINE_RUNTIME_UNTRUSTED_ACE',
+    'BOOT_RECOVERY_MACHINE_RUNTIME_OWNER_UNTRUSTED',
+    'BOOT_RECOVERY_MACHINE_TUNNEL_PIN_MISMATCH',
+    'BOOT_RECOVERY_MACHINE_PRIMARY_PRIVILEGED'
+  ]) assert.ok(trust.includes(marker),marker);
 });
