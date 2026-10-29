@@ -132,3 +132,39 @@ test('machine credential ProgramData ACL rejects custom principals and GenericAl
   assert.equal(r.status,0,r.stderr||r.stdout);
   assert.match(r.stdout,/MACHINE_CREDENTIAL_PARENT_ACL_NEGATIVE_PASS/u);
 });
+
+test('SYSTEM executable ACL denies arbitrary SID mutators, generic rights and foreign owners', { skip: process.platform !== 'win32' }, () => {
+  const installer=path.join(repo,'enable-boot-recovery.ps1');
+  const source=fs.readFileSync(installer,'utf8');
+  for(const required of ['function Assert-RcSystemExecutableAcl','BOOT_RECOVERY_SYSTEM_EXECUTABLE_OWNER_UNTRUSTED',
+    'BOOT_RECOVERY_SYSTEM_EXECUTABLE_WRITABLE','0x50000000','PropagationFlags]::InheritOnly']) {
+    assert.ok(source.includes(required), 'missing '+required);
+  }
+  assert.ok(!source.includes("$untrusted = @("), 'fixed SID blacklist must not survive');
+  const quoted=installer.replaceAll("'","''");
+  const cmd=[
+    "$ErrorActionPreference='Stop'",
+    "$tokens=$null;$errors=$null",
+    "$ast=[Management.Automation.Language.Parser]::ParseFile('"+quoted+"',[ref]$tokens,[ref]$errors)",
+    "if($errors.Count){throw 'INSTALLER_AST_FAIL'}",
+    "$fn=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Assert-RcSystemExecutableAcl'},$true))",
+    "if($fn.Count -ne 1){throw 'ACL_FUNCTION_NOT_UNIQUE'}",
+    ". ([ScriptBlock]::Create($fn[0].Extent.Text))",
+    "$sid=[Security.Principal.SecurityIdentifier]::new('S-1-5-32-547')",
+    "$ace=[pscustomobject]@{IdentityReference=$sid;AccessControlType=[Security.AccessControl.AccessControlType]::Allow;FileSystemRights=[int64]0;PropagationFlags=[Security.AccessControl.PropagationFlags]::None}",
+    "$acl=[pscustomobject]@{Owner='NT AUTHORITY\\SYSTEM';Access=@($ace)}",
+    "foreach($right in @([int64][Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles,[int64]0x10000000,[int64]0x40000000)){ $ace.FileSystemRights=$right; try{ Assert-RcSystemExecutableAcl $acl; throw 'WRITE_NOT_REJECTED' }catch{ if($_.Exception.Message -ne 'BOOT_RECOVERY_SYSTEM_EXECUTABLE_WRITABLE'){throw} } }",
+    "$ace.PropagationFlags=[Security.AccessControl.PropagationFlags]::InheritOnly",
+    "Assert-RcSystemExecutableAcl $acl",
+    "$ace.PropagationFlags=[Security.AccessControl.PropagationFlags]::None",
+    "$ace.FileSystemRights=[int64][Security.AccessControl.FileSystemRights]::ReadAndExecute",
+    "Assert-RcSystemExecutableAcl $acl",
+    "$acl.Owner='BUILTIN\\Users'",
+    "try{ Assert-RcSystemExecutableAcl $acl; throw 'OWNER_NOT_REJECTED' }catch{ if($_.Exception.Message -ne 'BOOT_RECOVERY_SYSTEM_EXECUTABLE_OWNER_UNTRUSTED'){throw} }",
+    "Write-Output 'SYSTEM_EXECUTABLE_ARBITRARY_SID_FAIL_CLOSED_PASS'"
+  ].join(';');
+  const r=spawnSync('pwsh.exe',['-NoLogo','-NoProfile','-NonInteractive','-Command',cmd],
+    {encoding:'utf8',timeout:15000});
+  assert.equal(r.status,0,r.stderr||r.stdout);
+  assert.match(r.stdout,/SYSTEM_EXECUTABLE_ARBITRARY_SID_FAIL_CLOSED_PASS/u);
+});
