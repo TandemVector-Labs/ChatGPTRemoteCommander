@@ -37,6 +37,43 @@ function makeHistoryScanner(rules) {
   const hits = new Set(), recognized = new Set();
   let pending = '', preceding = '', currentCommit = null, currentDiff = null;
   const limit = 16 * 1024 * 1024;
+  // Git patch prefixes are not source characters. Reconstruct adjacent diff
+  // lines independently for added/removed sides to detect split history tokens.
+  // Keep the original raw-line scanner and its exact fixture exemption intact.
+  let addedTail = '', removedTail = '', inHunk = false;
+  const bearerPattern = patterns.find(([name]) => name === 'Bearer token literal')[1];
+  function scanDiffSide(line) {
+    if (/^commit [0-9a-f]{40}\r?\n?$/.test(line) || line.startsWith('diff --git ')) {
+      inHunk = false; addedTail = ''; removedTail = '';
+      return;
+    }
+    if (line.startsWith('@@ ')) {
+      inHunk = true; addedTail = ''; removedTail = '';
+      return;
+    }
+    if (!inHunk) return;
+    const kind = line[0];
+    if (kind !== '+' && kind !== '-' && kind !== ' ') {
+      addedTail = ''; removedTail = '';
+      return;
+    }
+    const content = line.slice(1);
+    function append(previous) {
+      const sample = previous + content;
+      // Single-line matches are already handled by the raw scanner and its
+      // commit/path/shape-pinned fixture rule. Any cross-line hit fails closed.
+      const matcher = new RegExp(bearerPattern.source, bearerPattern.flags.replace(/[gy]/g, '') + 'g');
+      for (const m of sample.matchAll(matcher)) {
+        if (m.index < previous.length && m.index + m[0].length > previous.length)
+          hits.add('Bearer token literal');
+      }
+      return sample.slice(-512);
+    }
+    if (kind === '+' || kind === ' ') addedTail = append(addedTail);
+    else addedTail = '';
+    if (kind === '-' || kind === ' ') removedTail = append(removedTail);
+    else removedTail = '';
+  }
   function isExactFixture(line, match) {
     if (knownFixtureKinds.get(currentCommit) !== line[0] ||
         currentDiff !== knownFixtureDiff || recognized.has(currentCommit)) return false;
@@ -64,6 +101,7 @@ function makeHistoryScanner(rules) {
       }
     }
     preceding = sample.slice(-512);
+    scanDiffSide(line);
   }
   return {
     write(text) {
