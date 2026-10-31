@@ -98,6 +98,27 @@ function Update([string]$Name,[string]$Sha){
       $summary=Join-Path $Source 'tools/qualification-failure-summary-r252.mjs'
       & node.exe $summary $inner $sha
       if($LASTEXITCODE -ne 0){Write-Output 'R252_SUMMARY_FAILED_FAIL_CLOSED'}
+      # R470 is a read-only sanitized second pass over the same hashed log.
+      # A distinct scope prevents conflating rollback qualification with R157.
+      $diagnose=Join-Path $Source 'tools\diagnose-updater-gate-r470.ps1'
+      $reportPath=Join-Path $Root 'DIAGNOSTIC_R470.json'
+      if(-not(Test-Path -LiteralPath $diagnose -PathType Leaf) -or
+         (Test-Path -LiteralPath $reportPath)){throw 'V025W_R470_PRESTATE_REFUSED'}
+      & pwsh.exe -NoLogo -NoProfile -NonInteractive -File $diagnose -Root $Root -ExpectedCommit $diagnosticCommit -Scope 'READ_ONLY_HOSTED_V025W_ROLLBACK_QUALIFICATION_FAILURE'
+      if($LASTEXITCODE -ne 0){throw 'V025W_R470_PARSE_FAILED'}
+      $report=Get-Content -LiteralPath $reportPath -Raw -ErrorAction Stop|ConvertFrom-Json
+      if($report.commit -cne $diagnosticCommit -or
+         $report.scope -cne 'READ_ONLY_HOSTED_V025W_ROLLBACK_QUALIFICATION_FAILURE' -or
+         $report.sourceSha256 -cne $sha.ToLowerInvariant() -or
+         $report.matchingLogCount -ne 1 -or $report.rawLogIncluded -ne $false -or
+         $report.secretsIncluded -ne $false -or $report.absolutePathsIncluded -ne $false){
+        throw 'V025W_R470_READBACK_MISMATCH'
+      }
+      $safeStatus=[string]$report.status
+      if($safeStatus -cnotmatch '^[A-Z_]{5,70}$'){throw 'V025W_R470_STATUS_INVALID'}
+      Write-Output ('V025W_R470_SAFE_STATUS='+$safeStatus+
+        ' tapFailures='+@($report.failureTests).Count+
+        ' specFailures='+@($report.specFailureTests).Count)
     }catch{Write-Output 'R252_QUAL_DIAG_UNAVAILABLE_FAIL_CLOSED'}
   }
   if($exitCode -ne 0 -or $status -ne 'PROMOTED'){throw ('R185_'+$Name+'_NOT_ACCEPTED')}

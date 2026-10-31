@@ -38,6 +38,17 @@ function Get-RouteState([string]$Profile) {
   }
   if ([string]$active.commit -notmatch '^[0-9a-f]{40}$' -or [string]$active.configSha256 -notmatch '^[0-9a-f]{64}$') { throw "invalid route hashes $Profile" }
   if (-not (Test-Path -LiteralPath ([string]$active.configPath) -PathType Leaf) -or -not (Test-Path -LiteralPath ([string]$active.projectDir) -PathType Container)) { throw "route path missing $Profile" }
+  if($BootCore){
+    $source=[IO.Path]::GetFullPath([string]$active.projectDir).TrimEnd('\')
+    if($source -ine [IO.Path]::GetFullPath($Root).TrimEnd('\')){
+      throw 'BOOT_RECOVERY_MACHINE_ROUTE_PROJECT_UNTRUSTED'
+    }
+    $base=[IO.Path]::GetFullPath((Join-Path $script:MachineRuntimeRoot 'instances')).TrimEnd('\')+'\'
+    $configPath=[IO.Path]::GetFullPath([string]$active.configPath)
+    if(-not $configPath.StartsWith($base,[StringComparison]::OrdinalIgnoreCase)){
+      throw 'BOOT_RECOVERY_MACHINE_ROUTE_CONFIG_UNTRUSTED'
+    }
+  }
   return [pscustomobject]@{ File=$file; State=$state; Active=$active }
 }
 
@@ -160,7 +171,7 @@ function Start-RoutedBackend($Route,[int]$CanonicalPort) {
     Clear-RoutedBackendMisses $profile $port
     Write-SupervisorLog "ROUTED_BACKEND_RECYCLE_CONFIRMED profile=$profile oldPid=$listenerPid port=$port misses=$misses inflight=$($activity.Count) oldestAgeMs=$($activity.OldestAgeMs) decision=$finalDecision"
   }
-  $node = (Get-Command node.exe -ErrorAction Stop).Source
+  $node = if($NodePath){[IO.Path]::GetFullPath($NodePath)}else{(Get-Command node.exe -ErrorAction Stop).Source}
   $server = Join-Path ([string]$Route.Active.projectDir) 'src\server-v0.3.mjs'
   $psi = [Diagnostics.ProcessStartInfo]::new()
   $psi.FileName=$node;$psi.WorkingDirectory=[string]$Route.Active.projectDir;$psi.UseShellExecute=$false;$psi.CreateNoWindow=$true
@@ -207,7 +218,7 @@ function Start-RouterForRoute($Route,[int]$CanonicalPort) {
     return $false
   }
   $runtime=Join-Path $RoutingRoot "$profile.runtime.json"
-  $node=(Get-Command node.exe -ErrorAction Stop).Source
+  $node=if($NodePath){[IO.Path]::GetFullPath($NodePath)}else{(Get-Command node.exe -ErrorAction Stop).Source}
   $psi=[Diagnostics.ProcessStartInfo]::new()
   $psi.FileName=$node;$psi.WorkingDirectory=$UpdateStateRoot;$psi.UseShellExecute=$false;$psi.CreateNoWindow=$true
   foreach($x in @($router,'--listen-port',[string]$CanonicalPort,'--state-file',$Route.File,'--runtime-file',$runtime)){[void]$psi.ArgumentList.Add($x)}
@@ -237,6 +248,7 @@ function Ensure-RoutedProfile([string]$Profile,[int]$CanonicalPort) {
 }
 
 function Get-ActivePrimaryConfig {
+  if($BootCore){return (Join-Path $script:MachineRuntimeRoot 'primary\config.json')}
   $route=Get-RouteState 'default'
   if($route){return [string]$route.Active.configPath}
   $local=Join-Path $Root 'config.local.json'
@@ -245,6 +257,7 @@ function Get-ActivePrimaryConfig {
 }
 
 function Start-AutoUpdateIfDue {
+  if($BootCore){return} # never self-update under SYSTEM
   if((Get-Date)-lt $script:NextAutoUpdateCheck){return}
   $config=Get-Content -LiteralPath (Get-ActivePrimaryConfig) -Raw|ConvertFrom-Json
   $minutes=[int]($config.autoUpdate.intervalMinutes ?? 15)

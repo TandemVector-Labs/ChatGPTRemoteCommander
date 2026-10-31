@@ -6,6 +6,29 @@ import path from 'node:path';
 const root=path.resolve(import.meta.dirname,'..');
 const read=rel=>fs.readFileSync(path.join(root,rel),'utf8');
 
+test('renamed organization source is pinned to canonical repository in install canaries',()=>{
+  const repo='TandemVector-Labs/ChatGPTRemoteCommander';
+  const workflow=read('.github/workflows/server-install-canary.yml');
+  const windows=read('server-install-windows.ps1');
+  const installer=read('install.ps1');
+  // The newer reviewed installer contract derives the source from the
+  // current GitHub repository, explicitly blocks fork PR execution, and
+  // constrains both PowerShell entry points to the two permitted repos.
+  // Check actual runtime flow rather than the old brittle literal guard.
+  assert.ok(workflow.includes('github.event.pull_request.head.repo.full_name == github.repository'));
+  assert.ok(workflow.includes('RC_SOURCE_REPO_URL: https://github.com/' + '$' + '{{ github.repository }}.git'));
+  assert.ok(workflow.includes('-SourceRepository $env:GITHUB_REPOSITORY'));
+  assert.ok(workflow.includes('REMOTE_COMMANDER_REPO_URL="$RC_SOURCE_REPO_URL"'));
+  for (const script of [windows, installer]) {
+    assert.ok(script.includes("[ValidateSet('GOD13emad/ChatGPTRemoteCommander','" + repo + "')]"));
+    assert.ok(script.includes('$Repo = "https://github.com/$SourceRepository.git"'));
+    assert.equal(script.includes('Usefull-Skills/ChatGPTRemoteCommander'),false);
+  }
+  assert.equal(workflow.includes('Usefull-Skills/ChatGPTRemoteCommander'),false);
+  assert.equal(windows.includes('Usefull-Skills/ChatGPTRemoteCommander'),false);
+  assert.equal(installer.includes('Usefull-Skills/ChatGPTRemoteCommander'),false);
+});
+
 test('single Windows installer exposes one product shell with two installation modes',()=>{
   const iss=read('installer/RemoteCommander.iss');
 

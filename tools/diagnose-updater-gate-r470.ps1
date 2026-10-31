@@ -1,6 +1,9 @@
 param(
   [Parameter(Mandatory=$true)][string]$Root,
-  [Parameter(Mandatory=$true)][string]$ExpectedCommit
+  [Parameter(Mandatory=$true)][string]$ExpectedCommit,
+  [ValidateSet('READ_ONLY_HOSTED_NOPROMOTE_QUALIFICATION_FAILURE',
+    'READ_ONLY_HOSTED_V025W_ROLLBACK_QUALIFICATION_FAILURE')]
+  [string]$Scope='READ_ONLY_HOSTED_NOPROMOTE_QUALIFICATION_FAILURE'
 )
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
@@ -89,14 +92,14 @@ if(Test-Path -LiteralPath $logRoot -PathType Container){
 }
 $report=[ordered]@{
   schema=1;revision='R470';status=$status;commit=$ExpectedCommit
-  scope='READ_ONLY_HOSTED_NOPROMOTE_QUALIFICATION_FAILURE'
+  scope=$Scope
   matchingLogCount=$count;sourceBytes=$sourceBytes;sourceSha256=$sourceSha
   failureTests=$failures;failureTypes=$types;tapCounts=$totals
   specFailureTests=$specNames;specCounts=$specTotals
   phaseMarkersObserved=$phaseStarted.Count;phasePassMarkersObserved=$phasePassed.Count
   failurePhaseIndex=$failedPhaseIndex
   rawLogIncluded=$false;secretsIncluded=$false;absolutePathsIncluded=$false
-  stablePromoted=$false;historicalFailureJob=115292112191
+  stablePromoted=$false;historicalFailureJob=$(if($Scope -eq 'READ_ONLY_HOSTED_NOPROMOTE_QUALIFICATION_FAILURE'){115292112191}else{$null})
 }
 [IO.File]::WriteAllText($out,($report|ConvertTo-Json -Depth 9),[Text.UTF8Encoding]::new($false))
 Write-Output ('R470_DIAG_RESULT='+$status+' failureTests='+$failures.Count+' sourceBytes='+$sourceBytes)

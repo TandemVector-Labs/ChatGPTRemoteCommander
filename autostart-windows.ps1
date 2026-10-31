@@ -40,6 +40,10 @@ $VarDir = Join-Path $Root 'var'
 $CredDir = $runtime.CredDir
 $ProfileDir = $runtime.ProfileDir
 $InstanceRoot = $runtime.InstanceRoot
+if($BootCore){
+  $script:MachineRuntimeRoot=$runtime.MachineRuntimeRoot
+  $env:REMOTE_COMMANDER_CONFIG=Join-Path $script:MachineRuntimeRoot 'primary\config.json'
+}
 New-Item -ItemType Directory -Force -Path $VarDir,$CredDir,$InstanceRoot | Out-Null
 
 function Write-SupervisorLog([string]$Message) {
@@ -68,6 +72,7 @@ function Test-McpHealth([int]$Port,[string]$ExpectedConfigSha='',[string]$Expect
 $script:PrimaryHealthFailures = 0
 
 function Find-TunnelExe {
+  if($BootCore){return Get-RcMachineTunnelExecutable}
   $stableAppRoot = Join-Path (Join-Path $OwnerUserProfile 'AppData\Local') 'ChatGPTRemoteCommander\app'
   $stateFile = Join-Path $stableAppRoot 'var\tunnel-client.json'
   if (-not (Test-Path -LiteralPath $stateFile -PathType Leaf)) {

@@ -79,6 +79,21 @@ for (const required of [
   "$guiEnabled = $false # Server installer defaults headless regardless of Windows SKU or RDP."
 ]) if (!windowsServerInstaller.includes(required)) throw new Error('Server install must select headless by default even on Client-SKU hosts: '+required);
 const serverCanaryWorkflow = readFileSync('.github/workflows/server-install-canary.yml','utf8');
+// Validate the newer, explicitly enumerated repository path instead of an
+// environment-controlled URL whose origin could be ambiguous.
+for (const [label, installer] of [['install.ps1', windowsInstaller], ['server-install-windows.ps1', windowsServerInstaller]]) {
+  for (const required of ["[ValidateSet('GOD13emad/ChatGPTRemoteCommander','TandemVector-Labs/ChatGPTRemoteCommander')]", '$Repo = "https://github.com/$SourceRepository.git"']) {
+    if (!installer.includes(required)) throw new Error(label + ' missing allowlisted repository source: ' + required);
+  }
+}
+for (const required of [
+  'RC_SOURCE_REPO_URL: https://github.com/' + '$' + '{{ github.repository }}.git',
+  '-e REMOTE_COMMANDER_REPO_URL="$RC_SOURCE_REPO_URL"',
+  '-SourceRepository $env:GITHUB_REPOSITORY',
+  "github.event.pull_request.head.repo.full_name == github.repository"
+]) {
+  if (!serverCanaryWorkflow.includes(required)) throw new Error('Canary missing protected source identity: ' + required);
+}
 for (const required of [
   "$script:BootstrapGitHubToken = [Environment]::GetEnvironmentVariable('RC_GITHUB_API_TOKEN','Process')",
   "[Environment]::SetEnvironmentVariable('RC_GITHUB_API_TOKEN',$null,'Process')",

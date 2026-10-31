@@ -1,3 +1,6 @@
+. (Join-Path $PSScriptRoot 'machine-credential-trust.ps1')
+. (Join-Path $PSScriptRoot 'machine-runtime-trust.ps1')
+
 function Initialize-WindowsSupervisorRuntime(
   [string]$Root,
   [string]$OwnerUserProfile,
@@ -8,7 +11,18 @@ function Initialize-WindowsSupervisorRuntime(
   $OwnerUserProfile = [IO.Path]::GetFullPath($OwnerUserProfile)
   $local = Join-Path $OwnerUserProfile 'AppData\Local'
   $roaming = Join-Path $OwnerUserProfile 'AppData\Roaming'
+  $machineRuntime = $null
   if ($BootCore) {
+    $requiredRoot=Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)) 'ChatGPTRemoteCommander\machine-app'
+    if([IO.Path]::GetFullPath($Root).TrimEnd('\') -ine [IO.Path]::GetFullPath($requiredRoot).TrimEnd('\')){
+      throw 'BOOT_RECOVERY_MACHINE_APP_ROOT_REQUIRED'
+    }
+    $machineRuntime = Assert-RcMachineRuntimeStore
+    $env:USERPROFILE = $machineRuntime
+    $env:LOCALAPPDATA = Join-Path $machineRuntime 'local'
+    $env:APPDATA = $machineRuntime
+    $env:HOME = $machineRuntime
+  } else {
     $env:USERPROFILE = $OwnerUserProfile
     $env:LOCALAPPDATA = $local
     $env:APPDATA = $roaming
