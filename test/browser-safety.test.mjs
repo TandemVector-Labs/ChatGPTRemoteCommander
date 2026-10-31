@@ -1,3 +1,4 @@
+import './browser-script-literal-security.test.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createBrowserController } from '../src/browser-tools.mjs';

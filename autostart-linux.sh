@@ -207,7 +207,7 @@ start_tunnel() {
     [[ "$exe" == "$desired" ]] || [[ -n "$previous" ]] || previous="$exe"
     if [[ "$exe" == "$desired" ]] && tunnel_ready "$health"; then
       if control_plane_fresh "$health"; then
-        rm -f "$reject_file"
+        # Preserve rejected candidate quarantine while fallback is healthy.
         return 0
       fi
       if ! network_route_present; then
@@ -230,7 +230,7 @@ start_tunnel() {
 
   STARTED_TUNNEL_PID=""
   if launch_tunnel_with_exe "$profile" "$cred" "$desired" && wait_tunnel_ready "$health" "$STARTED_TUNNEL_PID"; then
-    rm -f "$reject_file"
+    # Keep rejected candidate quarantined after fallback succeeds.
     log "TUNNEL_READY profile=$profile pid=$STARTED_TUNNEL_PID port=$health exe=$desired"
     return 0
   fi

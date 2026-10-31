@@ -1,0 +1,102 @@
+{
+  "schema": 1,
+  "title": "Remote Commander product installer catalog",
+  "semantics": {
+    "bundled": "ships in the setup payload",
+    "bootstrap": "installed by current platform bootstrap",
+    "conditional": "only when verified product payload is bundled at build time",
+    "postEnrollment": "requested and guided after core installation; not installed until App ID supplied",
+    "unavailable": "cannot be selected or represented as installed"
+  },
+  "products": [
+    {
+      "id": "core",
+      "name": "Remote Commander Core",
+      "requires": [],
+      "platforms": {
+        "windows": {
+          "status": "bundled",
+          "method": "inno-core"
+        },
+        "linux": {
+          "status": "bootstrap",
+          "method": "install.sh"
+        }
+      }
+    },
+    {
+      "id": "control-center",
+      "name": "Control Center and Monitoring",
+      "requires": [
+        "core"
+      ],
+      "platforms": {
+        "windows": {
+          "status": "bundled",
+          "method": "inno-controlmonitor"
+        },
+        "linux": {
+          "status": "unavailable",
+          "reason": "GTK Control Center is currently a read-only preview without an accepted public installer"
+        }
+      }
+    },
+    {
+      "id": "browser",
+      "name": "Remote Commander Browser",
+      "requires": [
+        "core"
+      ],
+      "platforms": {
+        "windows": {
+          "status": "conditional",
+          "method": "inno-browser",
+          "reason": "Selected only if BrowserSetup was verified and embedded at setup build time"
+        },
+        "linux": {
+          "status": "conditional",
+          "method": "install-browser-linux.sh",
+          "reason": "Separate checksum-pinned stable Browser v0.8.1; Linux x86_64 X11 and interactive sudo required; not bundled offline",
+          "version": "0.8.1",
+          "sha256": "8cac4150b844e48c5f6fbf90df84b306d49165bef77f716f5c61d20bad164073"
+        }
+      }
+    },
+    {
+      "id": "work-plugin",
+      "name": "ChatGPT Work Plugin setup",
+      "requires": [
+        "core"
+      ],
+      "platforms": {
+        "windows": {
+          "status": "postEnrollment",
+          "method": "setup-wizard.ps1",
+          "reason": "Requires registered ChatGPT App ID after enrollment"
+        },
+        "linux": {
+          "status": "postEnrollment",
+          "method": "setup-wizard.sh",
+          "reason": "Requires registered ChatGPT App ID after enrollment"
+        }
+      }
+    },
+    {
+      "id": "companion",
+      "name": "Companion extensions",
+      "requires": [
+        "core"
+      ],
+      "platforms": {
+        "windows": {
+          "status": "unavailable",
+          "reason": "Experimental/private previews are not admitted to the public installer"
+        },
+        "linux": {
+          "status": "unavailable",
+          "reason": "Experimental/private previews are not admitted to the public installer"
+        }
+      }
+    }
+  ]
+}

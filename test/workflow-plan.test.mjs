@@ -96,6 +96,40 @@ test('exact replay is durable and immutable at source or current revision, inclu
   } finally {second.close();}
 });
 
+test('transient SQLite journal disappearance is benign but persistent aliases fail closed',t=>{
+  const root=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'rc-workflow-journal-race-')));
+  t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+  const directory=path.join(root,'memory');
+  const opts={directory,allowedRoots:[root],device:'fixture',configSha256:'1'.repeat(64)};
+  fs.mkdirSync(directory,{recursive:true});
+  const transient=new Set([path.join(directory,'workflows.sqlite-journal'),path.join(directory,'root-leases.sqlite-journal')]);
+  const exists=fs.existsSync,lstat=fs.lstatSync;
+  let simulated=0;
+  try {
+    // Reproduce the old check-then-lstat TOCTOU deterministically.
+    fs.existsSync=function(file){if(transient.has(String(file)))return true;return exists.call(fs,file);};
+    fs.lstatSync=function(file,...args){
+      if(transient.has(String(file))){simulated++;const err=new Error('simulated SQLite journal deletion');err.code='ENOENT';throw err;}
+      return lstat.call(fs,file,...args);
+    };
+    const store=new WorkflowStore(opts);store.close();
+  } finally {fs.existsSync=exists;fs.lstatSync=lstat;}
+  assert.ok(simulated>=2,'both SQLite stores inspected');
+  const journal=path.join(directory,'workflows.sqlite-journal');
+  try {
+    fs.symlinkSync(path.join(root,'missing-target'),journal);
+    assert.throws(()=>new WorkflowStore(opts),/WORKFLOW_LINK_NOT_ALLOWED|WORKFLOW_DATABASE_ALIAS/);
+    fs.unlinkSync(journal);
+  } catch(error) {
+    if(!['EPERM','EACCES','ENOTSUP'].includes(error.code))throw error;
+    t.diagnostic('OS denied symlink creation; hardlink guard is still tested');
+  }
+  // Existing hardlinks must remain rejected even if they look like plain files.
+  const source=path.join(root,'plain.txt');fs.writeFileSync(source,'a');
+  fs.linkSync(source,journal);
+  assert.throws(()=>new WorkflowStore(opts),/WORKFLOW_DATABASE_ALIAS/);
+});
+
 test('two processes with the same source revision commit exactly one different extension',async t=>{
   const f=fixture(t),one=f.request(),two=f.request({operationId:'extension-2',steps:[{id:'other',title:'Other'}]});
   const results=await Promise.all([runChild(f.options,one),runChild(f.options,two)]);

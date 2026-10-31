@@ -52,9 +52,21 @@ test('MCP Tasks extension maps durable Commander operations without changing fal
       powerMode:{enabled:false,fullFilesystem:false,allowShell:false,allowProcessControl:false,allowPermanentDelete:false,guiControl:{enabled:false},browserControl:{enabled:false}}};
     const configPath=path.join(serverRoot,'config.json');await fs.writeFile(configPath,JSON.stringify(config,null,2));
     child=spawn(process.execPath,[path.join(serverRoot,'src','server-v0.3.mjs')],{cwd:serverRoot,env:{...process.env,REMOTE_COMMANDER_CONFIG:configPath},stdio:['ignore','pipe','pipe']});
-    let stderr='';child.stderr.on('data',c=>stderr+=c.toString('utf8'));
-    let healthy=false;for(let i=0;i<400;i++){try{const r=await fetch(`http://127.0.0.1:${port}/health`);if(r.ok){healthy=true;break;}}catch{}await wait(25);}
-    assert.equal(healthy,true,stderr);
+    let stderr='';child.stderr.on('data',c=>{stderr=(stderr+c.toString('utf8')).slice(-4096);});
+    // Hosted Windows may delay fixture startup under unrelated CI process load.
+    // Use the accepted bounded 30-second readiness window; this is not a
+    // production MCP response or worker timeout. Detect early exit explicitly.
+    let healthy=false;
+    const startupDeadline=Date.now()+30000;
+    while(Date.now()<startupDeadline){
+      if(child.exitCode!==null||child.signalCode!==null)break;
+      try{
+        const r=await fetch(`http://127.0.0.1:${port}/health`,{signal:AbortSignal.timeout(300)});
+        if(r.ok){healthy=true;break;}
+      }catch{}
+      await wait(50);
+    }
+    assert.equal(healthy,true,`MCP_TASKS_FIXTURE_HEALTH_NOT_READY_WITHIN_30000MS exitCode=${child.exitCode} signal=${child.signalCode}; stderr=${stderr}`);
 
     const discover=await rpc(port,1,'server/discover',{_meta:meta(true)},undefined);
     assert.equal(discover.status,200);

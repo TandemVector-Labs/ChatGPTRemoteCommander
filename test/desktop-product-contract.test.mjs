@@ -28,6 +28,19 @@ test('desktop access and operations UI is wired to real guarded backends',()=>{
     'workflow.scheduler','workflow.project_engine','lifecycle.auto_update','lifecycle.zero_downtime_update'
   ]) assert.ok(profiles.includes(cap),cap);
 
+  // Regression: preserve improved profile-manager visual contrast, focus
+  // selection and safe argument-vector child process handling across promotion.
+  for(const marker of [
+    '$grid.EnableHeadersVisualStyles=$false',
+    '$script:selected.Profile',
+    'ProcessStartInfo',
+    '$psi.ArgumentList.Add',
+    'ReadToEndAsync()',
+    '[Environment]::ExpandEnvironmentVariables',
+    '[IO.Path]::IsPathFullyQualified'
+  ]) assert.ok(profiles.includes(marker),'profile manager regression '+marker);
+  assert.equal(profiles.includes('Start-Process -FilePath $pwsh -ArgumentList $all -WindowStyle Hidden -Wait'),false,
+    'error-obscuring legacy profile launcher must not be restored');
   const monitor=read('desktop/operations-monitor-windows.ps1');
   assert.ok(monitor.includes('tools\\workflow-cli.mjs'));
   assert.ok(monitor.includes('persisted workflow records'));

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const sha256File = file => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -11,8 +11,22 @@ const readJson = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 const canonical = value => path.resolve(String(value));
 const alive = pid => { try { process.kill(Number(pid), 0); return true; } catch { return false; } };
 
+export function assertRouterStatusUrl(url, expectedPort) {
+  if (typeof url !== 'string' || url.length > 256 || url.includes('\\')) throw new Error('ROUTER_STATUS_URL_DENIED');
+  let parsed;
+  try { parsed = new URL(url); } catch { throw new Error('ROUTER_STATUS_URL_DENIED'); }
+  if (parsed.protocol !== 'http:' || !['127.0.0.1', '[::1]'].includes(parsed.hostname)
+      || parsed.username || parsed.password || parsed.search || parsed.hash
+      || parsed.pathname !== '/router/status'
+      || !Number.isSafeInteger(expectedPort) || expectedPort < 1024 || expectedPort > 65535
+      || Number(parsed.port) !== expectedPort || url !== parsed.href) {
+    throw new Error('ROUTER_STATUS_URL_DENIED');
+  }
+  return parsed.href;
+}
+
 async function routerStatus(url) {
-  const response = await fetch(url, { signal: AbortSignal.timeout(2000) });
+  const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(2000) });
   if (!response.ok) throw new Error('ROUTER_STATUS_HTTP_' + response.status);
   const body = await response.json();
   if (body?.ok !== true || body?.router !== true) throw new Error('ROUTER_STATUS_INVALID');
@@ -46,9 +60,17 @@ function commandLine(pid) {
   pid = Number(pid);
   if (process.platform === 'win32') {
     const script = '$p=Get-CimInstance Win32_Process -Filter "ProcessId = ' + pid + '"; if($p){[Console]::Out.Write($p.CommandLine)}';
-    const result = spawnSync('pwsh.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', windowsHide: true });
-    if (result.status !== 0) throw new Error('ROUTER_PROCESS_QUERY_FAILED');
-    return result.stdout || '';
+    const result = spawnSync('pwsh.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', windowsHide: true, timeout: 8000, maxBuffer: 64 * 1024 });
+    if (result.status === 0 && result.stdout?.trim()) return result.stdout;
+    // CIM may fail after a Windows account rename while an old logon token is still active.
+    // The native fallback is read-only; all missing/unverifiable identity remains DENIED.
+    const helper = fileURLToPath(new URL('./router-commandline-windows.ps1', import.meta.url));
+    const pidArg = String(pid);
+    const native = spawnSync('pwsh.exe',
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', helper, '-ProcessId', pidArg],
+      { encoding: 'utf8', windowsHide: true, timeout: 12000, maxBuffer: 64 * 1024 });
+    if (native.status !== 0 || !native.stdout?.trim()) throw new Error('ROUTER_PROCESS_QUERY_FAILED');
+    return native.stdout;
   }
   return fs.readFileSync('/proc/' + pid + '/cmdline').toString('utf8').replaceAll('\0', ' ');
 }
@@ -89,19 +111,39 @@ export async function ensureRouterSource({ url, stateFile, runtimeFile, candidat
   logFile = canonical(logFile);
   if (!fs.existsSync(candidateSource) || !fs.statSync(candidateSource).isFile()) throw new Error('ROUTER_CANDIDATE_SOURCE_MISSING');
   const candidateSha256 = sha256File(candidateSource);
-  const beforeStatus = await routerStatus(url);
-  if (beforeStatus.sourceSha256 === candidateSha256) {
-    return { ok: true, changed: false, sourceSha256: candidateSha256, pid: Number(readJson(runtimeFile).pid) };
-  }
   if (!fs.existsSync(runtimeFile)) throw new Error('ROUTER_RUNTIME_MISSING');
   const runtime = readJson(runtimeFile);
+  const port = Number(runtime.port);
+  if (!Number.isSafeInteger(port) || port < 1024 || port > 65535) throw new Error('ROUTER_RUNTIME_PORT_INVALID');
+  url = assertRouterStatusUrl(url, port);
+  // The runtime state path and actual Router process must be owned by this
+  // request BEFORE the first network call, including the no-change path.
+  if (typeof runtime.stateFile !== 'string' || canonical(runtime.stateFile) !== stateFile) {
+    throw new Error('ROUTER_RUNTIME_IDENTITY_MISMATCH');
+  }
+  verifyProcessIdentity(runtime.pid, port, stateFile);
   const routeBytes = fs.readFileSync(stateFile);
   const routeHash = sha256Bytes(routeBytes);
   const route = JSON.parse(routeBytes.toString('utf8'));
-  const port = Number(runtime.port);
-  if (!Number.isSafeInteger(port) || port < 1024 || port > 65535) throw new Error('ROUTER_RUNTIME_PORT_INVALID');
-  if (canonical(runtime.stateFile) !== stateFile || runtime.sourceSha256 !== beforeStatus.sourceSha256) throw new Error('ROUTER_RUNTIME_IDENTITY_MISMATCH');
-  verifyProcessIdentity(runtime.pid, port, stateFile);
+  const beforeStatus = await routerStatus(url);
+  if (runtime.sourceSha256 !== beforeStatus.sourceSha256) {
+    throw new Error('ROUTER_RUNTIME_IDENTITY_MISMATCH');
+  }
+  // Re-read the owned runtime after HTTP before trusting a no-op result or
+  // stopping the old process; a concurrent ref change must fail closed.
+  const currentRuntime = readJson(runtimeFile);
+  if (Number(currentRuntime.pid) !== Number(runtime.pid) ||
+      Number(currentRuntime.port) !== port ||
+      typeof currentRuntime.stateFile !== 'string' ||
+      canonical(currentRuntime.stateFile) !== stateFile ||
+      currentRuntime.sourceSha256 !== runtime.sourceSha256) {
+    throw new Error('ROUTER_RUNTIME_DRIFT');
+  }
+  if (sha256Bytes(fs.readFileSync(stateFile)) !== routeHash) throw new Error('ROUTER_ROUTE_DRIFT');
+  verifyProcessIdentity(currentRuntime.pid, port, stateFile);
+  if (beforeStatus.sourceSha256 === candidateSha256) {
+    return { ok: true, changed: false, sourceSha256: candidateSha256, pid: Number(currentRuntime.pid) };
+  }
   const oldProject = canonical(route?.active?.projectDir || '');
   const oldSource = path.join(oldProject, 'src', 'stable-router.mjs');
   if (!fs.existsSync(oldSource)) throw new Error('ROUTER_ROLLBACK_SOURCE_MISSING');

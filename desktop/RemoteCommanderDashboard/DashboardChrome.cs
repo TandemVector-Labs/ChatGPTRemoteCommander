@@ -29,6 +29,7 @@ internal sealed class DashboardChrome
     };
     private readonly List<Panel> shells = new();
     private readonly List<Label> values = new();
+    private readonly List<string> metricTitles = new();
     private readonly List<Label> captions = new();
 
     public Control Metrics => metrics;
@@ -41,7 +42,7 @@ internal sealed class DashboardChrome
             metrics.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25f));
         var items = new[]
         {
-            ("Verified routing pairs", "UNVERIFIED", "Canonical state + runtime"),
+            ("Discovered profiles", "UNVERIFIED", "Routed + isolated records"),
             ("Core versions", "UNVERIFIED", "Reported metadata, not release"),
             ("Live operations", "UNVERIFIED", "No authenticated worker receipt"),
             ("Control authority", "READ ONLY", "Mutation never inferred")
@@ -75,6 +76,7 @@ internal sealed class DashboardChrome
         card.Controls.Add(value);
         card.Controls.Add(header);
         shells.Add(card); values.Add(value); captions.Add(detail);
+        metricTitles.Add(title);
         return card;
     }
     public void Attach(FlowLayoutPanel cardsPanel)
@@ -108,7 +110,7 @@ internal sealed class DashboardChrome
     public void Update(IEnumerable<ProfileRow> profiles)
     {
         var rows = profiles.ToList();
-        var versions = rows.Select(p => p.Version)
+        var versions = rows.Where(p => !p.IsolatedInstance).Select(p => p.Version)
                            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         Set(0, rows.Count.ToString(), true);
         Set(1, versions.Count switch { 0 => "UNVERIFIED", 1 => versions[0], _ => "MIXED" }, true);
@@ -119,7 +121,9 @@ internal sealed class DashboardChrome
     private void Set(int index, string value, bool evidence)
     {
         values[index].Text = value;
-        values[index].AccessibleName = (evidence ? "Evidence: " : "Not accepted: ") + value;
+        values[index].AccessibleName = metricTitles[index] + ": "
+            + (evidence ? "Recorded " : "Not accepted ") + value;
+        values[index].AccessibleDescription = captions[index].Text;
     }
     public void ApplyFilter()
     {

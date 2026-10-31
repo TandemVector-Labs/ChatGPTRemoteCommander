@@ -551,6 +551,23 @@ export class DeliveryStore {
     };
   }
   health() {
-    return { ...this.summary(), storage: this.artifactStorage() };
+    // Aggregate metadata only: never disclose correlation IDs, result text, or
+    // artifact content in an unscoped global health response.
+    const pending = "WHERE scope=? AND state IN ('COMPLETED_UNDELIVERED','DELIVERY_PENDING')";
+    const byKind = Object.fromEntries(this.db.prepare(
+      `SELECT coalesce(json_extract(payload,'$.kind'),'UNKNOWN') AS value,count(*) AS n
+       FROM deliveries ${pending} GROUP BY value`
+    ).all(this.scope).map(row => [row.value, row.n]));
+    const bySource = Object.fromEntries(this.db.prepare(
+      `SELECT coalesce(json_extract(payload,'$.source'),'UNKNOWN') AS value,count(*) AS n
+       FROM deliveries ${pending} GROUP BY value`
+    ).all(this.scope).map(row => [row.value, row.n]));
+    const attempted = this.db.prepare(
+      `SELECT count(*) AS n FROM deliveries ${pending} AND attempts>0`
+    ).get(this.scope).n;
+    return {
+      ...this.summary(), storage: this.artifactStorage(),
+      pendingBreakdown: { byKind, bySource, attempted }
+    };
   }
 }
