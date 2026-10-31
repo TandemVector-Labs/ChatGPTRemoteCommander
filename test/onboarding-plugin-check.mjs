@@ -7,7 +7,18 @@ const exists = (p) => fs.existsSync(path.join(root, p));
 const fail = (m) => { throw new Error(m); };
 
 const pkg = JSON.parse(read('package.json'));
-if (pkg.version !== '0.10.23') fail('package version must be 0.10.23');
+// Preserve the exact historical 0.10.26 acceptance gate, while admitting only
+// explicitly marked non-publishable 0.11 development candidates.
+if (pkg.version !== '0.10.26') {
+  if (!/^0\.11\.0-(?:dev|rc)\.[1-9][0-9]*$/.test(pkg.version) ||
+      !exists('docs/release-train-0.11.json'))
+    fail('source-candidate package version not allowed by release train');
+  const train = JSON.parse(read('docs/release-train-0.11.json'));
+  if (train.sourceVersion !== pkg.version || train.isStable !== false ||
+      train.publishApproved !== false || train.autoupdateApproved !== false ||
+      train.installedPromotionApproved !== false || train.releaseTag !== null)
+    fail('0.11 source candidate lacks explicit non-promotion release authority');
+}
 const serverSource = read('src/server-v0.3.mjs');
 const serverVersion = serverSource.match(/const VERSION = '([^']+)'/u)?.[1];
 if (serverVersion !== pkg.version) fail(`server runtime version ${serverVersion ?? 'missing'} does not match package version ${pkg.version}`);
@@ -29,6 +40,13 @@ for (const required of [
   'Single source of truth for assisted installation',
   'Full / Power Mode',
   'Never paste it into ChatGPT',
+  'Plugins → + → Add custom MCP server',
+  'the adopter\'s own ChatGPT account and workspace',
+  'distinct tunnel per device',
+  'I understand and want to continue',
+  'Create as a plugin',
+  'Developer Mode is **not required**',
+  'Never ask them to copy another person\'s',
   'Connection**, choose **Tunnel**',
   'No authentication / None',
   'Scan Tools',
@@ -44,6 +62,48 @@ for (const required of [
   'SETUP_WAITING_APP_ID',
   'device-specific Plugin ZIP'
 ]) if (!start.includes(required)) fail(`START_HERE missing: ${required}`);
+
+// ChatGPT is the primary tool caller. Verify source guardrails against
+// cross-account API-key inheritance; this contract does not certify live
+// ChatGPT identity, Platform RBAC, or an actual tunnel credential.
+for (const marker of [
+  'Codex is not required',
+  'does **not** automatically supply a retrievable `OPENAI_API_KEY`',
+  'matching profile credential',
+  'an active connection alone does not authenticate'
+]) if (!start.includes(marker)) fail('ChatGPT account/Runtime key boundary missing: ' + marker);
+const pluginDoc = read('docs/PLUGIN_SETUP.md');
+for (const marker of ['ChatGPT-only default (no Codex required)', 'Optional Codex/Work distribution only', 'No authentication', 'session token'])
+  if (!pluginDoc.includes(marker)) fail('ChatGPT-first installer instructions missing: ' + marker);
+const skillDoc = read('plugin-template/skills/remote-commander/SKILL.md');
+for (const marker of ['ChatGPT-first key boundary', 'locally enrolled Runtime API key', 'system_status'])
+  if (!skillDoc.includes(marker)) fail('Remote Commander skill caller/key boundary missing: ' + marker);
+const linuxEnrollment = read('connect-chatgpt-account.sh');
+if (!linuxEnrollment.includes('unset OPENAI_API_KEY') ||
+    !linuxEnrollment.includes('export CONTROL_PLANE_API_KEY="$RUNTIME_KEY"'))
+  fail('Linux interactive enrollment must isolate ambient key from this profile Runtime key');
+const linuxSupervisor = read('autostart-linux.sh');
+if (!linuxSupervisor.includes('env -u OPENAI_API_KEY CONTROL_PLANE_API_KEY="$(cat "$cred")"'))
+  fail('Linux persistent supervisor must use local profile credential without global OpenAI key');
+const windowsEnrollment = read('enable-autostart.ps1');
+for (const marker of [
+  'Reusing existing DPAPI credential for profile',
+  '$HadAmbientOpenAiApiKey = Test-Path Env:OPENAI_API_KEY',
+  'Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue',
+  '$env:CONTROL_PLANE_API_KEY = $PlainKey',
+  '$env:OPENAI_API_KEY = $AmbientOpenAiApiKey'
+]) if (!windowsEnrollment.includes(marker))
+  fail('Windows interactive enrollment must isolate and restore ambient OpenAI key: ' + marker);
+const windowsSupervisor = read('windows-supervisor-runtime.ps1');
+for (const marker of [
+  'Read-RcCredentialPlainText $Item.Credential',
+  "Environment['CONTROL_PLANE_API_KEY']=$ApiKey",
+  "Environment.Remove('OPENAI_API_KEY')"
+]) {
+  const source = marker.startsWith('Read-RcCredentialPlainText')
+    ? read('autostart-windows.ps1') : windowsSupervisor;
+  if (!source.includes(marker)) fail('Windows supervisor profile key isolation missing: ' + marker);
+}
 
 const plugin = JSON.parse(read('plugin-template/plugin.json'));
 if (plugin.version !== pkg.version) fail('plugin version does not match package version');

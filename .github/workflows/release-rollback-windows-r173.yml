@@ -36,22 +36,35 @@ jobs:
           $ErrorActionPreference='Stop'
           $sha='${{ github.event.pull_request.head.sha || github.sha }}'
           if((git rev-parse HEAD).Trim() -ne $sha){throw 'R173_WRONG_CHECKOUT_SHA'}
-          if((Get-Content package.json -Raw|ConvertFrom-Json).version -ne '0.10.23'){throw 'R173_WRONG_VERSION'}
+          $candidateVersion=[string]((Get-Content package.json -Raw|ConvertFrom-Json).version)
+          & node.exe tools/isolated-qa-policy.mjs
+          if($LASTEXITCODE -ne 0){throw 'R173_UNSUPPORTED_VERSION'}
+          if($candidateVersion -eq '0.10.25') {
+            $rollbackMode='V025W'
+            $testScript='test/release-rollback-windows-v01025.ps1'
+            $rootName='remote-commander-rollback-v025w'
+          } else {
+            $rollbackMode='R173'
+            $testScript='test/release-rollback-windows-r173.ps1'
+            $rootName='remote-commander-rollback-r173'
+          }
           $tokens=$null;$errs=$null
-          [Management.Automation.Language.Parser]::ParseFile((Join-Path $env:GITHUB_WORKSPACE 'test/release-rollback-windows-r173.ps1'),[ref]$tokens,[ref]$errs)|Out-Null
+          [Management.Automation.Language.Parser]::ParseFile((Join-Path $env:GITHUB_WORKSPACE $testScript),[ref]$tokens,[ref]$errs)|Out-Null
           if(@($errs).Count){throw ('R173_PARSER_ERRORS_'+@($errs).Count)}
           & pwsh.exe -NoLogo -NoProfile -NonInteractive -File test/router-ports-windows-r189.ps1 -SelfTest
           if($LASTEXITCODE -ne 0){throw 'R189_ROUTER_SCHEMA_NEGATIVE_TESTS_FAILED'}
-          $p=Join-Path $env:RUNNER_TEMP 'remote-commander-rollback-r173'
+          $p=Join-Path $env:RUNNER_TEMP $rootName
           if(Test-Path $p){throw 'R173_NO_BLIND_RERUN'}
           if(Test-Path (Join-Path $env:LOCALAPPDATA 'ChatGPTRemoteCommander')){throw 'R173_PREEXISTING_INSTALL'}
-          Write-Output 'R173_STATIC_EXACT_HEAD_PRESTATE_PASS'
-      - name: Real candidate v0.10.23 promotion then stable v0.10.20 rollback
+          ('ROLLBACK_MODE='+$rollbackMode) >> $env:GITHUB_ENV
+          Write-Output ('R173_STATIC_EXACT_HEAD_PRESTATE_PASS mode='+$rollbackMode)
+      - name: Real supported candidate promotion then stable v0.10.20 rollback
         shell: pwsh
         timeout-minutes: 53
         run: |
           $ErrorActionPreference='Stop'
-          & pwsh.exe -NoLogo -NoProfile -NonInteractive -File test/release-rollback-windows-r173.ps1 -ExpectedCommit '${{ github.event.pull_request.head.sha || github.sha }}'
+          $testScript=if($env:ROLLBACK_MODE -eq 'V025W'){'test/release-rollback-windows-v01025.ps1'}else{'test/release-rollback-windows-r173.ps1'}
+          & pwsh.exe -NoLogo -NoProfile -NonInteractive -File $testScript -ExpectedCommit '${{ github.event.pull_request.head.sha || github.sha }}'
           if($LASTEXITCODE -ne 0){throw ('R173_NONZERO_'+$LASTEXITCODE)}
       - name: Upload scoped CI-only evidence
         if: ${{ always() }}
@@ -68,3 +81,4 @@ jobs:
             ${{ runner.temp }}/remote-commander-rollback-r173/ROLLBACK.stderr.log
             ${{ runner.temp }}/remote-commander-rollback-r173/ROUTE_PROMOTE.json
             ${{ runner.temp }}/remote-commander-rollback-r173/ROUTE_ROLLBACK.json
+            ${{ runner.temp }}/remote-commander-rollback-v025w/DIAGNOSTIC_R470.json

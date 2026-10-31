@@ -1,0 +1,87 @@
+{
+  "schema": "rc-suite-release-train-v1",
+  "train": "0.11",
+  "sourceVersion": "0.11.0-dev.15",
+  "targetPrerelease": "0.11.0",
+  "firstStable": "1.0.0",
+  "status": "INTEGRATION_CANDIDATE_NOT_FINAL",
+  "channel": "development",
+  "isStable": false,
+  "publishApproved": false,
+  "autoupdateApproved": false,
+  "installedPromotionApproved": false,
+  "sourceBaseSha": "c057494329490257e3d79046ea7599c60dde1e89",
+  "releaseTag": null,
+  "components": [
+    {
+      "id": "core",
+      "required": true,
+      "verified": false
+    },
+    {
+      "id": "browser-commander",
+      "required": true,
+      "verified": false
+    },
+    {
+      "id": "control-center",
+      "required": true,
+      "verified": false
+    },
+    {
+      "id": "transfer-mesh",
+      "required": true,
+      "verified": false
+    },
+    {
+      "id": "workflow-project-engine",
+      "required": true,
+      "verified": false
+    },
+    {
+      "id": "local-ai-workers",
+      "required": true,
+      "verified": false
+    },
+    {
+      "id": "gui-same-owner",
+      "required": true,
+      "verified": false
+    },
+    {
+      "id": "multi-user-access",
+      "required": true,
+      "verified": false
+    },
+    {
+      "id": "updater-installer",
+      "required": true,
+      "verified": false
+    }
+  ],
+  "fleet": [
+    "EmadPC",
+    "EmadLinux",
+    "MMZLinux",
+    "AmirServer",
+    "EmadServer"
+  ],
+  "acceptance": {
+    "sourceTests": false,
+    "securityScan": false,
+    "allProductBuilds": false,
+    "authAndGui": false,
+    "multiUserPermissions": false,
+    "stableInstallRoots": false,
+    "rollback": false,
+    "fiveHostsRuntime": false,
+    "signingOrApprovedProvenance": false
+  },
+  "distribution": {
+    "oldReleasesHistorical": true,
+    "oldReleaseMetadataPending": true,
+    "noPublicStableAccepted": true,
+    "keepAssetsAndTags": true,
+    "noLatestChannelRetargetUntilUpdaterMigration": true
+  }
+}

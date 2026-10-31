@@ -6,6 +6,29 @@ import path from 'node:path';
 const root=path.resolve(import.meta.dirname,'..');
 const read=rel=>fs.readFileSync(path.join(root,rel),'utf8');
 
+test('renamed organization source is pinned to canonical repository in install canaries',()=>{
+  const repo='TandemVector-Labs/ChatGPTRemoteCommander';
+  const workflow=read('.github/workflows/server-install-canary.yml');
+  const windows=read('server-install-windows.ps1');
+  const installer=read('install.ps1');
+  // The newer reviewed installer contract derives the source from the
+  // current GitHub repository, explicitly blocks fork PR execution, and
+  // constrains both PowerShell entry points to the two permitted repos.
+  // Check actual runtime flow rather than the old brittle literal guard.
+  assert.ok(workflow.includes('github.event.pull_request.head.repo.full_name == github.repository'));
+  assert.ok(workflow.includes('RC_SOURCE_REPO_URL: https://github.com/' + '$' + '{{ github.repository }}.git'));
+  assert.ok(workflow.includes('-SourceRepository $env:GITHUB_REPOSITORY'));
+  assert.ok(workflow.includes('REMOTE_COMMANDER_REPO_URL="$RC_SOURCE_REPO_URL"'));
+  for (const script of [windows, installer]) {
+    assert.ok(script.includes("[ValidateSet('GOD13emad/ChatGPTRemoteCommander','" + repo + "')]"));
+    assert.ok(script.includes('$Repo = "https://github.com/$SourceRepository.git"'));
+    assert.equal(script.includes('Usefull-Skills/ChatGPTRemoteCommander'),false);
+  }
+  assert.equal(workflow.includes('Usefull-Skills/ChatGPTRemoteCommander'),false);
+  assert.equal(windows.includes('Usefull-Skills/ChatGPTRemoteCommander'),false);
+  assert.equal(installer.includes('Usefull-Skills/ChatGPTRemoteCommander'),false);
+});
+
 test('single Windows installer exposes one product shell with two installation modes',()=>{
   const iss=read('installer/RemoteCommander.iss');
 
@@ -44,7 +67,9 @@ test('fresh Windows bootstrap elevates only machine prerequisites and returns to
   assert.ok(iss.includes("ShellExec('runas'"),'machine prerequisite boundary must explicitly elevate');
   assert.ok(iss.includes('-PrerequisitesOnly'));
   assert.ok(iss.includes("Exec(PwshPath, Params"),'per-user core install must use the non-elevated setup context');
-  assert.ok(iss.includes('-StartServer -StandardMode'));
+  assert.ok(iss.includes(' -StartServer -SourceRef "'), 'setup must preserve the existing core profile');
+  assert.ok(iss.includes("if not ExistingCore then Params := Params + ' -StandardMode';"),
+    'fresh installations remain Standard while existing installations preserve their access tier');
   assert.ok(iss.includes('PowerShell-7.6.6-win-x64.msi'));
   assert.ok(iss.includes('958838FF55091E1C8705D89EFED0CC7E8245A3A6EF6C0CCFAE20015227108AD8'));
 
@@ -109,4 +134,22 @@ test('product icon is a standards-compliant multi-image ICO asset',()=>{
   assert.deepEqual([...b.subarray(0,4)],[0,0,1,0]);
   const count=b.readUInt16LE(4);
   assert.ok(count>=4,'ICO should contain multiple display sizes');
+});
+
+test('native Desktop upgrade preserves authorized existing Core tier instead of forcing Standard',()=>{
+  const iss=read('installer/RemoteCommander.iss');
+  const install=read('install.ps1');
+  const section=iss.slice(iss.indexOf('function PrepareToInstall'),iss.indexOf('procedure CurStepChanged'));
+  assert.ok(section.includes("ExistingCoreGit := ExpandConstant('{localappdata}\\ChatGPTRemoteCommander\\app\\.git');"),
+    'detect only the canonical existing user-local Core repository');
+  assert.ok(section.includes('ExistingCore := DirExists(ExistingCoreGit) or FileExists(ExistingCoreGit);'),
+    'accept directory or worktree Git markers without assuming a fresh installation');
+  assert.ok(section.includes("if not ExistingCore then Params := Params + ' -StandardMode';"),
+    'do not pass a demotion switch into an existing Core');
+  assert.equal(section.includes(' -StartServer -StandardMode -SourceRef'),false,
+    'unconditional Standard on Desktop update would downgrade existing owner-authorized Power');
+  assert.ok(install.includes("if ($StandardMode) { $args += '-StandardMode' }"),
+    'installer forwards explicit Standard only when supplied');
+  assert.ok(install.includes('Invoke-ExistingSafeUpdate'),
+    'existing Core still routes through the qualified updater');
 });

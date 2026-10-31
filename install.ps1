@@ -10,12 +10,13 @@ param(
   [switch]$StartServer,
   [switch]$SkipTunnelClient,
   [string]$TunnelClientVersion = '0.0.15',
-  [string]$SourceRef = 'v0.10.23',
-  [string]$ExpectedCommit = ''
+  [string]$SourceRef = 'v0.10.24',
+  [string]$ExpectedCommit = '',
+  [ValidateSet('GOD13emad/ChatGPTRemoteCommander','TandemVector-Labs/ChatGPTRemoteCommander')][string]$SourceRepository = 'GOD13emad/ChatGPTRemoteCommander'
 )
 $ErrorActionPreference = 'Stop'
 
-$Repo = 'https://github.com/GOD13emad/ChatGPTRemoteCommander.git'
+$Repo = "https://github.com/$SourceRepository.git"
 
 if ($PowerMode -and $StandardMode) {
   throw 'Use only one of -PowerMode or -StandardMode.'

@@ -3,6 +3,20 @@ import { readFileSync } from 'node:fs';
 const pkg = JSON.parse(readFileSync('package.json','utf8'));
 const builder = readFileSync('tools/build-release-assets.sh','utf8');
 const workflow = readFileSync('.github/workflows/release-sync.yml','utf8');
+// A v0.10.26 Preview has 19 base files (including the manifest) plus two
+// verified single-file installers. Count the manifest separately from payloads.
+if (pkg.version === '0.10.26') {
+  const releaseNotes = readFileSync('docs/RELEASE_0.10.26.md','utf8');
+  if (!/20 payload files/.test(releaseNotes) || !/21 assets/.test(releaseNotes) ||
+      !releaseNotes.includes('Remote-Commander-Linux-Setup.run') ||
+      !workflow.includes('expected_count=21'))
+    throw new Error('R177_RELEASE_026_ASSET_COUNT_DISCLOSURE_MISMATCH');
+}
+
+const releaseSyncPathSection = workflow.replace(/\r\n/g, '\n').split('  pull_request:\n')[1]?.split('\npermissions:')[0] || '';
+if (!releaseSyncPathSection.includes("      - 'install.sh'"))
+  throw new Error('RELEASE_SYNC_LINUX_INSTALL_SOURCE_TRIGGER_MISSING');
+
 const browserFetcher = readFileSync('scripts/fetch-browser-setup.ps1','utf8');
 const innoFetcher = readFileSync('scripts/install-inno-setup.ps1','utf8');
 const browserVersion = '0.8.1';
@@ -35,6 +49,12 @@ for (const required of [
 if (!builder.includes('[[ "$count" -eq 19 ]]')) throw new Error('release asset count guard missing');
 if (!builder.includes('Release commit: $COMMIT')) throw new Error('installer bundle provenance missing');
 
+if (!builder.includes('PIN_WIZARDS') ||
+    !builder.includes('"$installer_stage/setup-wizard.ps1" "$windows_stage/setup-wizard.ps1"') ||
+    !builder.includes('"$installer_stage/setup-wizard.sh" "$linux_stage/setup-wizard.sh"'))
+  throw new Error('R178_VERSIONED_ZIP_SETUP_SOURCE_PIN_MISSING');
+
+
 for (const required of [
   'actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1',
   './scripts/install-inno-setup.ps1',
@@ -50,14 +70,14 @@ for (const required of [
   'bash tools/build-release-assets.sh dist/release',
   'sha256sum -c SHA256SUMS.txt',
   'mapfile -t assets',
-  'test "${#assets[@]}" -eq 20',
+  'test "${#assets[@]}" -eq "$expected_count"',
   'gh release create "$tag" "${assets[@]}"',
   '--verify-tag'
 ]) {
   if (!workflow.includes(required)) throw new Error(`release workflow missing ${required}`);
 }
 if (workflow.includes('gh release upload')) throw new Error('immutable release workflow must attach assets at create time, not after publication');
-// R499: v0.10.23 may be tagged and attested, but never silently become
+// R499: v0.10.24 may be tagged and attested, but never silently become
 // latest Stable while owner endpoints have autoUpdate.enabled=true and the
 // Saeid host is unreachable. Preserve atomic full-asset draft creation.
 if (!(workflow.includes('gh release create "$tag" "${assets[@]}"') &&
@@ -73,7 +93,15 @@ if (!browserFetcher.includes('Get-FileHash') || !browserFetcher.includes('Browse
 if (!innoFetcher.includes('9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732')) throw new Error('Inno Setup compiler hash pin missing');
 if (!workflow.includes(browserVersion) || !workflow.includes(browserSha256)) throw new Error('Browser release pin missing from workflow');
 if (!workflow.includes('docs/RELEASE_${version}.md')) throw new Error('release notes must follow package version');
-if (pkg.version !== '0.10.23') throw new Error(`unexpected package version ${pkg.version}`);
+if (pkg.version !== '0.10.26') {
+  const dev = /^0\.11\.0-(?:dev|rc)\.[1-9][0-9]*$/.test(pkg.version);
+  if (!dev) throw new Error(`unexpected package version ${pkg.version}`);
+  const train = JSON.parse(readFileSync('docs/release-train-0.11.json','utf8'));
+  if (train.sourceVersion !== pkg.version || train.isStable !== false ||
+      train.publishApproved !== false || train.autoupdateApproved !== false ||
+      train.installedPromotionApproved !== false || train.releaseTag !== null)
+    throw new Error('0.11 prerelease source cannot satisfy a stable publication gate');
+}
 
 // R171: Provenance must fail closed before an immutable release can be published.
 for (const marker of [
@@ -84,7 +112,7 @@ for (const marker of [
   'R171_IMMUTABLE_TAG_AND_ASSETS_PREATTEST_PASS',
   'git cat-file -t',
   'refs/tags/$tag^{commit}',
-  'test "$count" -eq 20'
+  'test "$count" -eq "$expected_count"'
 ]) if (!workflow.includes(marker)) throw new Error('R171_ATTESTATION_CONTRACT_MISSING ' + marker);
 const a=workflow.indexOf('id: release_identity');
 const b=workflow.indexOf('name: Attest immutable release assets');
@@ -125,7 +153,18 @@ if (!(releaseIdentityAt>0 && policyAt>releaseIdentityAt && attestAt>policyAt &&
 if (workflow.includes('name: Block unsigned setup before production release'))
  throw new Error('LEGACY_UNSATISFIABLE_SIGNATURE_GATE_PRESENT');
 if (!workflow.includes('docs/UNSIGNED_WINDOWS_RELEASE_POLICY.*') ||
- !workflow.includes('docs/RELEASE_0.10.23.md') ||
+ !workflow.includes('docs/RELEASE_0.10.24.md') ||
  !workflow.includes('test/unsigned-windows-release-policy.test.mjs'))
  throw new Error('UNSIGNED_RELEASE_POLICY_TRIGGER_MISSING');
 console.log('R11_SCOPED_UNSIGNED_ATTESTED_RELEASE_GUARD_PASS');
+
+for (const marker of [
+  'needs: [build-windows-setup, build-linux-bootstrap]',
+  'remote-commander-linux-onefile-QA',
+  'Add verified Linux single-file setup for v0.10.26+',
+  'LINUX_ONEFILE_LEGACY_SKIP',
+  'LINUX_ONEFILE_RELEASE_ASSET_VERIFIED',
+  'sha256sum Remote-Commander-Linux-Setup.run >> SHA256SUMS.txt',
+  'expected_count=21'
+]) if (!workflow.includes(marker)) throw Error('LINUX_ONEFILE_RELEASE_GATE_MISSING '+marker);
+if (workflow.indexOf('LINUX_ONEFILE_RELEASE_ASSET_VERIFIED')>workflow.indexOf('id: release_identity')) throw Error('LINUX_ASSET_MUST_PRECEDE_ATTESTATION');

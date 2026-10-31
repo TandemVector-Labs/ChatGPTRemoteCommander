@@ -1,8 +1,9 @@
 param(
-  [string]$SourceRef = 'v0.10.23',
+  [string]$SourceRef = 'v0.10.24',
   [string]$ExpectedCommit = '',
+  [ValidateSet('GOD13emad/ChatGPTRemoteCommander','TandemVector-Labs/ChatGPTRemoteCommander')][string]$SourceRepository = 'GOD13emad/ChatGPTRemoteCommander',
   [ValidateSet('Power','Standard')][string]$AccessMode = 'Power',
-  [ValidateSet('Auto','On','Off')][string]$GuiControl = 'Auto',
+  [ValidateSet('Auto','On','Off')][string]$GuiControl = 'Off',
   [string]$InstallDir = '',
   [switch]$NoStartServer,
   [switch]$PrerequisitesOnly,
@@ -17,7 +18,7 @@ $script:BootstrapGitHubToken = [Environment]::GetEnvironmentVariable('RC_GITHUB_
 [Environment]::SetEnvironmentVariable('RC_GITHUB_API_TOKEN',$null,'Process')
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$Repo = 'https://github.com/GOD13emad/ChatGPTRemoteCommander.git'
+$Repo = "https://github.com/$SourceRepository.git"
 $BootstrapRoot = Join-Path $env:ProgramData 'ChatGPTRemoteCommander\bootstrap'
 $ManifestPath = Join-Path $env:ProgramData 'ChatGPTRemoteCommander\server-install-allowlist.json'
 $Downloads = Join-Path $BootstrapRoot ('downloads-' + [guid]::NewGuid().ToString('N'))
@@ -38,7 +39,7 @@ function Refresh-Path {
 
 function Invoke-Download([string]$Url,[string]$Destination) {
   Write-Host "Downloading $Url"
-  Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination -Headers @{'User-Agent'='ChatGPTRemoteCommander-ServerInstaller/0.10.23'}
+  Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination -Headers @{'User-Agent'='ChatGPTRemoteCommander-ServerInstaller/0.10.24'}
   if (-not (Test-Path -LiteralPath $Destination -PathType Leaf)) { throw "Download did not create $Destination" }
 }
 
@@ -176,7 +177,7 @@ function Ensure-Git([string]$Arch) {
   # Public GitHub shared runner IPs can exhaust the unauthenticated REST limit.
   # Authentication is optional, fixed to this release-metadata endpoint only.
   $headers = @{
-    'User-Agent'='ChatGPTRemoteCommander-ServerInstaller/0.10.23'
+    'User-Agent'='ChatGPTRemoteCommander-ServerInstaller/0.10.24'
     'X-GitHub-Api-Version'='2022-11-28'
   }
   if ($script:BootstrapGitHubToken) {
@@ -291,19 +292,33 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'git checkout failed.' }
   $package = Get-Content -LiteralPath (Join-Path $stage 'package.json') -Raw | ConvertFrom-Json
   $expectedVersion = [string]$package.version
-  if ($expectedVersion -notmatch '^\d+\.\d+\.\d+$') { throw 'Staged package version is invalid.' }
+  if ($expectedVersion -notmatch '^\d+\.\d+\.\d+$') {
+    # Development bootstrap is for a SHA-pinned isolated candidate only.
+    $manifestPath = Join-Path $stage 'docs\release-train-0.11.json'
+    if ($expectedVersion -cnotmatch '^0\.11\.0-dev\.[1-9][0-9]*$' -or
+        -not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw 'Staged package version is invalid.' }
+    $train = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    if ($train.sourceVersion -cne $expectedVersion -or
+        $train.status -cne 'INTEGRATION_CANDIDATE_NOT_FINAL' -or
+        $train.channel -cne 'development' -or
+        $train.isStable -ne $false -or
+        $train.publishApproved -ne $false -or
+        $train.autoupdateApproved -ne $false -or
+        $train.installedPromotionApproved -ne $false -or
+        $null -ne $train.releaseTag) { throw 'Staged development manifest is not fail-closed.' }
+  }
 
   $guiEnabled = $false
   if ($GuiControl -eq 'On') {
     if ($server.isServerCore) { throw 'GUI control cannot be enabled on Windows Server Core. Use -GuiControl Off or Auto.' }
     $guiEnabled = $true
   } elseif ($GuiControl -eq 'Auto') {
-    $guiEnabled = -not [bool]$server.isServerCore
+    $guiEnabled = $false # Server installer defaults headless regardless of Windows SKU or RDP.
   }
 
   $installer = Join-Path $stage 'install.ps1'
   if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw 'Staged install.ps1 is missing.' }
-  $args = @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$installer,'-SourceRef',$SourceRef,'-ExpectedCommit',$resolved)
+  $args = @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$installer,'-SourceRef',$SourceRef,'-ExpectedCommit',$resolved,'-SourceRepository',$SourceRepository)
   if ($AccessMode -eq 'Power') { $args += '-PowerMode' } else { $args += '-StandardMode' }
   if ($InstallDir) { $args += @('-InstallDir',$InstallDir) }
   if (-not $NoStartServer) { $args += '-StartServer' }

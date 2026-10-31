@@ -14,6 +14,76 @@ function Test-Elevated {
 if (-not (Test-Elevated)) { throw 'BOOT_RECOVERY_ELEVATION_REQUIRED' }
 if ([Security.Principal.WindowsIdentity]::GetCurrent().IsSystem) { throw 'BOOT_RECOVERY_RUN_AS_OWNER_ADMIN_REQUIRED' }
 
+# No SYSTEM task may execute code that a medium-integrity owner process can
+# replace. This is an admission guard, NOT a migration of existing live tasks.
+function Assert-RcProtectedMachinePath([string]$Candidate, [string]$OwnerProfile) {
+  $programFiles = [IO.Path]::GetFullPath($env:ProgramFiles).TrimEnd('\')
+  $target = [IO.Path]::GetFullPath($Candidate).TrimEnd('\')
+  if (-not $target.StartsWith($programFiles + '\',[StringComparison]::OrdinalIgnoreCase)) {
+    throw 'BOOT_RECOVERY_SYSTEM_EXECUTABLE_UNTRUSTED_LOCATION'
+  }
+  $ownerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  $untrusted = @('S-1-1-0','S-1-5-11','S-1-5-32-545',$ownerSid)
+  $current = $target
+  while ($current.Length -ge $programFiles.Length) {
+    $item=Get-Item -LiteralPath $current -Force -ErrorAction Stop
+    if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+      throw 'BOOT_RECOVERY_SYSTEM_EXECUTABLE_REPARSE_POINT'
+    }
+    $acl=Get-Acl -LiteralPath $current -ErrorAction Stop
+    try {$ownerAclSid=$acl.Owner.Translate([Security.Principal.SecurityIdentifier]).Value}
+    catch {$ownerAclSid=([Security.Principal.NTAccount]$acl.Owner).Translate([Security.Principal.SecurityIdentifier]).Value}
+    if($current -ine $programFiles -and $ownerAclSid -eq $ownerSid){
+      throw 'BOOT_RECOVERY_SYSTEM_EXECUTABLE_OWNER_UNTRUSTED'
+    }
+    foreach($ace in $acl.Access){
+      if($ace.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow){continue}
+      try {$sid=$ace.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value}
+      catch {throw 'BOOT_RECOVERY_SYSTEM_EXECUTABLE_ACL_UNREADABLE'}
+      if($sid -notin $untrusted){continue}
+      $rights=[int64]$ace.FileSystemRights
+      $writeMask=[int64]([Security.AccessControl.FileSystemRights]::WriteData -bor
+        [Security.AccessControl.FileSystemRights]::AppendData -bor
+        [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership -bor
+        [Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+        [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes)
+      if(($rights -band $writeMask) -ne 0){
+        throw 'BOOT_RECOVERY_SYSTEM_EXECUTABLE_WRITABLE'
+      }
+    }
+    if($current -ieq $programFiles){break}
+    $parent=Split-Path -Parent $current
+    if($parent -eq $current -or -not $parent){throw 'BOOT_RECOVERY_SYSTEM_ROOT_ESCAPE'}
+    $current=$parent
+  }
+}
+
+function Assert-RcSystemTaskInstallTrust([string]$RuntimeRoot, [string]$OwnerProfile) {
+  $requiredRoot=[IO.Path]::GetFullPath((Join-Path $env:ProgramFiles 'ChatGPTRemoteCommander\machine-app')).TrimEnd('\')
+  if([IO.Path]::GetFullPath($RuntimeRoot).TrimEnd('\') -ine $requiredRoot){
+    throw 'BOOT_RECOVERY_MACHINE_APP_ROOT_REQUIRED'
+  }
+  if(-not(Test-Path -LiteralPath $requiredRoot -PathType Container)){
+    throw 'BOOT_RECOVERY_MACHINE_APP_NOT_STAGED'
+  }
+  $items=@(Get-Item -LiteralPath $requiredRoot -Force)
+  $items+=@(Get-ChildItem -LiteralPath $requiredRoot -Recurse -Force -ErrorAction Stop)
+  if($items.Count -gt 20000){throw 'BOOT_RECOVERY_MACHINE_APP_AUDIT_TOO_LARGE'}
+  foreach($item in $items){
+    Assert-RcProtectedMachinePath $item.FullName $OwnerProfile
+  }
+  foreach($required in @('autostart-windows.ps1','handoff-user-session-windows.ps1',
+      'windows-supervisor-runtime.ps1','supervisor-routing.ps1',
+      'src\server-v0.3.mjs','tools\tunnel-log-runner.mjs')){
+    if(-not(Test-Path -LiteralPath (Join-Path $requiredRoot $required) -PathType Leaf)){
+      throw 'BOOT_RECOVERY_MACHINE_APP_INCOMPLETE'
+    }
+  }
+}
+
 $SourceRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $OwnerUserProfile = [IO.Path]::GetFullPath($OwnerUserProfile)
 if ([IO.Path]::GetFullPath($env:USERPROFILE) -ne $OwnerUserProfile) {
@@ -21,11 +91,20 @@ if ([IO.Path]::GetFullPath($env:USERPROFILE) -ne $OwnerUserProfile) {
 }
 $OwnerLocal = Join-Path $OwnerUserProfile 'AppData\Local'
 $OwnerRoaming = Join-Path $OwnerUserProfile 'AppData\Roaming'
-$StableRoot = Join-Path $OwnerLocal 'ChatGPTRemoteCommander\app'
-$stableSupervisor = Join-Path $StableRoot 'autostart-windows.ps1'
-$stableHandoff = Join-Path $StableRoot 'handoff-user-session-windows.ps1'
-$Root = if((Test-Path -LiteralPath $stableSupervisor -PathType Leaf) -and (Test-Path -LiteralPath $stableHandoff -PathType Leaf)){$StableRoot}else{$SourceRoot}
+$MachineRoot = Join-Path $env:ProgramFiles 'ChatGPTRemoteCommander\machine-app'
+$Root = $MachineRoot
+# Before any directory creation, DPAPI conversion, probe task, registry or
+# live task update, reject a user-writable SYSTEM execution graph.
+Assert-RcSystemTaskInstallTrust $Root $OwnerUserProfile
 $CredDir = Join-Path $OwnerLocal 'ChatGPTRemoteCommander\credentials'
+# Read-only security attestation for separately staged machine-only storage.
+# Do not activate boot tasks until the SYSTEM reader uses it and owner-profile
+# dependencies are removed; this is not a credential migration or copy.
+. (Join-Path $Root 'machine-credential-trust.ps1')
+$MachineCredentialRoot = Assert-RcMachineCredentialStore
+# The legacy LocalMachine-DPAPI blob sits below owner-writable ancestors.
+# Do not register SYSTEM tasks until the reader and storage are migrated.
+throw 'BOOT_RECOVERY_MACHINE_CREDENTIAL_STORAGE_MIGRATION_REQUIRED'
 $ProfileDir = Join-Path $OwnerRoaming 'tunnel-client'
 $VarDir = Join-Path $Root 'var'
 New-Item -ItemType Directory -Force -Path $VarDir | Out-Null
@@ -38,6 +117,10 @@ foreach($p in @($CredDir,$ProfileDir,$Supervisor,$Handoff)){
 $pwsh = (Get-Command pwsh.exe -ErrorAction Stop).Source
 $node = (Get-Command node.exe -ErrorAction Stop).Source
 $npm = (Get-Command npm.cmd -ErrorAction Stop).Source
+# Task action and child runtime binaries must also resist normal-user writes.
+foreach($binary in @($pwsh,$node,$npm)){
+  Assert-RcProtectedMachinePath $binary $OwnerUserProfile
+}
 $ownerIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $ownerName = $ownerIdentity.Name
 

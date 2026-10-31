@@ -23,8 +23,8 @@ timeout --signal=TERM --kill-after=8s 90s dbus-run-session -- xvfb-run -a -s '-s
     if ! kill -0 "$pid" 2>/dev/null; then phase="FIXTURE_EXITED"; break; fi
     winid="$(xdotool search --name "Remote Commander" | head -n 1 || true)"
     if [[ -n "$winid" ]] &&
-       grep -q "^R36_NATIVE_STACK_PAGES=4_VISIBLE=4$" "$RC_R35_PREVIEW_DIR/gtk.log" &&
-       grep -q "^R39_NAV_BUTTONS=4_DRAWN=4_ACTIVE=1$" "$RC_R35_PREVIEW_DIR/gtk.log" &&
+       grep -q "^R36_NATIVE_STACK_PAGES=5_VISIBLE=5$" "$RC_R35_PREVIEW_DIR/gtk.log" &&
+       grep -q "^R39_NAV_BUTTONS=5_DRAWN=5_ACTIVE=1$" "$RC_R35_PREVIEW_DIR/gtk.log" &&
        grep -Eq "^R46_SIDEBAR_CONTENT_WIDTH=[0-9]+$" "$RC_R35_PREVIEW_DIR/gtk.log"; then
       phase="WINDOW_AND_LAYOUT_READY"
       break
@@ -43,8 +43,8 @@ timeout --signal=TERM --kill-after=8s 90s dbus-run-session -- xvfb-run -a -s '-s
     exit 66
   fi
   echo "R217_BOUNDED_GTK_READINESS_PASS phase=$phase"
-  grep -q "^R36_NATIVE_STACK_PAGES=4_VISIBLE=4$" "$RC_R35_PREVIEW_DIR/gtk.log" || { cat "$RC_R35_PREVIEW_DIR/gtk.log"; echo "STACK_FOUR_PAGES_NOT_ACCEPTED" >&2; exit 69; }
-  grep -q "^R39_NAV_BUTTONS=4_DRAWN=4_ACTIVE=1$" "$RC_R35_PREVIEW_DIR/gtk.log" || { cat "$RC_R35_PREVIEW_DIR/gtk.log"; echo "SIDEBAR_FOUR_VISUAL_BUTTONS_NOT_ACCEPTED" >&2; exit 70; }
+  grep -q "^R36_NATIVE_STACK_PAGES=5_VISIBLE=5$" "$RC_R35_PREVIEW_DIR/gtk.log" || { cat "$RC_R35_PREVIEW_DIR/gtk.log"; echo "STACK_FIVE_PAGES_NOT_ACCEPTED" >&2; exit 69; }
+  grep -q "^R39_NAV_BUTTONS=5_DRAWN=5_ACTIVE=1$" "$RC_R35_PREVIEW_DIR/gtk.log" || { cat "$RC_R35_PREVIEW_DIR/gtk.log"; echo "SIDEBAR_FIVE_VISUAL_BUTTONS_NOT_ACCEPTED" >&2; exit 70; }
   # Always capture the visible window BEFORE any viewport-width acceptance:
   # an out-of-range width must preserve a real screenshot for diagnosis.
   xdotool getwindowgeometry --shell "$winid" > "$RC_R35_PREVIEW_DIR/window.txt"

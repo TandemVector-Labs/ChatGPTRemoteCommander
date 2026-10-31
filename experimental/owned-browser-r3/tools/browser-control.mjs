@@ -9,6 +9,16 @@ import {closeOwnedBrowser} from '../src/graceful-browser-close.mjs';
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const safeCode=e=>/^[A-Z][A-Z0-9_]{1,79}$/.test(e?.browserCode??e?.message??'')?(e.browserCode??e.message):'BROWSER_NATIVE_FAILED';
 const fail=code=>Object.assign(new Error(code),{browserCode:code});
+function serializePageValue(value){
+  const literal=JSON.stringify(value);
+  if(typeof literal!=='string')throw fail('BROWSER_INPUT_INVALID');
+  // Escape script-breaking HTML delimiters and JS line separators AFTER JSON encoding.
+  // Based on CodeQL js/bad-code-sanitization; preserve the original string's JS value.
+  return literal.replace(/</g,'\\u003c')
+    .replace(/>/g,'\\u003e')
+    .replace(/\u2028/g,'\\u2028')
+    .replace(/\u2029/g,'\\u2029');
+}
 const redactUrl=value=>{
  try{
   const u=new URL(String(value));
@@ -246,12 +256,12 @@ async function handle(req){
    return {ok:true,data,mimeType:format==='png'?'image/png':'image/jpeg',bytes:bytes.length,url:current.url,urlQueryRedacted:current.queryRedacted,urlFragmentRedacted:current.fragmentRedacted,title:await evaluate('document.title'),background:true};
   }
   case 'fill':{
-   const sel=JSON.stringify(req.selector),txt=JSON.stringify(req.text);
+   const sel=serializePageValue(req.selector),txt=serializePageValue(req.text);
    const expr=`(()=>{const el=document.querySelector(${sel});if(!el)return {ok:false,code:'BROWSER_SELECTOR_NOT_FOUND'};if(el.disabled||el.readOnly)return {ok:false,code:'BROWSER_ELEMENT_NOT_EDITABLE'};if(el.tagName==='INPUT'&&(el.type||'').toLowerCase()==='file')return {ok:false,code:'BROWSER_FILE_INPUT_NOT_ALLOWED'};const v=${txt};if(el.isContentEditable){el.textContent=v;}else if(el.tagName==='SELECT'){el.value=v;}else{const proto=el.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;const set=Object.getOwnPropertyDescriptor(proto,'value')?.set;if(set)set.call(el,v);else el.value=v;}el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return {ok:true,tag:el.tagName.toLowerCase(),type:(el.type||null)};})()`;
    const v=await evaluate(expr);if(!v?.ok)throw fail(v?.code??'BROWSER_FILL_FAILED');return {ok:true,filled:true,selector:req.selector,background:true,valueReturned:false};
   }
   case 'click':{
-   const sel=JSON.stringify(req.selector);
+   const sel=serializePageValue(req.selector);
    const expr=`(()=>{const el=document.querySelector(${sel});if(!el)return {ok:false,code:'BROWSER_SELECTOR_NOT_FOUND'};if(el.disabled)return {ok:false,code:'BROWSER_ELEMENT_DISABLED'};el.scrollIntoView({block:'center',inline:'center'});el.click();return {ok:true,tag:el.tagName.toLowerCase()};})()`;
    const v=await evaluate(expr);if(!v?.ok)throw fail(v?.code??'BROWSER_CLICK_FAILED');await sleep(50);return {ok:true,clicked:true,selector:req.selector,background:true,verificationRequired:true};
   }
@@ -259,9 +269,9 @@ async function handle(req){
    const timeout=Math.max(100,Math.min(30000,req.timeoutMs??5000)),until=Date.now()+timeout;
    while(Date.now()<until){
     let ok=false;
-    if(req.selector!==undefined){const s=JSON.stringify(req.selector);ok=await evaluate(`!!document.querySelector(${s})`);}
-    else if(req.textIncludes!==undefined){const t=JSON.stringify(req.textIncludes);ok=await evaluate(`(document.body?.innerText??'').includes(${t})`);}
-    else if(req.urlIncludes!==undefined){const u=JSON.stringify(req.urlIncludes);ok=await evaluate(`location.href.includes(${u})`);}
+    if(req.selector!==undefined){const s=serializePageValue(req.selector);ok=await evaluate(`!!document.querySelector(${s})`);}
+    else if(req.textIncludes!==undefined){const t=serializePageValue(req.textIncludes);ok=await evaluate(`(document.body?.innerText??'').includes(${t})`);}
+    else if(req.urlIncludes!==undefined){const u=serializePageValue(req.urlIncludes);ok=await evaluate(`location.href.includes(${u})`);}
     if(ok)return {ok:true,matched:true,background:true};await sleep(75);
    }
    throw fail('BROWSER_WAIT_TIMEOUT');

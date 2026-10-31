@@ -24,6 +24,17 @@ AUTOFOLLOW_ROOT = HOME / "source/repos/RC_AUTOFOLLOW_R1"
 AUTOFOLLOW_UNITS = HOME / ".config/systemd/user"
 
 
+# Two independent local runtime identities and one Saeed account connection.
+# The latter is not falsely presented as another Core process or permission scope.
+OWNER_GUI_CONFIG = STATE / "owner-gui-v1/config.json"
+SAEED_UNIT = HOME / ".config/systemd/user/saeed-emad-laptop-tunnel.service"
+
+
+# Cache only still-fresh, owner-private snapshots from both supported workers.
+# This avoids last-writer-wins flicker without network access or persisted data.
+_PROFILE_MONITOR_SNAPSHOTS = {}
+
+
 def effective_system_dark(preference: str, gtk_theme: str = "", gtk_override: str = "") -> bool:
     """GNOME color-scheme has priority; in Default mode honor an explicitly
     dark GTK theme. Do not write or change desktop preferences.
@@ -72,15 +83,52 @@ def monitor_status():
     identity = m.get("identity") or {}
     gui = m.get("gui") or {}
     operations = m.get("operations") or {}
+    # The shared monitor file may be written by a separate owner-GUI worker.
+    # Its Browser=false and operations=0 are scoped to that worker, not Core.
+    # Do not infer readiness for a different profile without live evidence.
+    profile = identity.get("profile")
+    device = identity.get("deviceName")
+    version = identity.get("version")
+    cache_key = (str(MONITOR), device, version)
+    # Profile identity comes from the validated private snapshot; invalid or
+    # expired monitor files never resurrect cached liveness.
+    for key, snapshots in list(_PROFILE_MONITOR_SNAPSHOTS.items()):
+        if key != cache_key:
+            del _PROFILE_MONITOR_SNAPSHOTS[key]
+            continue
+        for name, value in list(snapshots.items()):
+            if value["expires"] <= now:
+                del snapshots[name]
+    stored = _PROFILE_MONITOR_SNAPSHOTS.setdefault(cache_key, {})
+    if profile in ("default", "owner-gui-v1"):
+        stored[profile] = {
+            "expires": expires,
+            "gui": gui,
+            "browser": m.get("browser") or {},
+            "operations": operations,
+        }
+    primary = stored.get("default")
+    owner = stored.get("owner-gui-v1")
+    effective_gui = owner["gui"] if owner is not None else gui
+    browser_available = primary is not None and primary["browser"].get("available") is True
+    browser_status = (
+        ("READY" if browser_available else "UNAVAILABLE")
+        if primary is not None else "OTHER_PROFILE_UNVERIFIED"
+    )
+    operations_status = primary["operations"].get("active") if primary is not None else None
     return {
         "state": "CONNECTED",
-        "device": str(identity.get("deviceName", "?"))[:80],
-        "version": str(identity.get("version", "?"))[:40],
-        "profile": str(identity.get("profile", "?"))[:64],
-        "gui": "READY" if gui.get("available") is True else "BLOCKED",
-        "guiReason": str(gui.get("reason") or "")[:100],
-        "browser": "READY" if (m.get("browser") or {}).get("available") is True else "UNAVAILABLE",
-        "activeOperations": operations.get("active", 0),
+        "device": str(device or "?")[:80],
+        "version": str(version or "?")[:40],
+        "profile": str(profile or "?")[:64],
+        "gui": "READY" if effective_gui.get("available") is True else "BLOCKED",
+        "guiReason": str(effective_gui.get("reason") or "")[:100],
+        "browser": browser_status,
+        "browserReason": (
+            "Fresh default-profile monitor; GUI worker verified separately"
+            if primary is not None else "GUI worker snapshot; primary Browser readiness unverified"
+        ),
+        "activeOperations": operations_status,
         "extensions": len((m.get("extensions") or {}).get("items") or []),
     }
 
@@ -110,6 +158,40 @@ def profiles():
             "generation": meta.get("generation"),
             "root": str(active.get("projectDir") or "")[:160],
         })
+    # The owner GUI worker deliberately has its own private config rather
+    # than a routing/*.runtime.json pair. Do not lose it from this inventory.
+    owner_gui = bounded_json(OWNER_GUI_CONFIG, 16384)
+    if (owner_gui and (owner_gui.get("instance") or {}).get("profile") == "owner-gui-v1"
+            and owner_gui.get("port") == 48837):
+        policy = (owner_gui.get("powerMode") or {}).get("guiControl") or {}
+        restricted = not bool(policy.get("allowMouse") or policy.get("allowKeyboard"))
+        records.append({
+            "id": "owner-gui-v1", "type": "GUI_WORKER", "version": "INDEPENDENT",
+            "port": 48837, "generation": None,
+            "root": "Owner GUI worker · " + ("observe-only access" if restricted else "review granted GUI policy"),
+            "access": "OWNER_GUI_POLICY", "editableHere": False,
+        })
+
+    # A Saeed account connection is separate from both the Core default and
+    # the owner GUI. Never infer its scope from a tunnel or inspect its secret.
+    try:
+        st = SAEED_UNIT.lstat()
+        valid = (stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid()
+                 and 10 <= st.st_size <= 8192 and not st.st_mode & 0o022)
+        if valid:
+            unit = SAEED_UNIT.read_text(encoding="utf-8")
+            valid = ("Description=Saeed account tunnel to Emad laptop" in unit
+                     and "saeed-emad-laptop" in unit)
+        if valid:
+            records.append({
+                "id": "saeed-emad", "type": "ACCOUNT_TUNNEL",
+                "version": "ACCOUNT_CONNECTOR", "port": None,
+                "generation": None,
+                "root": "Saeed ChatGPT tunnel · independent credential · permissions require account-bound owner policy",
+                "access": "ACCOUNT_SCOPE_UNVERIFIED", "editableHere": False,
+            })
+    except (OSError, ValueError, UnicodeError):
+        pass
     return records
 
 

@@ -20,6 +20,16 @@ function Read-ProfilePort([string]$Profile){
   if($m.Success){return [int]$m.Groups[1].Value}
   return 0
 }
+function Read-TunnelBackendPort([string]$Profile){
+  $file=Join-Path $ProfileDir "$Profile.yaml"
+  if(-not(Test-Path -LiteralPath $file -PathType Leaf)){return 0}
+  try{
+    $raw=Get-Content -LiteralPath $file -Raw
+    $m=[regex]::Match($raw,'url:\s*["'']?http://127\.0\.0\.1:(\d+)/mcp')
+    if($m.Success){return [int]$m.Groups[1].Value}
+  }catch{}
+  return 0
+}
 function Get-ConfigForProfile([string]$Profile,[object]$Route,[object]$Instance){
   $candidates=@()
   if($Route -and $Route.active -and $Route.active.configPath){$candidates+=[string]$Route.active.configPath}
@@ -42,18 +52,28 @@ function Get-Profiles{
     $route=Read-Json (Join-Path $RoutingRoot "$name.json")
     $instance=Read-Json (Join-Path (Join-Path $InstanceRoot $name) 'instance.json')
     $cfg=Get-ConfigForProfile $name $route $instance
+    $isInherited=$false;$baseRoute=$null
+    $tunnelPort=Read-TunnelBackendPort $name
+    # Shared account tunnels that point to default cannot have separate access policy.
+    if(-not $cfg -and -not $route -and -not $instance -and $name -ne 'default' -and $tunnelPort -eq 47831){
+      $baseRoute=Read-Json (Join-Path $RoutingRoot 'default.json')
+      $base=Get-ConfigForProfile 'default' $baseRoute $null
+      if($base -and $baseRoute.active.configPath){
+        $cfg=$base;$isInherited=$true
+      }
+    }
     $health=Read-ProfilePort $name
-    $port=if($route -and $route.active){[int]$route.active.port}elseif($instance){[int]$instance.mcpPort}else{47831}
-    $version=if($route -and $route.active){[string]$route.active.version}else{'-'}
+    $port=if($route -and $route.active){[int]$route.active.port}elseif($instance){[int]$instance.mcpPort}elseif($isInherited){$tunnelPort}else{0}
+    $version=if($route -and $route.active){[string]$route.active.version}elseif($isInherited){[string]$baseRoute.active.version}else{'UNVERIFIED'}
     $gen=if($route){[int]$route.generation}else{0}
-    $type=if($name -eq 'default'){'Primary'}elseif($instance){'Isolated'}else{'Shared'}
+    $type=if($name -eq 'default'){'Primary'}elseif($instance){'Isolated'}elseif($isInherited){'Shared (inherited)'}else{'Shared (unverified)'}
     $caps=@($cfg.capabilityProfile.grantedCapabilities)
     [pscustomobject]@{
       Profile=$name;Type=$type;McpPort=$port;HealthPort=$health;Version=$version;Generation=$gen
-      Access=if($cfg.powerMode.enabled){'Full Power'}else{'Standard'}
+      Access=if(-not $cfg){'UNVERIFIED'}elseif($isInherited){if($cfg.powerMode.enabled){'Inherited Full Power'}else{'Inherited Standard'}}elseif($cfg.powerMode.enabled){'Full Power'}else{'Standard'}
       Gui=[bool]$cfg.powerMode.guiControl.enabled
       Capabilities=($caps -join ',')
-      ConfigPath=if($route -and $route.active){[string]$route.active.configPath}elseif($instance){[string]$instance.configPath}else{''}
+      ConfigPath=if($route -and $route.active){[string]$route.active.configPath}elseif($instance){[string]$instance.configPath}elseif($isInherited){[string]$baseRoute.active.configPath}else{''}
       ProjectDir=if($route -and $route.active){[string]$route.active.projectDir}else{$CoreRoot}
       Commit=if($route -and $route.active){[string]$route.active.commit}else{''}
       RouteVersion=$version
@@ -61,8 +81,51 @@ function Get-Profiles{
       IsIsolated=[bool]$instance
     }
   }
+  # Independent headless worker is neither an account tunnel nor an editable profile.
+  foreach($dir in @('C:\ProgramData\ChatGPTRemoteCommander\server-headless-v1',(Join-Path $StateRoot 'server-headless-v1'))){
+    $config=Join-Path $dir 'config.json'
+    $worker=Read-Json $config
+    if($worker -and $worker.instance.profile -eq 'server-headless' -and [int]$worker.port -eq 48971){
+      [pscustomobject]@{
+        Profile='server-headless';Type='Headless worker (read-only)'
+        McpPort=48971;HealthPort=0;Version='INDEPENDENT';Generation=0
+        Access=if($worker.powerMode.enabled){'Worker Full Power'}else{'Worker Restricted'}
+        Gui=$false;Capabilities=(@($worker.capabilityProfile.grantedCapabilities) -join ',')
+        ConfigPath=$config;ProjectDir=$dir;Commit='';RouteVersion='INDEPENDENT'
+        IsPrimary=$false;IsIsolated=$false
+      }
+      break
+    }
+  }
 }
 
+# A disabled GUI button is not an authorization boundary. Re-evaluate the
+# account ownership and config fingerprint before invoking any mutating tool.
+function Assert-EditableSelection([object]$Selection,[object[]]$Rows,[string]$ExpectedHash){
+  if(-not $Selection -or -not ($Selection.IsPrimary -or $Selection.IsIsolated)){
+    throw 'Shared account, headless worker, or unknown profile is read-only.'
+  }
+  $matches=@($Rows|Where-Object {$_.Profile -eq $Selection.Profile})
+  if($matches.Count -ne 1){throw 'Selected profile is no longer uniquely present.'}
+  $fresh=$matches[0]
+  if(-not ($fresh.IsPrimary -or $fresh.IsIsolated) -or
+     [bool]$fresh.IsPrimary -ne [bool]$Selection.IsPrimary -or
+     [bool]$fresh.IsIsolated -ne [bool]$Selection.IsIsolated -or
+     [string]$fresh.ConfigPath -ne [string]$Selection.ConfigPath -or
+     [string]$fresh.Commit -ne [string]$Selection.Commit -or
+     [int]$fresh.Generation -ne [int]$Selection.Generation){
+    throw 'Profile route or permission boundary changed. Refresh first.'
+  }
+  $file=[string]$fresh.ConfigPath
+  if(-not $file -or -not(Test-Path -LiteralPath $file -PathType Leaf) -or
+     (Get-Item -LiteralPath $file).Attributes -band [IO.FileAttributes]::ReparsePoint){
+    throw 'Profile config path is missing or redirected.'
+  }
+  if(-not $ExpectedHash -or (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $ExpectedHash){
+    throw 'Profile policy changed after selection. Refresh first.'
+  }
+  return $true
+}
 $form=New-Object Windows.Forms.Form
 $form.Text='Remote Commander — Profiles & Access'
 $form.StartPosition='CenterScreen'
@@ -86,6 +149,17 @@ $grid.Anchor='Top,Left,Right'
 $grid.ReadOnly=$true;$grid.AllowUserToAddRows=$false;$grid.AllowUserToDeleteRows=$false
 $grid.SelectionMode='FullRowSelect';$grid.MultiSelect=$false;$grid.AutoSizeColumnsMode='Fill'
 $grid.BackgroundColor=[Drawing.Color]::FromArgb(20,29,43);$grid.BorderStyle='FixedSingle'
+$grid.EnableHeadersVisualStyles=$false
+$grid.ColumnHeadersDefaultCellStyle.BackColor=[Drawing.Color]::FromArgb(35,50,70)
+$grid.ColumnHeadersDefaultCellStyle.ForeColor=[Drawing.Color]::White
+$grid.DefaultCellStyle.BackColor=[Drawing.Color]::FromArgb(24,35,50)
+$grid.DefaultCellStyle.ForeColor=[Drawing.Color]::Gainsboro
+$grid.DefaultCellStyle.SelectionBackColor=[Drawing.Color]::FromArgb(45,101,160)
+$grid.DefaultCellStyle.SelectionForeColor=[Drawing.Color]::White
+$grid.AlternatingRowsDefaultCellStyle.BackColor=[Drawing.Color]::FromArgb(28,42,58)
+$grid.RowHeadersDefaultCellStyle.BackColor=[Drawing.Color]::FromArgb(35,50,70)
+$grid.RowHeadersDefaultCellStyle.ForeColor=[Drawing.Color]::White
+$grid.GridColor=[Drawing.Color]::FromArgb(60,75,93)
 $form.Controls.Add($grid)
 
 $access=New-Object Windows.Forms.GroupBox
@@ -144,6 +218,7 @@ function Update-Editor{
   $script:selected=$grid.CurrentRow.DataBoundItem
   if(-not $script:selected){return}
   $cfg=if($script:selected.ConfigPath){Read-Json $script:selected.ConfigPath}else{$null}
+  $script:selectedFingerprint=if($script:selected.ConfigPath -and (Test-Path -LiteralPath $script:selected.ConfigPath -PathType Leaf)){(Get-FileHash -LiteralPath $script:selected.ConfigPath -Algorithm SHA256).Hash}else{""}
   $power.Checked=[bool]$cfg.powerMode.enabled
   $gui.Checked=[bool]$cfg.powerMode.guiControl.enabled
   foreach($cap in $capBoxes.Keys){$capBoxes[$cap].Checked=Test-Cap $cfg $cap}
@@ -160,7 +235,15 @@ function Refresh-Grid{
     $items=@(Get-Profiles)
     $grid.DataSource=$null;$grid.DataSource=[Collections.ArrayList]$items
     foreach($name in @('Capabilities','ConfigPath','ProjectDir','Commit','RouteVersion','IsPrimary','IsIsolated','Gui')){if($grid.Columns[$name]){$grid.Columns[$name].Visible=$false}}
-    if($grid.Rows.Count -gt 0){$grid.Rows[0].Selected=$true;$grid.CurrentCell=$grid.Rows[0].Cells[0]}
+    if($grid.Rows.Count -gt 0){
+      $pick=0
+      if($script:selected -and $script:selected.Profile){
+        for($j=0;$j -lt $grid.Rows.Count;$j++){
+          if([string]$grid.Rows[$j].Cells['Profile'].Value -eq [string]$script:selected.Profile){$pick=$j;break}
+        }
+      }
+      $grid.Rows[$pick].Selected=$true;$grid.CurrentCell=$grid.Rows[$pick].Cells[0]
+    }
     Update-Editor
     $status.Text="Profiles discovered: $($items.Count). Live profile inventory is authoritative; stale version labels are not treated as profiles."
   }catch{$status.Text="Refresh failed: $($_.Exception.Message)"}
@@ -177,21 +260,42 @@ function Build-CapabilityChanges([object]$Cfg){
   }
   return [pscustomobject]@{Enable=$enable;Disable=$disable}
 }
-function Invoke-HiddenPwsh([string]$Script,[string[]]$Args){
+function Invoke-HiddenPwsh([string]$Script,[string[]]$Arguments){
   $pwsh=(Get-Command pwsh.exe -ErrorAction Stop).Source
-  $all=@('-NoLogo','-NoProfile','-NonInteractive','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',$Script)+$Args
-  $p=Start-Process -FilePath $pwsh -ArgumentList $all -WindowStyle Hidden -Wait -PassThru
-  return $p.ExitCode
+  $cmdArgs=@('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$Script)+@($Arguments)
+  $psi=[Diagnostics.ProcessStartInfo]::new()
+  $psi.FileName=$pwsh;$psi.UseShellExecute=$false;$psi.CreateNoWindow=$true
+  $psi.RedirectStandardOutput=$true;$psi.RedirectStandardError=$true
+  foreach($arg in $cmdArgs){[void]$psi.ArgumentList.Add([string]$arg)}
+  $p=[Diagnostics.Process]::Start($psi)
+  try{
+    $stdoutTask=$p.StandardOutput.ReadToEndAsync()
+    $stderrTask=$p.StandardError.ReadToEndAsync()
+    $p.WaitForExit()
+    $stdout=$stdoutTask.GetAwaiter().GetResult()
+    $stderr=$stderrTask.GetAwaiter().GetResult()
+    if($p.ExitCode -ne 0){
+      $detail=if([string]::IsNullOrWhiteSpace($stderr)){$stdout}else{$stderr}
+      $detail=($detail -split '\r?\n'|Where-Object {$_ -and $_.Trim()}|Select-Object -Last 4) -join ' | '
+      if($detail.Length -gt 900){$detail=$detail.Substring($detail.Length-900)}
+      throw "Profile command failed (exit $($p.ExitCode)): $detail"
+    }
+    return $p.ExitCode
+  }finally{$p.Dispose()}
 }
 
 $apply.Add_Click({
   if(-not $script:selected){return}
   try{
+    # Do not let an inherited account tunnel be edited via a stale form.
+    [void](Assert-EditableSelection $script:selected @(Get-Profiles) $script:selectedFingerprint)
     $cfg=if($script:selected.ConfigPath){Read-Json $script:selected.ConfigPath}else{$null}
+  $script:selectedFingerprint=if($script:selected.ConfigPath -and (Test-Path -LiteralPath $script:selected.ConfigPath -PathType Leaf)){(Get-FileHash -LiteralPath $script:selected.ConfigPath -Algorithm SHA256).Hash}else{""}
     if(-not $cfg){throw 'Selected profile config is unavailable.'}
     $changes=Build-CapabilityChanges $cfg
-    $rootList=@($roots.Lines|ForEach-Object{$_.Trim()}|Where-Object{$_})
+    $rootList=@($roots.Lines|ForEach-Object{[Environment]::ExpandEnvironmentVariables($_.Trim())}|Where-Object{$_})
     if($rootList.Count -eq 0){throw 'At least one allowed root is required.'}
+    foreach($r in $rootList){if(-not [IO.Path]::IsPathFullyQualified($r)){throw "Allowed root must be an absolute path: $r"}}
     if($script:selected.IsPrimary){
       $updater=Join-Path $CoreRoot 'auto-update-windows.ps1'
       if(-not(Test-Path $updater)){throw 'Primary safe updater is unavailable.'}

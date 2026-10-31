@@ -3,15 +3,16 @@ import path from 'node:path';
 import { cp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:net';
 
-const root = path.resolve('test', '.tmp-concurrency-root');
-const isolatedApp = path.resolve('test', '.tmp-concurrency-app');
+// Per-run fixture paths avoid collisions between independent qualification invocations.
+const instanceId = randomUUID();
+const root = path.resolve('test', '.tmp-concurrency-root-' + instanceId);
+const isolatedApp = path.resolve('test', '.tmp-concurrency-app-' + instanceId);
 const isolatedSrc = path.join(isolatedApp, 'src');
-const configPath = path.resolve('test', '.tmp-concurrency-config.json');
+const configPath = path.resolve('test', '.tmp-concurrency-config-' + instanceId + '.json');
 const liveRuntimeStatePath = path.resolve('var', 'mcp-runtime.json');
 const isolatedRuntimeStatePath = path.join(isolatedApp, 'var', 'mcp-runtime.json');
-const port = 47931;
-const endpoint = `http://127.0.0.1:${port}/mcp`;
 const requestPrefix = `concurrency-${randomUUID()}`;
 
 async function sha256IfPresent(filePath) {
@@ -31,6 +32,15 @@ await rm(isolatedApp, { recursive: true, force: true });
 await mkdir(root, { recursive: true });
 await mkdir(isolatedApp, { recursive: true });
 await cp(path.resolve('src'), isolatedSrc, { recursive: true });
+// Ask the OS to select an available loopback port and hold it during setup.
+const reservation = createServer();
+await new Promise((resolve,reject)=>{
+ reservation.once('error',reject);
+ reservation.listen(0,'127.0.0.1',resolve);
+});
+const port = reservation.address()?.port;
+assert.ok(Number.isInteger(port) && port > 0, 'OS_ASSIGNED_PORT_REQUIRED');
+const endpoint = `http://127.0.0.1:${port}/mcp`;
 const config = {
   host: '127.0.0.1', port, allowedRoots: [root],
   allowedPrograms: ['git', 'node'], maxReadBytes: 524288,
@@ -39,6 +49,7 @@ const config = {
   powerMode: { enabled: false, fullFilesystem: false, allowShell: false, allowProcessControl: false, allowPermanentDelete: false }
 };
 await writeFile(configPath, JSON.stringify(config, null, 2));
+await new Promise((resolve,reject)=>reservation.close(err=>err?reject(err):resolve()));
 
 const server = spawn(process.execPath, [path.join(isolatedSrc, 'server-v0.3.mjs')], {
   env: { ...process.env, REMOTE_COMMANDER_CONFIG: configPath },

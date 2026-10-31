@@ -109,7 +109,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 const [, , file, status, version, commit, sourceRef] = process.argv;
 if (!/^(?:pass|maintenance_pass)$/.test(status)) process.exit(2);
-if (!/^\d+\.\d+\.\d+$/.test(version)) process.exit(3);
+if (!/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:dev|rc)\.[1-9]\d*)?$/.test(version)) process.exit(3);
 if (!/^[0-9a-fA-F]{40}$/.test(commit)) process.exit(4);
 if (sourceRef.length > 128 || !/^[A-Za-z0-9._/-]+$/.test(sourceRef)) process.exit(5);
 fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -131,10 +131,12 @@ curl_fetch(){ curl --fail --silent --show-error --location --connect-timeout "$C
 json_field(){ node "$1/tools/json-field.mjs" --file "$2" --field "$3" 2>/dev/null || true; }
 route_tsv(){ node "$1/tools/router-state.mjs" --state "$2" --tsv; }
 version_gt(){
-  [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$2" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "AUTO_UPDATE_VERSION_COMPARE_INVALID left=$1 right=$2" >&2; return 2; }
-  local IFS=. a1 a2 a3 b1 b2 b3
-  read -r a1 a2 a3 <<< "$1"; read -r b1 b2 b3 <<< "$2"
-  ((10#$a1 > 10#$b1)) || { ((10#$a1 == 10#$b1)) && ((10#$a2 > 10#$b2)); } || { ((10#$a1 == 10#$b1)) && ((10#$a2 == 10#$b2)) && ((10#$a3 > 10#$b3)); }
+  local order
+  order="$(node "$(dirname "$SELF_PATH")/tools/semver-release.mjs" compare "$1" "$2")" || {
+    echo 'AUTO_UPDATE_VERSION_COMPARE_INVALID' >&2
+    exit 2
+  }
+  [[ "$order" == gt ]]
 }
 
 wait_health(){
@@ -220,7 +222,8 @@ latest_ref(){
     --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
     --output /dev/null --write-out '%{url_effective}' \
     https://github.com/GOD13emad/ChatGPTRemoteCommander/releases/latest 2>/dev/null || true)"
-  tag="$(printf '%s' "$effective" | sed -nE 's#^.*/releases/tag/(v[0-9]+\.[0-9]+\.[0-9]+)$#\1#p' | head -n1)"
+  # Require canonical HTTPS GitHub release URL, otherwise fall back to REST API.
+  tag="$(printf '%s' "$effective" | sed -nE 's#^https://github[.]com/GOD13emad/ChatGPTRemoteCommander/releases/tag/(v[0-9]+\.[0-9]+\.[0-9]+)$#\1#p' | head -n1)"
   if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then printf '%s\n' "$tag"; return; fi
   body="$(curl_fetch -H 'User-Agent: ChatGPTRemoteCommander-Updater' https://api.github.com/repos/GOD13emad/ChatGPTRemoteCommander/releases/latest 2>/dev/null || true)"
   tag="$(printf '%s' "$body" | sed -nE 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -n1)"
@@ -693,6 +696,28 @@ if [[ "$SELF_TEST" == 1 ]]; then
 fi
 
 REF="$(latest_ref)"
+# A newer approved Preview route makes an older published Stable tag obsolete.
+# Reject it before stage_release creates another old source checkout.
+if [[ "$FORCE" != 1 && "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && -f "$ROUTING_ROOT/default.json" ]]; then
+  TAG_VERSION="$(printf '%s' "$REF" | cut -c2-)"
+  ROUTED_PREVIEW_VERSION="$(node --input-type=module - "$ROUTING_ROOT/default.json" <<'NODE'
+import fs from 'node:fs';
+const state=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));
+const version=String(state?.active?.version??'');
+const commit=String(state?.active?.commit??'');
+if(state?.schema!==1 || state?.profile!=='default' ||
+   !/^\d+\.\d+\.\d+(?:-(?:dev|rc)\.[1-9]\d*)?$/.test(version) || !/^[0-9a-f]{40}$/.test(commit)){
+  console.error('AUTO_UPDATE_ACTIVE_ROUTE_UNVERIFIED');
+  process.exit(2);
+}
+console.log(version);
+NODE
+)"
+  if version_gt "$ROUTED_PREVIEW_VERSION" "$TAG_VERSION"; then
+    log "AUTO_UPDATE_NEWER_PERSISTED_ROUTE_PRESTAGE current=$ROUTED_PREVIEW_VERSION target=$TAG_VERSION"
+    exit 0
+  fi
+fi
 IFS=$'\t' read -r COMMIT VERSION STAGE_DIR < <(stage_release "$REF")
 ACTIVE_CFG="$(active_config "$STAGE_DIR")"
 AUTO_ENABLED="$(json_field "$STAGE_DIR" "$ACTIVE_CFG" autoUpdate.enabled)"
@@ -783,6 +808,15 @@ build_cfg(){
 
 DIAG_CFG="$STATE_DIR/diagnostic-config.json"
 build_cfg "$DIAG_CFG" "$SHADOW_WF" shadow >/dev/null
+# Use the previously installed source as authority when available; during first
+# adoption, use the pinned and qualified staged source. Never trust an arbitrary
+# writable state-root guard for future releases.
+RUNNER_POLICY_GUARD="$INSTALL_DIR/tools/runner-policy-continuity.mjs"
+[[ -f "$RUNNER_POLICY_GUARD" ]] || RUNNER_POLICY_GUARD="$STAGE_DIR/tools/runner-policy-continuity.mjs"
+if ! node "$RUNNER_POLICY_GUARD" "$ACTIVE_CFG" "$DIAG_CFG"; then
+  log 'AUTO_UPDATE_RUNNER_POLICY_DIAGNOSTIC_BLOCKED'
+  exit 3
+fi
 DIAG_SHA="$(sha256sum "$DIAG_CFG" | awk '{print $1}')"
 CANDIDATE_PID="$(start_backend "$STAGE_DIR" "$DIAG_CFG" "$STATE_DIR/diagnostic.log")"
 wait_health "$PORT" "$VERSION" "$DIAG_SHA" default || { stop_pid "$CANDIDATE_PID"; echo 'diagnostic health failed' >&2; exit 1; }
@@ -793,6 +827,10 @@ CANDIDATE_PID=""
 
 FINAL_CFG="$STATE_DIR/config.json"
 build_cfg "$FINAL_CFG" "$LIVE_WF" preserve >/dev/null
+if ! node "$RUNNER_POLICY_GUARD" "$ACTIVE_CFG" "$FINAL_CFG"; then
+  log 'AUTO_UPDATE_RUNNER_POLICY_CHANGE_BLOCKED'
+  exit 3
+fi
 FINAL_SHA="$(sha256sum "$FINAL_CFG" | awk '{print $1}')"
 CANDIDATE_PID="$(start_backend "$STAGE_DIR" "$FINAL_CFG" "$STATE_DIR/server.log")"
 wait_health "$PORT" "$VERSION" "$FINAL_SHA" default || { stop_pid "$CANDIDATE_PID"; echo 'final candidate health failed' >&2; exit 1; }

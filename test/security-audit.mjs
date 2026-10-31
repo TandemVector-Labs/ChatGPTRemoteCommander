@@ -29,6 +29,42 @@ function makeHistoryScanner(rules) {
   const hits = new Set();
   let pending = '', preceding = '', currentCommit = null, currentFile = null;
   const limit = 16 * 1024 * 1024;
+  // Git's +/- prefix is patch metadata, not file content. Scan each side
+  // independently within one file hunk, preserving a real newline boundary.
+  // These cross-line findings MUST NOT use the single-line mock fixture exception.
+  const bearerRule = rules.find(([type]) => type === 'Bearer token literal')?.[1];
+  let hunk = false, addedTail = '', removedTail = '';
+  function scanDiffSide(line) {
+    if (/^commit [0-9a-f]{40}\r?\n?$/.test(line) || line.startsWith('diff --git ')) {
+      hunk = false; addedTail = ''; removedTail = '';
+      return;
+    }
+    if (line.startsWith('@@ ')) {
+      hunk = true; addedTail = ''; removedTail = '';
+      return;
+    }
+    if (!hunk || !bearerRule) return;
+    const kind = line[0];
+    if (kind !== '+' && kind !== '-' && kind !== ' ') {
+      addedTail = ''; removedTail = '';
+      return;
+    }
+    const content = line.slice(1).replace(/\r?\n$/, '');
+    function append(previous) {
+      const sample = previous ? previous + '\n' + content : content;
+      const boundary = previous.length;
+      const matcher = new RegExp(bearerRule.source, bearerRule.flags.replace(/[gy]/g, '') + 'g');
+      for (const match of sample.matchAll(matcher)) {
+        if (previous && match.index < boundary && match.index + match[0].length > boundary)
+          hits.add('Bearer token literal');
+      }
+      return sample.slice(-512);
+    }
+    if (kind === '+' || kind === ' ') addedTail = append(addedTail);
+    else addedTail = '';
+    if (kind === '-' || kind === ' ') removedTail = append(removedTail);
+    else removedTail = '';
+  }
   function scanLine(line) {
     // Git emits immutable commit boundaries and per-file diff headers.
     // Keep provenance while streaming; never buffer full history or raw hits.
@@ -50,6 +86,7 @@ function makeHistoryScanner(rules) {
       }
     }
     preceding = sample.slice(-512);
+    scanDiffSide(line);
   }
   return {
     write(text) {

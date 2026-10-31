@@ -76,6 +76,22 @@ function run(args, options = {}) {
   });
 }
 
+test('tunnel log runner strips synthetic API secrets before spawning child', async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'rc-tunnel-env-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const env = Object.fromEntries(['PATH','SystemRoot','WINDIR','HOME','USERPROFILE','TEMP','TMP']
+    .filter(key => typeof process.env[key] === 'string').map(key => [key, process.env[key]]));
+  env.CONTROL_PLANE_API_KEY = 'SYNTHETIC_ONLY';
+  env.OPENAI_API_KEY = 'SYNTHETIC_ONLY';
+  const log = path.join(dir, 'relay.log');
+  const status = path.join(dir, 'relay.status.json');
+  const childCode = 'console.log(JSON.stringify({control:!!process.env.CONTROL_PLANE_API_KEY,openai:!!process.env.OPENAI_API_KEY}))';
+  const result = await run([runner, '--log-file', log, '--status-file', status, '--',
+    process.execPath, '-e', childCode], { env });
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(JSON.parse(await readFile(log, 'utf8')), { control: false, openai: false });
+});
+
 test('tunnel log runner rotates without restarting child and preserves the complete stream', async t => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'rc-tunnel-log-'));
   t.after(() => rm(dir, { recursive: true, force: true }));

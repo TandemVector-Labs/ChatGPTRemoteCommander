@@ -1,0 +1,182 @@
+name: Candidate v0.10.25 isolated promotion and rollback (not release)
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/candidate-rollback-v01025.yml'
+      - 'test/release-rollback-linux-v01025.sh'
+      - 'test/release-rollback-windows-v01025.ps1'
+      - 'test/release-rollback-owned-cleanup-v01025.py'
+      - 'test/router-ports-windows-r189.ps1'
+      - 'auto-update-linux.sh'
+      - 'auto-update-windows.ps1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: candidate-v01025-isolated-rollback-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  candidate_version_gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      enabled: ${{ steps.version.outputs.enabled }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+      - id: version
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          version="$(node -p 'JSON.parse(require("node:fs").readFileSync("package.json","utf8")).version')"
+          # This historical workflow is version-scoped to 0.10.25 only.
+          # Other well-formed development versions must SKIP, not fail CI or run rollback.
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-dev\.[1-9][0-9]*)?$ ]] || exit 2
+          if [[ "$version" == '0.10.25' ]]; then
+            echo 'enabled=true' >> "$GITHUB_OUTPUT"
+            echo 'V025_VERSION_SCOPE_ACTIVE'
+          else
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+            echo "V025_VERSION_SCOPE_SKIPPED actual=$version"
+          fi
+  linux-candidate-preview-rollback:
+    needs: candidate_version_gate
+    if: ${{ needs.candidate_version_gate.outputs.enabled == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '22'
+      - name: Native GUI dependency and identity preflight
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+          test "$(node -p 'require("./package.json").version')" = '0.10.25'
+          bash -n test/release-rollback-linux-v01025.sh
+          bash -n auto-update-linux.sh
+          python3 -c "import ast,pathlib; p=pathlib.Path('test/release-rollback-owned-cleanup-v01025.py'); ast.parse(p.read_text(),filename=str(p))"
+          python3 test/release-rollback-owned-cleanup-v01025.py --self-test
+          sudo apt-get update
+          sudo apt-get install --yes python3-gi gir1.2-gdkpixbuf-2.0 gnome-shell-common
+          /usr/bin/python3 -c 'import gi; gi.require_version("GdkPixbuf","2.0"); from gi.repository import GdkPixbuf; print("V025L_GUI_LIBRARY_PASS")'
+          echo V025L_PRECHECK_PASS
+      - name: GitHub-hosted isolated candidate promotion and accepted Preview rollback
+        shell: bash
+        timeout-minutes: 40
+        run: |
+          set -Eeuo pipefail
+          bash test/release-rollback-linux-v01025.sh "${{ github.event.pull_request.head.sha || github.sha }}"
+      - name: Retain only scoped, short-lived CI evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: v025-linux-isolated-promotion-rollback
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/remote-commander-rollback-v025l/START_V025L.txt
+            ${{ runner.temp }}/remote-commander-rollback-v025l/PROMOTE_V025L.log
+            ${{ runner.temp }}/remote-commander-rollback-v025l/ROLLBACK_V025L.log
+            ${{ runner.temp }}/remote-commander-rollback-v025l/ROUTE_AFTER_PROMOTE.json
+            ${{ runner.temp }}/remote-commander-rollback-v025l/ROUTE_AFTER_ROLLBACK.json
+            ${{ runner.temp }}/remote-commander-rollback-v025l/CLEANUP_V025C.json
+            ${{ runner.temp }}/remote-commander-rollback-v025l/RETURN_V025L.json
+
+  windows-candidate-preview-rollback:
+    needs: candidate_version_gate
+    if: ${{ needs.candidate_version_gate.outputs.enabled == 'true' }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+      - name: Exact candidate and native test parser preflight
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $sha='${{ github.event.pull_request.head.sha || github.sha }}'
+          if((git rev-parse HEAD).Trim() -ne $sha){throw 'V025W_SOURCE_SHA_MISMATCH'}
+          if((Get-Content package.json -Raw|ConvertFrom-Json).version -ne '0.10.25'){throw 'V025W_SOURCE_VERSION_MISMATCH'}
+          $tokens=$null;$errors=$null
+          [Management.Automation.Language.Parser]::ParseFile((Join-Path $env:GITHUB_WORKSPACE 'test/release-rollback-windows-v01025.ps1'),[ref]$tokens,[ref]$errors)|Out-Null
+          if(@($errors).Count){throw "V025W_PARSER_ERRORS_$(@($errors).Count)"}
+          & pwsh.exe -NoLogo -NoProfile -NonInteractive -File test/router-ports-windows-r189.ps1 -SelfTest
+          if($LASTEXITCODE -ne 0){throw 'V025W_ROUTER_NEGATIVE_TEST_FAIL'}
+          if(Test-Path (Join-Path $env:RUNNER_TEMP 'remote-commander-rollback-v025w')){throw 'V025W_ROOT_ALREADY_EXISTS'}
+          if(Test-Path (Join-Path $env:LOCALAPPDATA 'ChatGPTRemoteCommander')){throw 'V025W_PREEXISTING_CORE_INSTALL'}
+          Write-Output 'V025W_STATIC_PASS'
+      - name: GitHub-hosted isolated candidate promotion and accepted Preview rollback
+        shell: pwsh
+        timeout-minutes: 53
+        run: |
+          $ErrorActionPreference='Stop'
+          & pwsh.exe -NoLogo -NoProfile -NonInteractive -File test/release-rollback-windows-v01025.ps1 -ExpectedCommit '${{ github.event.pull_request.head.sha || github.sha }}'
+          if($LASTEXITCODE -ne 0){throw ('V025W_TEST_EXIT_'+$LASTEXITCODE)}
+      - name: Diagnose failed candidate using sanitized source-only phase evidence
+        if: ${{ failure() }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=Join-Path $env:RUNNER_TEMP 'remote-commander-rollback-v025w'
+          $candidate='${{ github.event.pull_request.head.sha || github.sha }}'
+          $baseline='890b637c5ff3c7dcc5df2c0b99031333d522c6e4'
+          if(-not(Test-Path -LiteralPath $root -PathType Container)){
+            Write-Output 'V025W_DIAG_ROOT_UNAVAILABLE'
+          }else{
+            try{
+              $receiptPath=Join-Path $root 'RETURN_V025W.json'
+              if(-not(Test-Path -LiteralPath $receiptPath -PathType Leaf)){
+                Write-Output 'V025W_DIAG_RECEIPT_UNAVAILABLE'
+              }else{
+                $receipt=Get-Content -LiteralPath $receiptPath -Raw -ErrorAction Stop | ConvertFrom-Json
+                if($receipt.schema -ne 1 -or $receipt.revision -ne 'V025W' -or
+                   [string]$receipt.candidateHead -cne $candidate -or
+                   [string]$receipt.baselineHead -cne $baseline){throw 'V025W_DIAG_RECEIPT_IDENTITY_MISMATCH'}
+                $failed=@($receipt.stages | Where-Object { [int]$_.exit -ne 0 -or [string]$_.status -eq 'FAILED' })
+                if($failed.Count -ne 1){throw 'V025W_DIAG_STAGE_AMBIGUOUS'}
+                $stage=[string]$failed[0].name
+                if($stage -ceq 'PROMOTE'){$target=$candidate}
+                elseif($stage -ceq 'ROLLBACK'){$target=$baseline}
+                else{throw 'V025W_DIAG_STAGE_UNEXPECTED'}
+                Write-Output ('V025W_DIAG_FAILED_STAGE='+$stage)
+                & pwsh.exe -NoLogo -NoProfile -NonInteractive -File tools/diagnose-updater-gate-r470.ps1 -Root $root -ExpectedCommit $target
+                if($LASTEXITCODE -ne 0){throw 'V025W_DIAG_TOOL_FAILED'}
+              }
+            }catch{
+              Write-Output 'V025W_DIAG_UNAVAILABLE_FAIL_CLOSED'
+            }
+          }
+      - name: Retain only scoped, short-lived CI evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: v025-windows-isolated-promotion-rollback
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/remote-commander-rollback-v025w/RETURN_V025W.json
+            ${{ runner.temp }}/remote-commander-rollback-v025w/DIAGNOSTIC_R470.json
+            ${{ runner.temp }}/remote-commander-rollback-v025w/PROMOTE.stdout.log
+            ${{ runner.temp }}/remote-commander-rollback-v025w/PROMOTE.stderr.log
+            ${{ runner.temp }}/remote-commander-rollback-v025w/ROLLBACK.stdout.log
+            ${{ runner.temp }}/remote-commander-rollback-v025w/ROLLBACK.stderr.log
+            ${{ runner.temp }}/remote-commander-rollback-v025w/ROUTE_PROMOTE.json
+            ${{ runner.temp }}/remote-commander-rollback-v025w/ROUTE_ROLLBACK.json
+            ${{ runner.temp }}/remote-commander-rollback-v025w/DIAGNOSTIC_R470.json
