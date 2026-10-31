@@ -4,6 +4,10 @@
 
 ![ChatGPT Remote Commander icon](assets/plugin-icon.png)
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/GOD13emad/GOD13emad/main/assets/projects/ChatGPTRemoteCommander-hero-20261030.png" alt="ChatGPT Remote Commander — original approved 1774×887 conceptual illustration of controlled remote workflows, not an application screenshot" width="720">
+</p>
+
 Cross-platform Windows + Linux MCP server for controlled remote project and machine access from ChatGPT through OpenAI Secure MCP Tunnel.
 
 > **Giving this repository to ChatGPT for installation? Start with [START_HERE.md](START_HERE.md).** It is the single current source of truth for Standard/Full mode selection, install/update, Secure MCP Tunnel, persistent enrollment, ChatGPT custom app creation, Plugin packaging/install, icon use, real tool testing, autostart, stop/start, and FINAL PASS. For ChatGPT Work/Codex orchestration, also use [WORK_SETUP.md](WORK_SETUP.md).
