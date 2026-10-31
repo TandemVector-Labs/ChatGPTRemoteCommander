@@ -17,7 +17,24 @@ Remove-Item Env:REMOTE_COMMANDER_CONFIG -ErrorAction SilentlyContinue
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $Root 'windows-supervisor-runtime.ps1')
-$runtime = Initialize-WindowsSupervisorRuntime $Root $OwnerUserProfile ([bool]$BootCore)
+$runtime = $null
+try{
+  $runtime = Initialize-WindowsSupervisorRuntime $Root $OwnerUserProfile ([bool]$BootCore) $CredentialScope
+}catch{
+  if(-not $SelfTest){throw}
+  # In a self-test, even an early credential-root trust failure must produce a
+  # structured failure receipt, never a false healthy BootCore result.
+  $early=[pscustomobject]@{ok=$false;bootCore=[bool]$BootCore;credentialScope=$CredentialScope;error=$_.Exception.Message}
+  $earlyJson=$early|ConvertTo-Json -Compress
+  if($SelfTestOutput){
+    $earlyPath=[IO.Path]::GetFullPath($SelfTestOutput)
+    $earlyDir=Split-Path -Parent $earlyPath
+    New-Item -ItemType Directory -Force -Path $earlyDir|Out-Null
+    [IO.File]::WriteAllText($earlyPath,$earlyJson+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
+  }
+  Write-Output $earlyJson
+  exit 3
+}
 $OwnerUserProfile = $runtime.OwnerUserProfile
 $VarDir = Join-Path $Root 'var'
 $CredDir = $runtime.CredDir
