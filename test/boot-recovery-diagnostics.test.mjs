@@ -34,7 +34,15 @@ test('Windows BootCore self-test writes structured integrity failure instead of 
     assert.equal(result.ok,false);
     assert.equal(result.bootCore,true);
     assert.equal(result.credentialScope,'LocalMachine');
-    assert.match(result.error,/instance config hash mismatch probe|BOOT_RECOVERY_PROTECTED_CREDENTIAL_ROOT_MISSING/u);
+    // A source checkout must fail the protected machine-app root trust check before
+    // hash/credential checks. A genuinely installed machine-app can reach those later checks.
+    const protectedRoot = path.resolve(process.env.ProgramFiles || 'C:\\Program Files', 'ChatGPTRemoteCommander', 'machine-app');
+    if (path.resolve(repo).toLowerCase() === protectedRoot.toLowerCase()) {
+      assert.match(result.error,/instance config hash mismatch probe|BOOT_RECOVERY_PROTECTED_CREDENTIAL_ROOT_MISSING/u);
+    } else {
+      assert.equal(result.error,'BOOT_RECOVERY_MACHINE_APP_ROOT_REQUIRED',
+        'BootCore must reject a source checkout before integrity/credential checks');
+    }
   } finally {
     fs.rmSync(owner,{recursive:true,force:true});
   }
