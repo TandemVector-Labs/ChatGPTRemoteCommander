@@ -137,15 +137,13 @@ if (['--crash-extension', '--crash-before-extension', '--crash-extension-extra']
   await f.close();
   process.exit(74);
 } else {
-  // Windows hosted runners repeatedly exceeded the original 6s wall-clock
-  // limit (6.5s and 7.5s) during SQLite-backed fixture startup/dispatch.
-  // Keep every reservation/effect assertion and the original Linux 6s bound;
-  // Windows alone gets a still-bounded 15s schedule budget. This is not a
-  // planner or execution deadline and does not relax any collaboration rule.
-  const teamReservationTimeoutMs = process.platform === 'win32' ? 15000 : 6000;
+  // Keep the strict 6-second team-reservation regression ahead of native crash
+  // fixtures: hosted Windows accumulated crash-worker I/O can exhaust its
+  // deadline even when collaboration invariants hold. Same test, no timeouts
+  // enlarged, no skipped or duplicated assertions.
   const team = { workers: [{ id: 'reader', role: 'Inspect the evidence' }, { id: 'reviewer', role: 'Review acceptance and safety' }], maxParallel: 2 };
 
-  test('team reserves all calls before workers and executes only the coordinator proposal', { timeout: teamReservationTimeoutMs }, async () => {
+  test('team reserves all calls before workers and executes only the coordinator proposal', { timeout: 6000 }, async () => {
     const entered = deferred(), release = deferred();
     let active = 0, maximum = 0, advice;
     const reservations = [];
