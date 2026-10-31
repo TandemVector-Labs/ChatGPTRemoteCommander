@@ -1,6 +1,7 @@
 param(
   [string]$SourceRef = 'v0.10.24',
   [string]$ExpectedCommit = '',
+  [ValidateSet('GOD13emad/ChatGPTRemoteCommander','TandemVector-Labs/ChatGPTRemoteCommander')][string]$SourceRepository = 'GOD13emad/ChatGPTRemoteCommander',
   [ValidateSet('Power','Standard')][string]$AccessMode = 'Power',
   [ValidateSet('Auto','On','Off')][string]$GuiControl = 'Off',
   [string]$InstallDir = '',
@@ -17,7 +18,7 @@ $script:BootstrapGitHubToken = [Environment]::GetEnvironmentVariable('RC_GITHUB_
 [Environment]::SetEnvironmentVariable('RC_GITHUB_API_TOKEN',$null,'Process')
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$Repo = 'https://github.com/GOD13emad/ChatGPTRemoteCommander.git'
+$Repo = "https://github.com/$SourceRepository.git"
 $BootstrapRoot = Join-Path $env:ProgramData 'ChatGPTRemoteCommander\bootstrap'
 $ManifestPath = Join-Path $env:ProgramData 'ChatGPTRemoteCommander\server-install-allowlist.json'
 $Downloads = Join-Path $BootstrapRoot ('downloads-' + [guid]::NewGuid().ToString('N'))
