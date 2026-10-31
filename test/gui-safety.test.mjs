@@ -105,6 +105,24 @@ test('zero-interference desktop policy is machine-readable and fail-closed', asy
   assert.equal(status.policy.foregroundInterferenceByDefault,false);
 });
 
+test('Windows GUI read-only status identifies absent display without inventing an RDP cause', async () => {
+  const s=setup({platform:'win32',invoke:async () => ({ok:true,enabled:true,available:false,session:2,screens:[]})});
+  const status=await s.run('gui_status');
+  assert.equal(status.enabled,true);
+  assert.equal(status.available,false);
+  assert.equal(status.reason,'GUI_NO_ACTIVE_DISPLAY');
+  assert.deepEqual(status.screens,[]);
+  await assert.rejects(s.run('gui_session_begin'),/GUI_DESKTOP_UNAVAILABLE/);
+});
+
+test('native backend reason is preserved and active Windows display stays available', async () => {
+  const denied=setup({platform:'win32',invoke:async () => ({ok:true,available:false,reason:'NATIVE_BACKEND_ISSUE',screens:[]})});
+  assert.equal((await denied.run('gui_status')).reason,'NATIVE_BACKEND_ISSUE');
+  const ready=setup({platform:'win32',invoke:async () => ({ok:true,available:true,screens:[{width:1920,height:1080}]})});
+  assert.equal((await ready.run('gui_status')).available,true);
+  assert.equal((await ready.run('gui_status')).reason,undefined);
+});
+
 test('GUI not enabled is fail closed even if Power Mode enabled', async () => {
   const s=setup(); s.ctx.config.powerMode.guiControl.enabled=false;
   assert.equal((await s.run('gui_status')).available,false);

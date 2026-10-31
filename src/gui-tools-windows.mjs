@@ -94,7 +94,13 @@ export function createGuiController({ platform = process.platform, now = () => p
       if (name === 'gui_status') {
         const status = await invoke({ action: 'status', stopFile });
         if (status?.ok !== true) throw guiError(status?.error || 'GUI_NATIVE_FAILED');
-        return { ...status, enabled, busy: false, leased: !!current(), backend: status.backend ?? (platform === 'win32' ? 'windows-user32-gdi' : 'gnome-shell-wayland'), policy: {
+        // A configured GUI without a native display is not operational. This
+        // distinguishes a headless/disconnected OS session from policy denial;
+        // do not imply a specific RDP cause without independent OS evidence.
+        const noDisplay = platform === 'win32' && status.available === false &&
+          Array.isArray(status.screens) && status.screens.length === 0;
+        return { ...status, ...(noDisplay && !status.reason ? { reason: 'GUI_NO_ACTIVE_DISPLAY' } : {}),
+          enabled, busy: false, leased: !!current(), backend: status.backend ?? (platform === 'win32' ? 'windows-user32-gdi' : 'gnome-shell-wayland'), policy: {
           allowScreenshot: cfg.allowScreenshot === true, allowMouse: cfg.allowMouse === true,
           allowKeyboard: cfg.allowKeyboard === true, allowWindowFocus: cfg.allowWindowFocus === true,
           defaultSessionMode: 'observe', explicitTakeoverRequired: true,
