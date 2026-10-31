@@ -42,15 +42,18 @@ jobs:
         run: node --test test/isolated-qa-policy.test.mjs
       - name: Check prerelease SemVer and updater fail-closed rules
         run: node --test test/semver-release.test.mjs
+      # The strict 6s Windows SQLite/team regression is first in its test phase.
+      # Keep its exact limit and run it before the long check-phase I/O.
+      # All original checks and tests remain required, with no duplicate run.
+      - name: Run qualification suite with bounded Windows file concurrency
+        if: runner.os == 'Windows'
+        run: node tools/run-bounded-test-script.mjs --script test --concurrency 1 --prioritize-sensitive 1
       - name: Run qualification check with bounded Windows file concurrency
         if: runner.os == 'Windows'
         run: node tools/run-bounded-test-script.mjs --script check --concurrency 1 --prioritize-sensitive 1
       - name: Run full check suite
         if: runner.os != 'Windows'
         run: npm run check
-      - name: Run qualification suite with bounded Windows file concurrency
-        if: runner.os == 'Windows'
-        run: node tools/run-bounded-test-script.mjs --script test --concurrency 1 --prioritize-sensitive 1
       - name: Run full test suite
         if: runner.os != 'Windows'
         run: npm test
