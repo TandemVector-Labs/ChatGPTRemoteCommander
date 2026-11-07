@@ -1,7 +1,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const MAX_BODY = 16 * 1024 * 1024;
@@ -71,9 +71,21 @@ export function writeRouterStateAtomic(file,state,expectedGeneration=null) {
     if(current.generation!==expectedGeneration) fail('ROUTER_GENERATION_CONFLICT');
   }
   fs.mkdirSync(path.dirname(file),{recursive:true});
-  const tmp=file+'.tmp-'+process.pid+'-'+Date.now().toString(36);
-  fs.writeFileSync(tmp,JSON.stringify(next,null,2)+'\n',{encoding:'utf8',mode:0o600});
-  fs.renameSync(tmp,file);
+  // Exclusive descriptor creation prevents an existing alias from redirecting the write.
+  const tmp=file+'.tmp-'+process.pid+'-'+randomBytes(12).toString('hex');
+  let fd,created=false;
+  try {
+    fd=fs.openSync(tmp,'wx',0o600);
+    created=true;
+    fs.writeFileSync(fd,JSON.stringify(next,null,2)+'\n',{encoding:'utf8'});
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);fd=undefined;
+    fs.renameSync(tmp,file);
+  }catch(error){
+    if(fd!==undefined){try{fs.closeSync(fd);}catch{}}
+    if(created){try{fs.unlinkSync(tmp);}catch{}}
+    throw error;
+  }
   return next;
 }
 function collect(req) {
