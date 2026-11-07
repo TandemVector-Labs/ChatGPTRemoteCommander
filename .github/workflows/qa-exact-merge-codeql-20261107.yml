@@ -1,0 +1,83 @@
+name: Exact-merge CodeQL security QA (no upload or promotion)
+
+on:
+  push:
+    branches: [qa/pr57-pr213-codeql-20261107]
+
+permissions:
+  contents: read
+  actions: read
+  security-events: write # CodeQL advanced setup requirement; analyze upload is disabled
+
+jobs:
+  codeql-source:
+    name: PR${{ matrix.pr }} / ${{ matrix.language }} / no-upload
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pr: 57
+            sha: 9a63cebf709a90a27d106df000e52bcfb467f997
+            language: javascript-typescript
+          - pr: 57
+            sha: 9a63cebf709a90a27d106df000e52bcfb467f997
+            language: python
+          - pr: 57
+            sha: 9a63cebf709a90a27d106df000e52bcfb467f997
+            language: actions
+          - pr: 213
+            sha: d211a46b87eba674ccf46b49616326aeaf4ddee5
+            language: javascript-typescript
+          - pr: 213
+            sha: d211a46b87eba674ccf46b49616326aeaf4ddee5
+            language: python
+          - pr: 213
+            sha: d211a46b87eba674ccf46b49616326aeaf4ddee5
+            language: actions
+    steps:
+      - name: Check out the exact generated PR merge commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ matrix.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify exact source ref and no QA overlay
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ matrix.sha }}"
+          test -f .github/workflows/ci.yml
+      - name: Initialize official CodeQL (pinned)
+        uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-and-quality
+      - name: Analyze locally without uploading to code scanning
+        uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          upload: never
+          upload-database: false
+          output: sarif-results
+      - name: Fail closed on missing SARIF and summarize findings (no source snippets)
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import collections, json, pathlib, sys
+          files = sorted(pathlib.Path('sarif-results').rglob('*.sarif'))
+          if not files:
+              sys.exit('NO_CODEQL_SARIF_FOUND')
+          results = []
+          for path in files:
+              doc = json.loads(path.read_text(encoding='utf-8'))
+              runs = doc.get('runs', [])
+              for run in runs:
+                  results += run.get('results', [])
+              print('SARIF_FILE', path.name, 'RUNS', len(runs))
+          levels = collections.Counter(r.get('level','unknown') for r in results)
+          rules = collections.Counter(r.get('ruleId','unknown') for r in results)
+          print('CODEQL_SARIF_FINDINGS', len(results))
+          print('CODEQL_SARIF_LEVELS', dict(sorted(levels.items())))
+          print('CODEQL_SARIF_TOP_RULES', rules.most_common(12))
+          PY
