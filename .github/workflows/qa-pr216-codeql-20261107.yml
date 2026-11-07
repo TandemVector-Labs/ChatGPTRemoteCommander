@@ -1,0 +1,95 @@
+name: PR216 exact-merge CodeQL security QA (no upload or promotion)
+
+on:
+  push:
+    branches: [qa/pr216-codeql-20261107]
+
+permissions:
+  contents: read
+  actions: read
+  security-events: write # CodeQL advanced setup requirement; analyze upload is disabled
+
+jobs:
+  codeql-source:
+    name: PR${{ matrix.pr }} / ${{ matrix.language }} / no-upload
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pr: 216
+            sha: e4094b0163cefbbef07963ed38bf948b25c3b5ef
+            language: javascript-typescript
+    steps:
+      - name: Check out the exact generated PR merge commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ matrix.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify exact source ref and no QA overlay
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ matrix.sha }}"
+          test -f .github/workflows/ci.yml
+      - name: Initialize official CodeQL (pinned)
+        uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-and-quality
+      - name: Analyze locally without uploading to code scanning
+        uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          upload: never
+          upload-database: false
+          output: sarif-results
+      - name: Bounded SARIF security-rule triage (no snippets or uploads)
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import collections, json, pathlib, sys
+          files = sorted(pathlib.Path('sarif-results').rglob('*.sarif'))
+          if not files:
+              sys.exit('NO_CODEQL_SARIF_FOUND')
+          focus = {
+              'py/overly-permissive-file',
+              'js/file-system-race',
+              'js/bad-code-sanitization',
+              'js/incomplete-url-substring-sanitization',
+              'js/http-to-file-access',
+              'js/file-access-to-http',
+          }
+          all_results, metadata = [], {}
+          for f in files:
+              obj = json.loads(f.read_text(encoding='utf-8'))
+              runs = obj.get('runs', [])
+              for run in runs:
+                  all_results.extend(run.get('results', []))
+                  for rule in run.get('tool', {}).get('driver', {}).get('rules', []):
+                      metadata[rule.get('id', '')] = rule.get('properties', {})
+              print('SARIF_FILE', f.name, 'RUNS', len(runs))
+          groups = collections.defaultdict(list)
+          for result in all_results:
+              groups[result.get('ruleId', 'unknown')].append(result)
+          print('CODEQL_SARIF_FINDINGS', len(all_results))
+          print('CODEQL_SECURITY_RULE_COUNTS', sorted((key,len(val)) for key,val in groups.items() if key in focus))
+          for ruleid in sorted(groups):
+              if ruleid not in focus: continue
+              properties = metadata.get(ruleid, {})
+              severity = properties.get('security-severity', 'not_supplied')
+              precision = properties.get('precision', 'not_supplied')
+              paths = collections.Counter()
+              for hit in groups[ruleid]:
+                  locations=hit.get('locations', [])
+                  if not locations: continue
+                  loc=locations[0].get('physicalLocation',{}).get('artifactLocation',{}).get('uri','missing')
+                  if '://' in loc or loc.startswith('/'): loc = pathlib.PurePosixPath(loc).name
+                  paths[loc] += 1
+              print('CODEQL_TRIAGE', json.dumps({
+                  'rule':ruleid,'findings':len(groups[ruleid]),
+                  'security_severity':severity,'precision':precision,
+                  'file_counts':paths.most_common(15),
+              },sort_keys=True))
+          PY
