@@ -205,3 +205,62 @@ test('router cleans up exclusively created state temp if its write fails',()=>{
    fs.rmSync(root,{recursive:true,force:true});
  }
 });
+
+
+test('router runtime metadata refuses pre-created temporary path and releases listener',async()=>{
+ const root=temp(),stateFile=path.join(root,'state.json'),runtimeFile=path.join(root,'runtime.json');
+ const outside=path.join(root,'synthetic-external.txt'),sentinel='OWNER_SYNTHETIC_UNTOUCHED';
+ const state={schema:1,profile:'test',generation:1,active:{port:45000,version:'1',commit:'a'.repeat(40),configSha256:'b'.repeat(64)}};
+ const port=await freePort(),originalOpen=fs.openSync;
+ let injected=false,alias=null;
+ try{
+   fs.writeFileSync(outside,sentinel);
+   writeRouterStateAtomic(stateFile,state);
+   fs.openSync=function(name,flags,mode){
+     if(!injected && typeof name==='string' && name.startsWith(runtimeFile+'.tmp-') && flags==='wx'){
+       injected=true;alias=name;
+       if(process.platform==='win32'){
+         const fd=originalOpen(name,'wx',0o600);
+         try{fs.writeSync(fd,'SYNTHETIC_CONFLICT');}finally{fs.closeSync(fd);}
+       }else fs.symlinkSync(outside,name);
+     }
+     return originalOpen(name,flags,mode);
+   };
+   await assert.rejects(()=>startRouter({listenPort:port,stateFile,runtimeFile}),error=>error.code==='EEXIST');
+   assert.equal(injected,true);
+   assert.equal(fs.readFileSync(outside,'utf8'),sentinel);
+   assert.equal(fs.existsSync(runtimeFile),false);
+   assert.equal(fs.lstatSync(alias).isSymbolicLink(),process.platform!=='win32');
+   const fresh=http.createServer((_req,res)=>res.end('freed'));
+   await new Promise((resolve,reject)=>{fresh.once('error',reject);fresh.listen(port,'127.0.0.1',resolve);});
+   await close(fresh);
+ }finally{
+   fs.openSync=originalOpen;
+   fs.rmSync(root,{recursive:true,force:true});
+ }
+});
+
+test('router runtime metadata write failure releases listener and preserves state',async()=>{
+ const root=temp(),stateFile=path.join(root,'state.json'),runtimeFile=path.join(root,'runtime.json');
+ const state={schema:1,profile:'test',generation:1,active:{port:45000,version:'1',commit:'a'.repeat(40),configSha256:'b'.repeat(64)}};
+ const port=await freePort(),originalWrite=fs.writeFileSync;
+ let tripped=false;
+ try{
+   writeRouterStateAtomic(stateFile,state);
+   fs.writeFileSync=function(destination,...args){
+     if(typeof destination==='number'&&!tripped){tripped=true;throw new Error('SYNTHETIC_RUNTIME_IO_FAILURE');}
+     return originalWrite(destination,...args);
+   };
+   await assert.rejects(()=>startRouter({listenPort:port,stateFile,runtimeFile}),/SYNTHETIC_RUNTIME_IO_FAILURE/);
+   assert.equal(tripped,true);
+   assert.equal(fs.existsSync(runtimeFile),false);
+   assert.equal(JSON.parse(fs.readFileSync(stateFile,'utf8')).generation,1);
+   assert.deepEqual(fs.readdirSync(root).filter(name=>name.includes('.tmp-')),[]);
+   const fresh=http.createServer((_req,res)=>res.end('freed'));
+   await new Promise((resolve,reject)=>{fresh.once('error',reject);fresh.listen(port,'127.0.0.1',resolve);});
+   await close(fresh);
+ }finally{
+   fs.writeFileSync=originalWrite;
+   fs.rmSync(root,{recursive:true,force:true});
+ }
+});
