@@ -63,21 +63,14 @@ export function readRouterState(file) {
   if(!stat.isFile()||stat.nlink>1) fail('ROUTER_STATE_ALIAS');
   return validateRouterState(JSON.parse(fs.readFileSync(file,'utf8')));
 }
-export function writeRouterStateAtomic(file,state,expectedGeneration=null) {
-  file=localFile(file);
-  const next=validateRouterState(state);
-  if(fs.existsSync(file) && expectedGeneration!==null){
-    const current=readRouterState(file);
-    if(current.generation!==expectedGeneration) fail('ROUTER_GENERATION_CONFLICT');
-  }
-  fs.mkdirSync(path.dirname(file),{recursive:true});
-  // Exclusive descriptor creation prevents an existing alias from redirecting the write.
+// Pin both Router state and runtime metadata writes to exclusive 0600 descriptors.
+function writeAtomicPrivateJson(file,value) {
   const tmp=file+'.tmp-'+process.pid+'-'+randomBytes(12).toString('hex');
   let fd,created=false;
   try {
     fd=fs.openSync(tmp,'wx',0o600);
     created=true;
-    fs.writeFileSync(fd,JSON.stringify(next,null,2)+'\n',{encoding:'utf8'});
+    fs.writeFileSync(fd,JSON.stringify(value,null,2)+'\n',{encoding:'utf8'});
     fs.fsyncSync(fd);
     fs.closeSync(fd);fd=undefined;
     fs.renameSync(tmp,file);
@@ -86,6 +79,16 @@ export function writeRouterStateAtomic(file,state,expectedGeneration=null) {
     if(created){try{fs.unlinkSync(tmp);}catch{}}
     throw error;
   }
+}
+export function writeRouterStateAtomic(file,state,expectedGeneration=null) {
+  file=localFile(file);
+  const next=validateRouterState(state);
+  if(fs.existsSync(file) && expectedGeneration!==null){
+    const current=readRouterState(file);
+    if(current.generation!==expectedGeneration) fail('ROUTER_GENERATION_CONFLICT');
+  }
+  fs.mkdirSync(path.dirname(file),{recursive:true});
+  writeAtomicPrivateJson(file,next);
   return next;
 }
 function collect(req) {
@@ -256,10 +259,16 @@ export async function startRouter({listenPort,stateFile,runtimeFile=null,host=LO
     upstream.end(body);
   });
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(listenPort,host,resolve);});
-  if(runtimeFile){
-    runtimeFile=localFile(runtimeFile);fs.mkdirSync(path.dirname(runtimeFile),{recursive:true});
-    const state={schema:1,pid:process.pid,host,port:listenPort,stateFile,sourceSha256:ROUTER_SOURCE_SHA256,startedAt:new Date().toISOString()};
-    const tmp=runtimeFile+'.tmp-'+process.pid;fs.writeFileSync(tmp,JSON.stringify(state,null,2)+'\n',{encoding:'utf8',mode:0o600});fs.renameSync(tmp,runtimeFile);
+  try {
+    if(runtimeFile){
+      runtimeFile=localFile(runtimeFile);fs.mkdirSync(path.dirname(runtimeFile),{recursive:true});
+      const state={schema:1,pid:process.pid,host,port:listenPort,stateFile,sourceSha256:ROUTER_SOURCE_SHA256,startedAt:new Date().toISOString()};
+      writeAtomicPrivateJson(runtimeFile,state);
+    }
+  }catch(error){
+    clearInterval(routeTimer);
+    await new Promise(resolve=>server.close(resolve));
+    throw error;
   }
   return {
     server,
