@@ -19,7 +19,7 @@ jobs:
       matrix:
         include:
           - pr: 216
-            sha: e4094b0163cefbbef07963ed38bf948b25c3b5ef
+            sha: 7b5b48d4c75859cbf5279916182ad1a8e3fd1563
             language: javascript-typescript
     steps:
       - name: Check out the exact generated PR merge commit
