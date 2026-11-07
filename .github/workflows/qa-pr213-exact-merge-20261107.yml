@@ -1,0 +1,62 @@
+name: PR213 exact-merge full source CI (QA ONLY / NoPromote)
+
+# This isolated QA overlay never merges or releases. The actual checkout is the exact GitHub PR merge SHA.
+on:
+  push:
+    branches: [qa/pr213-exact-merge-20261107]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: d211a46b87eba674ccf46b49616326aeaf4ddee5
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Enforce exact tested PR213 merge commit
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "d211a46b87eba674ccf46b49616326aeaf4ddee5"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+      - name: Verify exactly one required CI context per pull request
+        run: node --test test/ci-single-required-context.test.mjs
+      - name: Verify large-file transfer preflight safety on both platforms
+        run: node --test tools/commander-transfer-mesh/large-transfer-preflight.test.mjs
+      - name: Install Linux GUI helper dependencies
+        if: runner.os == 'Linux'
+        run: |
+          # Limit index updates to signed Ubuntu sources; unrelated vendor feeds can return 403.
+          test -f /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt-get update \
+            -o Dir::Etc::sourcelist=sources.list.d/ubuntu.sources \
+            -o Dir::Etc::sourceparts=-
+          sudo apt-get install --yes python3-gi gir1.2-gdkpixbuf-2.0 gnome-shell-common
+      - name: Validate isolated 0.11 QA manifest and negative version cases
+        run: node --test test/isolated-qa-policy.test.mjs
+      - name: Check prerelease SemVer and updater fail-closed rules
+        run: node --test test/semver-release.test.mjs
+      # The strict 6s Windows SQLite/team regression is first in its test phase.
+      # Keep its exact limit and run it before the long check-phase I/O.
+      # All original checks and tests remain required, with no duplicate run.
+      - name: Run qualification suite with bounded Windows file concurrency
+        if: runner.os == 'Windows'
+        run: node tools/run-bounded-test-script.mjs --script test --concurrency 1 --prioritize-sensitive 1
+      - name: Run qualification check with bounded Windows file concurrency
+        if: runner.os == 'Windows'
+        run: node tools/run-bounded-test-script.mjs --script check --concurrency 1 --prioritize-sensitive 1
+      - name: Run full check suite
+        if: runner.os != 'Windows'
+        run: npm run check
+      - name: Run full test suite
+        if: runner.os != 'Windows'
+        run: npm test
+      - run: npm run audit
