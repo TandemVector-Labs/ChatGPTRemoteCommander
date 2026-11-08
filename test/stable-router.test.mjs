@@ -321,3 +321,38 @@ test('router refuses POSIX group-writable state parent', {skip:process.platform=
    assert.equal(fs.existsSync(file),false);
  }finally{fs.chmodSync(root,0o700);fs.rmSync(root,{recursive:true,force:true});}
 });
+
+
+test('router rejects a group/world-writable nonsticky ancestor before first state write', {skip:process.platform==='win32'},()=>{
+ const root=temp(),outer=path.join(root,'writable-ancestor'),privateDir=path.join(outer,'private');
+ const file=path.join(privateDir,'state.json');
+ const state={schema:1,profile:'qa',generation:1,active:{port:41001,version:'qa',commit:'a'.repeat(40),configSha256:'b'.repeat(64)}};
+ try {
+  fs.mkdirSync(privateDir,{recursive:true,mode:0o700});fs.chmodSync(outer,0o777);
+  assert.throws(()=>writeRouterStateAtomic(file,state),/ROUTER_STATE_UNTRUSTED_ANCESTOR/);
+  assert.equal(fs.existsSync(file),false);
+  assert.equal(fs.existsSync(file+'.write-lock'),false);
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('router rechecks its namespace after lock open to stop initial write ancestor swap', {skip:process.platform==='win32'},()=>{
+ const root=temp(),outer=path.join(root,'controlled'),privateDir=path.join(outer,'private'),outside=path.join(root,'outside');
+ const file=path.join(privateDir,'state.json'),outsideFile=path.join(outside,'state.json');
+ const state={schema:1,profile:'qa',generation:1,active:{port:41001,version:'qa',commit:'a'.repeat(40),configSha256:'b'.repeat(64)}};
+ const originalOpen=fs.openSync;let swapped=false;
+ try{
+  fs.mkdirSync(privateDir,{recursive:true,mode:0o700});fs.mkdirSync(outside,{mode:0o700});
+  fs.writeFileSync(outsideFile,'OUTSIDE_SENTINEL');
+  fs.openSync=function(p,...args){
+   if(!swapped&&p===file+'.write-lock'){
+    swapped=true;fs.renameSync(privateDir,privateDir+'-moved');fs.symlinkSync(outside,privateDir,'dir');
+   }
+   return originalOpen.call(fs,p,...args);
+  };
+  assert.throws(()=>writeRouterStateAtomic(file,state),/ROUTER_LINK_NOT_ALLOWED/);
+  assert.equal(swapped,true);
+  assert.equal(fs.readFileSync(outsideFile,'utf8'),'OUTSIDE_SENTINEL');
+  assert.equal(fs.existsSync(path.join(privateDir+'-moved','state.json')),false);
+  assert.equal(fs.existsSync(path.join(outside,'state.json.write-lock')),false);
+ }finally{fs.openSync=originalOpen;fs.rmSync(root,{recursive:true,force:true});}
+});
