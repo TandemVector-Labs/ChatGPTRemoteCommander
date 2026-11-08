@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import {execFileSync} from 'node:child_process';
+import {verifySyncthingDaemon} from './doctor-rest-identity.mjs';
 const IDS={
  PC:'EFE6R4U-O3B6JVV-N4OKZFL-7X4U24W-A5GFD4G-TM4OPRK-AXBDALA-OCJUBQ6',
  Linux:'6YUIRAM-GDPWPT4-XXX2DD7-K2M7G23-F246XXK-ENQQ3G2-RHIQI2Y-TDRJGAB',
@@ -20,16 +20,12 @@ try {
  const node=JSON.parse(fs.readFileSync(path.join(root,'node.json'),'utf8'));
  output.alias=node.alias;
  if(!Object.hasOwn(IDS,node.alias)||node.deviceID!==IDS[node.alias])throw new Error('Node identity mismatch');
- const exe=path.join(root,'bin',process.platform==='win32'?'syncthing.exe':'syncthing');
- const id=execFileSync(exe,['device-id','--home='+path.join(root,'state')],{encoding:'utf8',timeout:4000,windowsHide:true}).trim();
- if(id!==IDS[node.alias])throw new Error('Certificate identity mismatch');
- output.version=execFileSync(exe,['--version'],{encoding:'utf8',timeout:4000,windowsHide:true}).trim().split(' ').slice(0,2).join(' ');
  const xml=fs.readFileSync(path.join(root,'state','config.xml'),'utf8');
  const key=xml.match(/<apikey>([^<]+)<\/apikey>/)?.[1];
  if(!key)throw new Error('Local REST key missing');
  const fetchLocal=async(base,url,authenticated=true)=>{
   const h=authenticated?{'X-API-Key':key}:{};
-  const r=await fetch(base+url,{headers:h,signal:AbortSignal.timeout(2600)});
+  const r=await fetch(base+url,{headers:h,redirect:'error',signal:AbortSignal.timeout(2600)});
   if(!r.ok)throw new Error('Local API HTTP '+r.status);
   return await r.json();
  };
@@ -40,6 +36,12 @@ try {
   try {const health=await fetchLocal(u,'/rest/noauth/health',false);if(health.status==='OK'){base=u;break;}}catch{}
  }
  if(!base)throw new Error('Local Syncthing REST health unavailable');
+ // Query the already-authenticated local daemon; never run a binary from a
+ // potentially environment-selected installation directory.
+ const status=await fetchLocal(base,'/rest/system/status');
+ const version=await fetchLocal(base,'/rest/system/version');
+ output.version=verifySyncthingDaemon(status,version,IDS[node.alias]);
+ const id=status.myID; // identity is accepted only after strict equality verification
  output.apiStatus='OK';
  const folders=await fetchLocal(base,'/rest/config/folders');
  const connected=await fetchLocal(base,'/rest/system/connections');
