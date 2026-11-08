@@ -85,6 +85,20 @@ jobs:
           print('CODEQL_SARIF_FINDINGS', len(all_results))
           print('CODEQL_SECURITY_RULE_COUNTS', sorted((key,len(val)) for key,val in groups.items() if key in focus))
           print('CODEQL_ALL_RULE_COUNTS', sorted((key,len(val)) for key,val in groups.items()))
+          for ruleid in ('js/path-injection','js/unused-local-variable'):
+              for hit in groups.get(ruleid,[]):
+                  locations=hit.get('locations', [])
+                  if not locations: continue
+                  physical=locations[0].get('physicalLocation', {})
+                  src=physical.get('artifactLocation', {}).get('uri', '')
+                  if src not in (
+                      'tools/commander-transfer-mesh/doctor.mjs',
+                      'tools/commander-transfer-mesh/doctor-rest-identity.mjs',
+                      'tools/commander-transfer-mesh/doctor-rest-identity.test.mjs'
+                  ): continue
+                  print('CODEQL_MODIFIED_FILE_LINE',json.dumps({
+                      'rule':ruleid,'file':src,'line':physical.get('region',{}).get('startLine')
+                  },sort_keys=True))
           for ruleid in sorted(groups):
               if ruleid not in focus: continue
               properties = metadata.get(ruleid, {})
