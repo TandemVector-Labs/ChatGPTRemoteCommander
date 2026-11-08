@@ -22,7 +22,7 @@ jobs:
             sha: d946e4440c5743216f5f2ba7a8a315b5475ef7ab
             language: javascript-typescript
           - scope: pr24-merged
-            sha: 17a137fd85d979d62ee0a60684d0d8d30a49b8cb
+            sha: 9cfa6ce920aa0e4556ed0e25d98ab8df51fcd4fb
             language: javascript-typescript
     steps:
       - name: Check out the exact generated PR merge commit
