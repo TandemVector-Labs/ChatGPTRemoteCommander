@@ -99,4 +99,22 @@ jobs:
                   'security_severity':severity,'precision':precision,
                   'file_counts':paths.most_common(15),
               },sort_keys=True))
+          # Route-specific, bounded CodeQL path evidence; file/line metadata only.
+          for ruleid in ('js/request-forgery','js/file-access-to-http','js/command-line-injection'):
+              for hit in groups.get(ruleid,[])[:15]:
+                  locs=hit.get('locations',[])
+                  primary=locs[0].get('physicalLocation',{}) if locs else {}
+                  relative=primary.get('artifactLocation',{}).get('uri','')
+                  if relative!='tools/commander-transfer-mesh/doctor.mjs': continue
+                  line=primary.get('region',{}).get('startLine')
+                  flow_paths=[]
+                  for flow in hit.get('codeFlows',[])[:1]:
+                      for thread in flow.get('threadFlows',[])[:1]:
+                          points=thread.get('locations',[])
+                          for item in (points[:3]+points[-3:]):
+                              p=item.get('location',{}).get('physicalLocation',{})
+                              f=p.get('artifactLocation',{}).get('uri','')
+                              if '://' in f or f.startswith('/'): f=pathlib.PurePosixPath(f).name
+                              flow_paths.append({'file':f[:130], 'line':p.get('region',{}).get('startLine')})
+                  print('CODEQL_DOCTOR_NETWORK_FLOW',json.dumps({'rule':ruleid,'line':line,'flow':flow_paths},sort_keys=True))
           PY
