@@ -82,6 +82,7 @@ jobs:
               groups[result.get('ruleId', 'unknown')].append(result)
           print('CODEQL_SARIF_FINDINGS', len(all_results))
           print('CODEQL_SECURITY_RULE_COUNTS', sorted((key,len(val)) for key,val in groups.items() if key in focus))
+          print('CODEQL_ALL_RULE_COUNTS', sorted((key,len(val)) for key,val in groups.items()))
           for ruleid in sorted(groups):
               if ruleid not in focus: continue
               properties = metadata.get(ruleid, {})
