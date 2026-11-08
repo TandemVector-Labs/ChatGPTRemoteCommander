@@ -3,8 +3,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import {verifySyncthingDaemon,configuredLoopbackRest} from './doctor-rest-identity.mjs';
-// Four-host pilot only: the PC launcher has a fixed --gui-address override.
+import {verifySyncthingDaemon,configuredLoopbackRest,pinnedOptionalDevice} from './doctor-rest-identity.mjs';
+const OPTIONAL_MMZ_SHA256='c51ff1c36a87da050b1f320e302cfd1a9bf69570efad6be68d2bf5a165724af8';
+// Multi-node pilot: the PC launcher has a fixed --gui-address override.
 // This is an exact per-node destination, NOT a candidate port scan.
 const GUI_OVERRIDES={PC:'127.0.0.1:18384'};
 const IDS={
@@ -22,7 +23,8 @@ function err(e){output.errors.push(String(e?.message||e).slice(0,200).replace(/<
 try {
  const node=JSON.parse(fs.readFileSync(path.join(root,'node.json'),'utf8'));
  output.alias=node.alias;
- if(!Object.hasOwn(IDS,node.alias)||node.deviceID!==IDS[node.alias])throw new Error('Node identity mismatch');
+ if(node.alias==='MMZ')pinnedOptionalDevice([{name:'MMZ',deviceID:node.deviceID}],'MMZ',OPTIONAL_MMZ_SHA256);
+ else if(!Object.hasOwn(IDS,node.alias)||node.deviceID!==IDS[node.alias])throw new Error('Node identity mismatch');
  const xml=fs.readFileSync(path.join(root,'state','config.xml'),'utf8');
  const {base,apiKey:key}=configuredLoopbackRest(xml,GUI_OVERRIDES[node.alias]);
  const fetchLocal=async(base,url,authenticated=true)=>{
@@ -37,12 +39,16 @@ try {
  // potentially environment-selected installation directory.
  const status=await fetchLocal(base,'/rest/system/status');
  const version=await fetchLocal(base,'/rest/system/version');
- output.version=verifySyncthingDaemon(status,version,IDS[node.alias]);
+ const deviceList=await fetchLocal(base,'/rest/config/devices');
+ const mmz=pinnedOptionalDevice(deviceList,'MMZ',OPTIONAL_MMZ_SHA256);
+ const trusted=mmz?{...IDS,MMZ:mmz}:IDS;
+ if(!Object.hasOwn(trusted,node.alias)||trusted[node.alias]!==node.deviceID)throw new Error('Node identity mismatch');
+ output.version=verifySyncthingDaemon(status,version,trusted[node.alias]);
  const id=status.myID; // identity is accepted only after strict equality verification
  output.apiStatus='OK';
  const folders=await fetchLocal(base,'/rest/config/folders');
  const connected=await fetchLocal(base,'/rest/system/connections');
- const expected=Object.entries(IDS).filter(([name])=>name!==node.alias).map(([name,id])=>({
+ const expected=Object.entries(trusted).filter(([name])=>name!==node.alias).map(([name,id])=>({
   id:'ctmesh-v1-'+[node.alias,name].sort((a,b)=>a.toLowerCase().localeCompare(b.toLowerCase())).join('-').toLowerCase(),
   peerId:id, peerName:name
  }));
@@ -60,12 +66,12 @@ try {
  output.legacyBroadcastPaused=broadcast?.paused===true;
  if(!output.legacyBroadcastPaused)err(new Error('Legacy broadcast not paused'));
  for(const [id,info] of Object.entries(connected.connections||{})){
-  if(id===IDS[node.alias]||!Object.values(IDS).includes(id)||!info.connected)continue;
+  if(id===trusted[node.alias]||!Object.values(trusted).includes(id)||!info.connected)continue;
   output.connectedPeers++;
   const kind=String(info.type||'unknown');
   output.transports[kind]=(output.transports[kind]||0)+1;
  }
- if(output.activePairCount!==3)err(new Error('Expected exactly three active pairs'));
+ if(output.activePairCount!==Object.keys(trusted).length-1)err(new Error('Expected exact trusted peer count'));
  output.ok=output.errors.length===0;
 }catch(e){err(e);}
 console.log(JSON.stringify(output));
