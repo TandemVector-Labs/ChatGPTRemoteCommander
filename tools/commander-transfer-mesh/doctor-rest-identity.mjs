@@ -1,3 +1,4 @@
+import {createHash,timingSafeEqual} from 'node:crypto';
 // Validate Syncthing's authenticated local REST identity without child processes.
 export function verifySyncthingDaemon(status,version,expectedId){
  if(typeof expectedId!=='string'||!/^[A-Z2-7]{7}(?:-[A-Z2-7]{7}){7}$/.test(expectedId))
@@ -31,4 +32,23 @@ export function configuredLoopbackRest(xml,runtimeAddress){
   if(!match||Number(match[2])>65535)throw new Error('Syncthing GUI address must be an explicit loopback IP and valid port');
  }
  return {base:'http://'+effectiveAddress,apiKey:keys[0][1]};
+}
+
+
+// Optional pilot peer is accepted only when its full ID matches a pinned digest.
+// This permits topology growth without publishing a participant's raw device ID.
+export function pinnedOptionalDevice(devices,name,digest){
+ if(!Array.isArray(devices)||typeof name!=='string'||!name||
+    typeof digest!=='string'||!/^[a-f0-9]{64}$/.test(digest))
+  throw new Error('Optional peer trust configuration invalid');
+ const matches=devices.filter(d=>d?.name===name);
+ if(matches.length===0)return null;
+ if(matches.length!==1)throw new Error('Optional peer name ambiguous');
+ const id=matches[0].deviceID;
+ if(typeof id!=='string'||!/^[A-Z2-7]{7}(?:-[A-Z2-7]{7}){7}$/.test(id))
+  throw new Error('Optional peer device ID malformed');
+ const actual=createHash('sha256').update(id,'utf8').digest();
+ if(!timingSafeEqual(actual,Buffer.from(digest,'hex')))
+  throw new Error('Optional peer identity is not pinned');
+ return id;
 }
