@@ -74,6 +74,16 @@ test('doctor uses authenticated local REST checks, not executable paths',()=>{
 });
 
 
+test('pinned TLS client rejects insecure destinations and unsafe routes before network I/O',async()=>{
+ for(const base of ['http://127.0.0.1:8384','https://localhost:8384','https://127.0.0.2:8384','https://127.0.0.1:0'])
+  await assert.rejects(fetchPinnedSyncthingJson(base,'/rest/system/status','invalid-cert','fixture-key'),
+   /explicit loopback address/);
+ await assert.rejects(fetchPinnedSyncthingJson('https://127.0.0.1:8384','/other','invalid-cert','fixture-key'),
+  /Unapproved local Syncthing REST route/);
+ await assert.rejects(fetchPinnedSyncthingJson('https://127.0.0.1:8384','/rest/noauth/health','invalid-cert',undefined,false),
+  /public certificate invalid/);
+});
+
 test('pinned HTTPS validates real fixture identity and refuses an impostor before API key transfer',async(t)=>{
  if(process.platform!=='linux'){t.skip('Linux OpenSSL ephemeral TLS fixture');return;}
  const os=await import('node:os');
