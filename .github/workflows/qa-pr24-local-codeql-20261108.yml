@@ -59,6 +59,8 @@ jobs:
           if not files:
               sys.exit('NO_CODEQL_SARIF_FOUND')
           focus = {
+              'js/path-injection',
+              'js/unused-local-variable',
               'py/overly-permissive-file',
               'js/file-system-race',
               'js/command-line-injection',
