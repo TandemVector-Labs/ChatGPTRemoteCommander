@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import {verifySyncthingDaemon,configuredLoopbackRest} from './doctor-rest-identity.mjs';
+import {createHash} from 'node:crypto';
+import {verifySyncthingDaemon,configuredLoopbackRest,pinnedOptionalDevice} from './doctor-rest-identity.mjs';
 
 const id='EFE6R4U-O3B6JVV-N4OKZFL-7X4U24W-A5GFD4G-TM4OPRK-AXBDALA-OCJUBQ6';
 test('authenticated Syncthing REST identity and version retain doctor output contract',()=>{
@@ -13,6 +14,17 @@ test('fail closed for daemon mismatch, missing identity and bad version',()=>{
  for(const version of [null,{}, {version:'2.1.6'}, {version:'v2.1.6;echo test'}])
   assert.throws(()=>verifySyncthingDaemon({myID:id},version,id),/Daemon version invalid/);
  assert.throws(()=>verifySyncthingDaemon({myID:id},{version:'v2.1.6'},'BAD'),/Expected device ID invalid/);
+});
+
+
+test('optional peer must match pinned digest; cannot substitute or duplicate device identity',()=>{
+ const digest=createHash('sha256').update(id).digest('hex');
+ assert.equal(pinnedOptionalDevice([{name:'MMZ',deviceID:id}],'MMZ',digest),id);
+ assert.equal(pinnedOptionalDevice([{name:'Other',deviceID:id}],'MMZ',digest),null);
+ assert.throws(()=>pinnedOptionalDevice([{name:'MMZ',deviceID:id}],'MMZ','0'.repeat(64)),/not pinned/);
+ assert.throws(()=>pinnedOptionalDevice([{name:'MMZ',deviceID:id},{name:'MMZ',deviceID:id}],'MMZ',digest),/ambiguous/);
+ assert.throws(()=>pinnedOptionalDevice([{name:'MMZ',deviceID:'BAD'}],'MMZ',digest),/malformed/);
+ assert.throws(()=>pinnedOptionalDevice(null,'MMZ',digest),/configuration invalid/);
 });
 
 test('REST endpoint and key are bound to one explicit loopback GUI config',()=>{
@@ -46,10 +58,10 @@ test('REST endpoint and key are bound to one explicit loopback GUI config',()=>{
 test('doctor uses authenticated local REST checks, not executable paths',()=>{
  const src=fs.readFileSync(new URL('./doctor.mjs',import.meta.url),'utf8');
  assert.ok(!src.includes('child_process')&&!src.includes('execFileSync('));
- for(const endpoint of ['/rest/system/status','/rest/system/version','/rest/config/folders','/rest/system/connections'])
+ for(const endpoint of ['/rest/system/status','/rest/system/version','/rest/config/devices','/rest/config/folders','/rest/system/connections'])
   assert.ok(src.includes("'"+endpoint+"'"));
  assert.ok(src.includes("redirect:'error'"));
- assert.ok(src.includes('verifySyncthingDaemon(status,version,IDS[node.alias])'));
+ assert.ok(src.includes('verifySyncthingDaemon(status,version,trusted[node.alias])'));
  assert.ok(src.includes('configuredLoopbackRest(xml,GUI_OVERRIDES[node.alias])'));
  assert.ok(!src.includes('const candidates='));
  assert.ok(src.includes("const GUI_OVERRIDES={PC:'127.0.0.1:18384'}"));
@@ -92,6 +104,7 @@ test('mocked local REST doctor works without launching a substituted binary',asy
     "  '/rest/system/status':{myID:process.env.FAKE_BAD_ID?'WRONG':ids.Linux},",
     "  '/rest/system/version':{version:process.env.FAKE_BAD_VERSION?'BAD':'v2.1.6'},",
     "  '/rest/config/folders':folders,",
+    "  '/rest/config/devices':Object.entries(ids).map(([name,deviceID])=>({name,deviceID})),",
     "  '/rest/system/connections':{connections:{}}",
     " }[p];",
     " if(body===undefined)throw Error('UNEXPECTED_ENDPOINT');",
