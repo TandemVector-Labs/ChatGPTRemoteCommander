@@ -41,6 +41,19 @@ test('linux tunnel supervisor never self-stops its own service and scopes recycl
   assert.ok(enroll.includes('^tunnel_[0-9a-f]{32}$'),'Linux enrollment must enforce the official tunnel ID format');
 });
 
+test('linux tunnel selection never falls back to an executable from caller PATH',()=>{
+  const script=read('autostart-linux.sh');
+  const start=script.indexOf('find_tunnel() {');
+  const end=script.indexOf('\nfallback_tunnel() {',start);
+  assert.ok(start>=0&&end>start,'find_tunnel must remain a defined supervisor function');
+  const source=script.slice(start,end);
+  assert.match(source,/mapfile -t candidates < <\(candidate_tunnels\)/);
+  assert.match(source,/return 1\s*\n}/,'missing managed clients must fail closed');
+  assert.doesNotMatch(source,/command\s+-v\s+tunnel-client/,'PATH lookup is not a verified pinned install');
+  assert.doesNotMatch(source,/\bwhich\s+tunnel-client/);
+  assert.match(script,/function|find_tunnel\(\)/);
+});
+
 test('linux autostart enables user lingering when systemd user services are available',()=>{
   const s=read('enable-autostart-linux.sh');
   assert.match(s,/loginctl enable-linger "\$USER"/);

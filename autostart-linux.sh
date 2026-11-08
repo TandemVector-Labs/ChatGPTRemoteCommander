@@ -55,7 +55,8 @@ find_tunnel() {
     printf '%s\n' "$f"
     return 0
   done
-  command -v tunnel-client
+  # Fail closed: an arbitrary PATH executable is not a managed, pinned tunnel-client.
+  return 1
 }
 
 fallback_tunnel() {
