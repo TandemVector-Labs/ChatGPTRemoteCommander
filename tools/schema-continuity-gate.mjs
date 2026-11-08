@@ -14,12 +14,28 @@ export function canonicalToolSchema(tools){
 export function hashToolSchema(tools){
   return createHash('sha256').update(JSON.stringify(canonicalToolSchema(tools))).digest('hex');
 }
+// This updater gate inspects only Commander-owned loopback MCP/Router endpoints.
+// Validate all endpoints before the first network request, even on no-op paths.
+export function validateLocalEndpoint(value,pathname){
+  if(typeof value!=='string'||value.length>256||value.includes('\\'))throw new Error('SCHEMA_LOCAL_ENDPOINT_DENIED');
+  let url;
+  try{url=new URL(value);}catch{throw new Error('SCHEMA_LOCAL_ENDPOINT_DENIED');}
+  const port=Number(url.port);
+  if(url.protocol!=='http:'||!['127.0.0.1','[::1]'].includes(url.hostname)
+    ||!Number.isSafeInteger(port)||port<1024||port>65535
+    ||url.username||url.password||url.search||url.hash
+    ||url.pathname!==pathname||value!==url.href){
+    throw new Error('SCHEMA_LOCAL_ENDPOINT_DENIED');
+  }
+  return url.href;
+}
 async function fetchJson(url,options){
-  const r=await fetch(url,{...options,signal:AbortSignal.timeout(5000)});
+  const r=await fetch(url,{...options,redirect:'error',signal:AbortSignal.timeout(5000)});
   if(!r.ok)throw new Error('SCHEMA_HTTP_'+r.status);
   return r.json();
 }
 export async function fetchToolSchema(url){
+  url=validateLocalEndpoint(url,'/mcp');
   const body=await fetchJson(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/list',params:{}})});
   if(!Array.isArray(body?.result?.tools))throw new Error('SCHEMA_TOOLS_LIST_INVALID');
   return body.result.tools;
@@ -103,6 +119,9 @@ export function classifyToolSchemaCompatibility(oldTools,candidateTools){
   return {compatible:reasons.length===0,reasons:reasons.slice(0,64)};
 }
 export async function evaluateSchemaContinuity({oldUrl,candidateUrl,routerUrl}){
+  oldUrl=validateLocalEndpoint(oldUrl,'/mcp');
+  candidateUrl=validateLocalEndpoint(candidateUrl,'/mcp');
+  routerUrl=validateLocalEndpoint(routerUrl,'/router/status');
   const [oldTools,candidateTools]=await Promise.all([fetchToolSchema(oldUrl),fetchToolSchema(candidateUrl)]);
   const oldHash=hashToolSchema(oldTools),candidateHash=hashToolSchema(candidateTools);
   if(oldHash===candidateHash)return {ok:true,changed:false,backwardCompatible:true,oldHash,candidateHash,decision:'UNCHANGED_SCHEMA'};
