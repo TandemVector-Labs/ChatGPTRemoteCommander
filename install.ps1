@@ -15,7 +15,9 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$Repo = 'https://github.com/GOD13emad/ChatGPTRemoteCommander.git'
+$Repo=[Environment]::GetEnvironmentVariable('REMOTE_COMMANDER_REPO_URL','Process')
+if([string]::IsNullOrWhiteSpace($Repo)){$Repo='https://github.com/GOD13emad/ChatGPTRemoteCommander.git'}
+if($Repo -cnotin @('https://github.com/GOD13emad/ChatGPTRemoteCommander.git','https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git')){throw 'RC_SOURCE_REPO_DENIED'}
 
 if ($PowerMode -and $StandardMode) {
   throw 'Use only one of -PowerMode or -StandardMode.'

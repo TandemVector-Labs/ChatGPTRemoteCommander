@@ -110,3 +110,27 @@ test('product icon is a standards-compliant multi-image ICO asset',()=>{
   const count=b.readUInt16LE(4);
   assert.ok(count>=4,'ICO should contain multiple display sizes');
 });
+
+test('Windows source fetches allow only the legacy or organization repository', () => {
+  const org='https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git';
+  const legacy='https://github.com/GOD13emad/ChatGPTRemoteCommander.git';
+  for(const name of ['install.ps1','server-install-windows.ps1','auto-update-windows.ps1']){
+    const script=read(name);
+    const policy=script.indexOf("GetEnvironmentVariable('REMOTE_COMMANDER_REPO_URL','Process')");
+    const denied=script.indexOf("throw 'RC_SOURCE_REPO_DENIED'");
+    assert.ok(policy>=0 && denied>policy, name+' must gate all explicit source overrides');
+    assert.ok(script.includes(legacy) && script.includes(org), name+' must preserve legacy default and opt-in organizational ref');
+    assert.ok(script.includes('$Repo -cnotin @('), name+' must explicitly deny arbitrary hosts');
+    const fetch=script.indexOf('fetch --depth');
+    assert.ok(fetch<0 || fetch>denied, name+' may not fetch before repository validation');
+  }
+});
+test('hosted canaries select the organizational source rather than implicit legacy default', () => {
+  const expected='REMOTE_COMMANDER_REPO_URL: https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git';
+  assert.ok(read('.github/workflows/server-install-canary.yml').includes(expected));
+  assert.ok(read('.github/workflows/server-install-canary.yml').includes('-e REMOTE_COMMANDER_REPO_URL="$REMOTE_COMMANDER_REPO_URL"'), 'Docker must receive the candidate source explicitly');
+  assert.ok(read('.github/workflows/windows-updater-e2e-r157.yml').includes(expected));
+  const linux=read('server-install-linux.sh');
+  assert.ok(linux.includes('REMOTE_COMMANDER_REPO_URL'), 'Linux installer must inherit same explicit source');
+  assert.ok(read('install.sh').includes('REMOTE_COMMANDER_REPO_URL'), 'nested Linux installer must inherit the same explicit source');
+});
