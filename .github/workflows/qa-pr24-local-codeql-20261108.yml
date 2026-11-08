@@ -7,7 +7,7 @@ on:
 permissions:
   contents: read
   actions: read
-  security-events: write # CodeQL advanced setup requirement; analyze upload is disabled
+  security-events: read # local SARIF only; analyze upload is disabled
 
 jobs:
   codeql-source:
