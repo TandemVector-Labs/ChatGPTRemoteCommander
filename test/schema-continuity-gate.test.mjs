@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { once } from 'node:events';
-import { classifyToolSchemaCompatibility, evaluateSchemaContinuity } from '../tools/schema-continuity-gate.mjs';
+import { classifyToolSchemaCompatibility, evaluateSchemaContinuity, fetchToolSchema, validateLocalEndpoint } from '../tools/schema-continuity-gate.mjs';
 
 function server(handler){return http.createServer(handler);}
 let portCursor=20000+(process.pid%10000);
@@ -101,4 +101,48 @@ test('classifier rejects newly imposed pattern and closed additional properties'
   assert.match(classifyToolSchemaCompatibility(old,pattern).reasons.join('|'),/pattern_changed/);
   const closed=[{name:'x',inputSchema:{type:'object',additionalProperties:false,properties:{a:{type:'string'}}}}];
   assert.match(classifyToolSchemaCompatibility(old,closed).reasons.join('|'),/additional_properties_narrowed/);
+});
+
+test('schema gate denies untrusted or noncanonical endpoints',()=>{
+  assert.equal(validateLocalEndpoint('http://127.0.0.1:47999/mcp','/mcp'),'http://127.0.0.1:47999/mcp');
+  assert.equal(validateLocalEndpoint('http://[::1]:47999/router/status','/router/status'),'http://[::1]:47999/router/status');
+  for(const url of [
+    'http://example.invalid:47999/mcp',
+    'https://127.0.0.1:47999/mcp',
+    'http://localhost:47999/mcp',
+    'http://127.0.0.1:47999/mcp?next=evil',
+    'http://127.0.0.1:47999/mcp#fragment',
+    'http://user:pass@127.0.0.1:47999/mcp',
+    'http://0x7f000001:47999/mcp',
+    'http://127.0.0.1/mcp',
+    'http://127.0.0.1:47999/mcp/',
+    'http://127.0.0.1:47999/router/status',
+    'file:///etc/passwd'
+  ]) assert.throws(()=>validateLocalEndpoint(url,'/mcp'),/SCHEMA_LOCAL_ENDPOINT_DENIED/,url);
+});
+
+test('schema gate rejects an invalid Router URL before any schema HTTP requests',async()=>{
+  let hits=0;
+  const fixture=server((_req,res)=>{hits++;res.writeHead(500);res.end();});
+  const port=await listen(fixture);
+  try{
+    const valid='http://127.0.0.1:'+port+'/mcp';
+    await assert.rejects(
+      ()=>evaluateSchemaContinuity({oldUrl:valid,candidateUrl:valid,routerUrl:'http://example.invalid:47999/router/status'}),
+      /SCHEMA_LOCAL_ENDPOINT_DENIED/
+    );
+    assert.equal(hits,0,'invalid Router URL must fail before querying even healthy schema endpoints');
+  }finally{await close(fixture);}
+});
+
+test('schema gate forbids HTTP redirect following',async()=>{
+  let targetHits=0;
+  const target=server((_req,res)=>{targetHits++;res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({result:{tools:[]}}));});
+  const targetPort=await listen(target);
+  const redirect=server((_req,res)=>{res.writeHead(302,{location:'http://127.0.0.1:'+targetPort+'/mcp'});res.end();});
+  const redirectPort=await listen(redirect);
+  try{
+    await assert.rejects(()=>fetchToolSchema('http://127.0.0.1:'+redirectPort+'/mcp'));
+    assert.equal(targetHits,0,'schema fetch must not follow redirects even to another local port');
+  }finally{await Promise.all([close(redirect),close(target)]);}
 });
