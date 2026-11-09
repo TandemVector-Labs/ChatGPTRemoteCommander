@@ -29,7 +29,7 @@ function resolveDoctorRoot(candidate) {
 // Resolve every fixed relative file before reading it. This rejects traversal
 // components and symlinks that point outside the accepted root directory.
 function readDoctorFile(root,relative) {
- if(path.isAbsolute(relative)||relative.split(/[\\\\/]/).some(part=>!part||part==='.'||part==='..'))
+ if(path.isAbsolute(relative)||relative.split(path.sep).some(part=>!part||part==='.'||part==='..')||relative.split('/').some(part=>!part||part==='.'||part==='..'))
   throw new Error('Invalid Transfer Mesh relative path');
  const target=fs.realpathSync(path.resolve(root,relative));
  if(!target.startsWith(root+path.sep))
