@@ -38,11 +38,15 @@ test('R171 tag-only publication gate skips post-tag main without re-signing or r
  fs.writeFileSync(path.join(assets,'SHA256SUMS.txt'),sums.join('\n')+'\n');
  git(repo,'add','.');git(repo,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','release fixture');
  git(repo,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','tag','-a','v0.10.25','-m','annotated release');
+ // Materialize the fixed workflow fixture as an isolated script file.
+ // Avoid dynamically evaluating repository text as a shell -c command.
+ const scriptFile=path.join(dir,'release-identity-fixture.sh');
+ fs.writeFileSync(scriptFile,script,{mode:0o600});
  const output=path.join(dir,'result.txt');
  const invoke=(event,ref)=>{
    fs.writeFileSync(output,'');
    const env={...process.env,GITHUB_OUTPUT:output,GITHUB_EVENT_NAME:event,GITHUB_REF:ref};
-   const r=spawnSync(bash,['-c',script],{cwd:repo,env,encoding:'utf8',timeout:16000});
+   const r=spawnSync(bash,['../release-identity-fixture.sh'],{cwd:repo,env,encoding:'utf8',timeout:16000});
    assert.equal(r.error,undefined,String(r.error));
    return {r,output:fs.readFileSync(output,'utf8')};
  };

@@ -31,7 +31,7 @@ test('single-file Linux launcher supports offline product plan and rejects corru
   const expectedVersion=JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8')).version;
   const source=spawnSync('git',['-C',root,'rev-parse','HEAD'],{encoding:'utf8'});
   assert.equal(source.status,0,source.stderr);
-  assert.match(extracted.stdout,new RegExp("export REMOTE_COMMANDER_SOURCE_REF='v"+expectedVersion.replaceAll('.','\\.')+"'"));
+  assert.ok(extracted.stdout.includes("export REMOTE_COMMANDER_SOURCE_REF='v"+expectedVersion+"'"), 'packaged source version differs from manifest');
   assert.ok(extracted.stdout.includes("export REMOTE_COMMANDER_EXPECTED_COMMIT='"+source.stdout.trim()+"'"));
 
   result=call(out,'--list-products');
