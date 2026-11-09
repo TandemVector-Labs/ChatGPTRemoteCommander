@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import {pathToFileURL} from 'node:url';
 import {syncthingDeviceIdFromPem,assertSyncthingRuntimeIdentity} from './device-id.mjs';
 const IDS={
  PC:'EFE6R4U-O3B6JVV-N4OKZFL-7X4U24W-A5GFD4G-TM4OPRK-AXBDALA-OCJUBQ6',
@@ -10,26 +11,29 @@ const IDS={
  EmadServer:'YMR5MPK-PW254V4-UX6FHRA-IYBRSN6-BGJMRNO-TTKJGX7-MQEOL3R-LP2VOQF',
  Amirreza:'X6EKTD2-6ZF3WUF-L2AQAHU-VYIQACY-A5BXTIP-F5U5UJE-AT6EREF-2PG6UA6'
 };
-const root=process.env.COMMANDER_TRANSFER_HOME || (process.platform==='win32'
+const defaultRoot=process.platform==='win32'
  ?path.join(process.env.LOCALAPPDATA||path.join(os.homedir(),'AppData','Local'),'CommanderTransferPilot')
- :path.join(os.homedir(),'.local','share','commander-transfer-pilot'));
+ :path.join(os.homedir(),'.local','share','commander-transfer-pilot');
+
+export async function runDoctor({root=defaultRoot,fetchImpl=fetch,writeOutput=console.log}={}) {
+ const resolvedRoot=path.resolve(root);
 const output={schema:'ctmesh-doctor-v1',ok:false,alias:null,version:null,apiStatus:'unavailable',
  activePairCount:0,legacyBroadcastPaused:false,staleMisconfiguredActive:0,connectedPeers:0,transports:{},errors:[]};
 function err(e){output.errors.push(String(e?.message||e).slice(0,200).replace(/<apikey>.*?<\/apikey>/ig,'[REDACTED]'));}
 try {
- const node=JSON.parse(fs.readFileSync(path.join(root,'node.json'),'utf8'));
+ const node=JSON.parse(fs.readFileSync(path.join(resolvedRoot,'node.json'),'utf8'));
  output.alias=node.alias;
  if(!Object.hasOwn(IDS,node.alias)||node.deviceID!==IDS[node.alias])throw new Error('Node identity mismatch');
  // Verify the on-disk device certificate without executing a binary from an
  // environment-selected root. Cross-check that ID against the running service.
- const id=syncthingDeviceIdFromPem(fs.readFileSync(path.join(root,'state','cert.pem'),'utf8'));
+ const id=syncthingDeviceIdFromPem(fs.readFileSync(path.join(resolvedRoot,'state','cert.pem'),'utf8'));
  if(id!==IDS[node.alias])throw new Error('Certificate identity mismatch');
- const xml=fs.readFileSync(path.join(root,'state','config.xml'),'utf8');
+ const xml=fs.readFileSync(path.join(resolvedRoot,'state','config.xml'),'utf8');
  const key=xml.match(/<apikey>([^<]+)<\/apikey>/)?.[1];
  if(!key)throw new Error('Local REST key missing');
  const fetchLocal=async(base,url,authenticated=true)=>{
   const h=authenticated?{'X-API-Key':key}:{};
-  const r=await fetch(base+url,{headers:h,signal:AbortSignal.timeout(2600)});
+  const r=await fetchImpl(base+url,{headers:h,signal:AbortSignal.timeout(2600)});
   if(!r.ok)throw new Error('Local API HTTP '+r.status);
   return await r.json();
  };
@@ -55,7 +59,7 @@ try {
   const f=scoped.find(x=>x.id===exp.id);
   if(!f||f.paused||f.devices?.length!==2||new Set(f.devices.map(d=>d.deviceID)).size!==2
    ||!f.devices.some(x=>x.deviceID===id)||!f.devices.some(x=>x.deviceID===exp.peerId)
-   ||path.resolve(f.path)!==path.resolve(root,'pairs',exp.peerName)){err(new Error('Invalid pair '+exp.id));}
+   ||path.resolve(f.path)!==path.resolve(resolvedRoot,'pairs',exp.peerName)){err(new Error('Invalid pair '+exp.id));}
   else output.activePairCount++;
  }
  output.staleMisconfiguredActive=scoped.filter(f=>!expected.some(x=>x.id===f.id)&&!f.paused).length;
@@ -72,5 +76,11 @@ try {
  if(output.activePairCount!==3)err(new Error('Expected exactly three active pairs'));
  output.ok=output.errors.length===0;
 }catch(e){err(e);}
-console.log(JSON.stringify(output));
-if(!output.ok)process.exitCode=1;
+writeOutput(JSON.stringify(output));
+ return {output,exitCode:output.ok?0:1};
+}
+
+if(process.argv[1] && import.meta.url===pathToFileURL(process.argv[1]).href){
+ const result=await runDoctor();
+ if(result.exitCode!==0)process.exitCode=result.exitCode;
+}
