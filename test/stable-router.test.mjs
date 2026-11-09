@@ -149,3 +149,118 @@ test('upstream failure cannot underflow inflight accounting',async()=>{
    assert.equal(Number(router.status().inflightByPort[dead]||0),0);
  }finally{if(router)await router.close();fs.rmSync(root,{recursive:true,force:true});}
 });
+
+
+test('router refuses pre-created temporary state paths without overwriting external data',()=>{
+ const root=temp();
+ const file=path.join(root,'router-state.json');
+ const outside=path.join(root,'synthetic-owner-data.txt');
+ const sentinel='SYNTHETIC_OWNER_DATA_UNTOUCHED';
+ const state={schema:1,profile:'test',generation:1,active:{port:44000,version:'test',commit:'a'.repeat(40),configSha256:'b'.repeat(64)}};
+ const originalOpen=fs.openSync;
+ let trapped=false,tempName=null;
+ try{
+   fs.writeFileSync(outside,sentinel);
+   fs.openSync=function(name,flags,mode){
+     if(!trapped && typeof name==='string' && name.startsWith(file+'.tmp-') && flags==='wx'){
+       trapped=true;tempName=name;
+       if(process.platform==='win32'){
+         const existing=originalOpen(name,'wx',0o600);
+         try{fs.writeSync(existing,Buffer.from('SYNTHETIC_OCCUPIED'));}finally{fs.closeSync(existing);}
+       }else fs.symlinkSync(outside,name);
+     }
+     return originalOpen(name,flags,mode);
+   };
+   assert.throws(()=>writeRouterStateAtomic(file,state),error=>error.code==='EEXIST');
+   assert.equal(trapped,true);
+   assert.equal(fs.readFileSync(outside,'utf8'),sentinel);
+   assert.equal(fs.existsSync(file),false);
+   assert.equal(fs.lstatSync(tempName).isSymbolicLink(),process.platform!=='win32');
+ }finally{
+   fs.openSync=originalOpen;
+   fs.rmSync(root,{recursive:true,force:true});
+ }
+});
+
+test('router cleans up exclusively created state temp if its write fails',()=>{
+ const root=temp();
+ const file=path.join(root,'router-state.json');
+ const state={schema:1,profile:'test',generation:1,active:{port:44000,version:'test',commit:'a'.repeat(40),configSha256:'b'.repeat(64)}};
+ const originalWrite=fs.writeFileSync;
+ let triggered=false;
+ try{
+   writeRouterStateAtomic(file,state);
+   fs.writeFileSync=function(target,...args){
+     if(typeof target==='number' && !triggered){
+       triggered=true;throw new Error('SYNTHETIC_IO_FAILURE');
+     }
+     return originalWrite(target,...args);
+   };
+   assert.throws(()=>writeRouterStateAtomic(file,{...state,generation:2},1),/SYNTHETIC_IO_FAILURE/);
+   assert.equal(triggered,true);
+   assert.equal(JSON.parse(fs.readFileSync(file,'utf8')).generation,1);
+   assert.deepEqual(fs.readdirSync(root).filter(name=>name.includes('.tmp-')),[]);
+ }finally{
+   fs.writeFileSync=originalWrite;
+   fs.rmSync(root,{recursive:true,force:true});
+ }
+});
+
+
+test('router runtime metadata refuses pre-created temporary path and releases listener',async()=>{
+ const root=temp(),stateFile=path.join(root,'state.json'),runtimeFile=path.join(root,'runtime.json');
+ const outside=path.join(root,'synthetic-external.txt'),sentinel='OWNER_SYNTHETIC_UNTOUCHED';
+ const state={schema:1,profile:'test',generation:1,active:{port:45000,version:'1',commit:'a'.repeat(40),configSha256:'b'.repeat(64)}};
+ const port=await freePort(),originalOpen=fs.openSync;
+ let injected=false,alias=null;
+ try{
+   fs.writeFileSync(outside,sentinel);
+   writeRouterStateAtomic(stateFile,state);
+   fs.openSync=function(name,flags,mode){
+     if(!injected && typeof name==='string' && name.startsWith(runtimeFile+'.tmp-') && flags==='wx'){
+       injected=true;alias=name;
+       if(process.platform==='win32'){
+         const fd=originalOpen(name,'wx',0o600);
+         try{fs.writeSync(fd,'SYNTHETIC_CONFLICT');}finally{fs.closeSync(fd);}
+       }else fs.symlinkSync(outside,name);
+     }
+     return originalOpen(name,flags,mode);
+   };
+   await assert.rejects(()=>startRouter({listenPort:port,stateFile,runtimeFile}),error=>error.code==='EEXIST');
+   assert.equal(injected,true);
+   assert.equal(fs.readFileSync(outside,'utf8'),sentinel);
+   assert.equal(fs.existsSync(runtimeFile),false);
+   assert.equal(fs.lstatSync(alias).isSymbolicLink(),process.platform!=='win32');
+   const fresh=http.createServer((_req,res)=>res.end('freed'));
+   await new Promise((resolve,reject)=>{fresh.once('error',reject);fresh.listen(port,'127.0.0.1',resolve);});
+   await close(fresh);
+ }finally{
+   fs.openSync=originalOpen;
+   fs.rmSync(root,{recursive:true,force:true});
+ }
+});
+
+test('router runtime metadata write failure releases listener and preserves state',async()=>{
+ const root=temp(),stateFile=path.join(root,'state.json'),runtimeFile=path.join(root,'runtime.json');
+ const state={schema:1,profile:'test',generation:1,active:{port:45000,version:'1',commit:'a'.repeat(40),configSha256:'b'.repeat(64)}};
+ const port=await freePort(),originalWrite=fs.writeFileSync;
+ let tripped=false;
+ try{
+   writeRouterStateAtomic(stateFile,state);
+   fs.writeFileSync=function(destination,...args){
+     if(typeof destination==='number'&&!tripped){tripped=true;throw new Error('SYNTHETIC_RUNTIME_IO_FAILURE');}
+     return originalWrite(destination,...args);
+   };
+   await assert.rejects(()=>startRouter({listenPort:port,stateFile,runtimeFile}),/SYNTHETIC_RUNTIME_IO_FAILURE/);
+   assert.equal(tripped,true);
+   assert.equal(fs.existsSync(runtimeFile),false);
+   assert.equal(JSON.parse(fs.readFileSync(stateFile,'utf8')).generation,1);
+   assert.deepEqual(fs.readdirSync(root).filter(name=>name.includes('.tmp-')),[]);
+   const fresh=http.createServer((_req,res)=>res.end('freed'));
+   await new Promise((resolve,reject)=>{fresh.once('error',reject);fresh.listen(port,'127.0.0.1',resolve);});
+   await close(fresh);
+ }finally{
+   fs.writeFileSync=originalWrite;
+   fs.rmSync(root,{recursive:true,force:true});
+ }
+});
