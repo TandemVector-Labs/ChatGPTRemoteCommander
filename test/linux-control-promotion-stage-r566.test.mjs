@@ -40,15 +40,15 @@ function fixture(){
 function promoteInFixture(f,stage,commit,ref='refs/heads/rollback-r521'){
   const sh=[
     'set -Eeuo pipefail',
-    'INSTALL_DIR="'+f.control+'"',
-    'STAGE_DIR="'+stage.dir+'"',
+    'INSTALL_DIR="$R566_QA_INSTALL_DIR"',
+    'STAGE_DIR="$R566_QA_STAGE_DIR"',
     'log(){ :; }',
     promote,
     'promote_control "$1" "$2"'
   ].join('\n');
   return spawnSync('bash',['-c',sh,'rc-r566',commit,ref],{
     encoding:'utf8',timeout:20000,
-    env:{...process.env,GIT_TERMINAL_PROMPT:'0',GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_SYSTEM:'/dev/null',GIT_ALLOW_PROTOCOL:'file'}
+    env:{...process.env,R566_QA_INSTALL_DIR:f.control,R566_QA_STAGE_DIR:stage.dir,GIT_TERMINAL_PROMPT:'0',GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_SYSTEM:'/dev/null',GIT_ALLOW_PROTOCOL:'file'}
   });
 }
 function withFixture(fn){
@@ -97,4 +97,15 @@ test('substantive unstaged and staged tracked changes remain blocked', {skip:pro
     assert.notEqual(p.status,0);
     assert.equal(git(['-C',f.control,'rev-parse','HEAD']),head);
   }
+}));
+
+test('fixture stage names containing shell expansion syntax remain literal, not evaluated',
+  {skip:process.platform!=='linux'?'Requires native Linux Bash fixture':false},()=>withFixture(f=>{
+    const unusual=path.join(f.root,'stage-$(printf${IFS}INJECTED)');
+    fs.renameSync(f.old.dir,unusual);
+    const stage={...f.old,dir:unusual};
+    const result=promoteInFixture(f,stage,stage.commit);
+    assert.equal(result.status,0,result.stdout+'\n'+result.stderr);
+    assert.equal(git(['-C',f.control,'rev-parse','HEAD']),stage.commit);
+    assert.equal(fs.readFileSync(path.join(f.control,'keep.txt'),'utf8'),f.sentinel);
 }));
