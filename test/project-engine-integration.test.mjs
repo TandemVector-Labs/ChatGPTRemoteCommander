@@ -717,3 +717,5 @@ if (process.argv[2] === '--claim-worker') {
   });
 
 }
+
+// Scheduler timing assertions use bounded fixtures; the test never depends on wall-clock speed.
