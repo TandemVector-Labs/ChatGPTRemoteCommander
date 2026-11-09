@@ -134,3 +134,4 @@ test('hosted canaries select the organizational source rather than implicit lega
   assert.ok(linux.includes('REMOTE_COMMANDER_REPO_URL'), 'Linux installer must inherit same explicit source');
   assert.ok(read('install.sh').includes('REMOTE_COMMANDER_REPO_URL'), 'nested Linux installer must inherit the same explicit source');
 });
+// The organization-source allowlist is exercised without mutating the host repository.
