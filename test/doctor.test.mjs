@@ -1,3 +1,6 @@
+// Keep Transfer Mesh doctor security regression inside an existing Node test group;
+// Windows bounded qualification phase command length must remain unchanged.
+import './ctmesh-doctor-no-exec.test.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -142,3 +145,5 @@ test('runDoctor reports missing core tool', async () => {
     assert.match(report.checks.find((item) => item.name === 'tools/list').detail, /missing:/);
   });
 });
+
+// Doctor regression tests remain source-only and do not mutate live Syncthing state.
