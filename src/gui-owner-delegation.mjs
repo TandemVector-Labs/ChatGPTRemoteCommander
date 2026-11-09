@@ -91,3 +91,5 @@ export function createOwnerGuiReadOnlyProxy({
     }
   };
 }
+
+// Endpoint authority remains fixed to loopback HTTP MCP; only the validated port is variable.
