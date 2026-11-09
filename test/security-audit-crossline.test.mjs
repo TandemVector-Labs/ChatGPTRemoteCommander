@@ -76,3 +76,14 @@ test('tokens from different file diffs must not combine',()=>{
   assert.equal(r.status,0,'audit unexpectedly failed: '+r.stderr);
   assert.match(r.stdout,/SECURITY_AUDIT_PASS/);
 });
+
+test('historical added-only newline split token without trailing space must fail',()=>{
+  const r=fixture(cwd=>{
+    git(cwd,'branch','clean');
+    writeFileSync(join(cwd,'payload.txt'),'Bearer'+'\n'+token+'\n');
+    git(cwd,'add','payload.txt');git(cwd,'commit','-qm','historical newline split');
+    git(cwd,'switch','-q','clean');
+  });
+  assert.equal(r.status,1);
+  assert.match(r.stderr,/"scope":"HISTORY","type":"Bearer token literal"/);
+});

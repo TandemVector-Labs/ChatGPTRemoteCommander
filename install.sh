@@ -12,7 +12,7 @@ BROWSER_PROFILE_ROOT=""
 START_SERVER=0
 INSTALL_PREREQS=0
 SKIP_TUNNEL_CLIENT=0
-SOURCE_REF="${REMOTE_COMMANDER_SOURCE_REF:-v0.10.23}"
+SOURCE_REF="${REMOTE_COMMANDER_SOURCE_REF:-v0.10.24}"
 EXPECTED_COMMIT="${REMOTE_COMMANDER_EXPECTED_COMMIT:-}"
 CURL_CONNECT_TIMEOUT="${REMOTE_COMMANDER_CURL_CONNECT_TIMEOUT:-15}"
 CURL_MAX_TIME="${REMOTE_COMMANDER_CURL_MAX_TIME:-180}"
@@ -28,7 +28,7 @@ Usage: install.sh [options]
   --enable-capability CAP   Explicit capability opt-in (repeatable)
   --start-server            Start MCP server with nohup after validation
   --skip-tunnel-client      Skip tunnel-client download; reuse existing pinned client when present
-  --source-ref REF          Git ref to install (default: v0.10.23)
+  --source-ref REF          Git ref to install (default: v0.10.24)
   --expected-commit SHA     Require the fetched ref to peel to this exact 40-hex commit
   -h, --help                Show help
 USAGE
@@ -448,6 +448,36 @@ CANONICAL_INSTALL_DIR="$(readlink -m -- "$HOME/.local/share/ChatGPTRemoteCommand
 CUSTOM_NO_START=0
 [[ "$INSTALL_DIR" == "$CANONICAL_INSTALL_DIR" || "$START_SERVER" == 1 ]] || CUSTOM_NO_START=1
 
+# Track only a brand-new install committed by this invocation. Existing
+# installations, unknown data and running instances are never quarantined.
+FRESH_INSTALL_CANDIDATE=0
+[[ -e "$INSTALL_DIR" || -L "$INSTALL_DIR" ]] || FRESH_INSTALL_CANDIDATE=1
+FRESH_INSTALL_PREACTIVATION=0
+FRESH_INSTALL_INODE=""
+FRESH_INSTALL_COMMIT=""
+rollback_fresh_preactivation() {
+  local rc=$?
+  trap - EXIT
+  if [[ "$rc" -ne 0 && "$FRESH_INSTALL_PREACTIVATION" == 1 ]]; then
+    local current_inode current_commit failed_dir
+    current_inode="$(stat -c '%d:%i' -- "$INSTALL_DIR" 2>/dev/null || true)"
+    current_commit="$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null || true)"
+    if [[ -n "$FRESH_INSTALL_INODE" && "$current_inode" == "$FRESH_INSTALL_INODE" &&
+          "$current_commit" == "$FRESH_INSTALL_COMMIT" && -d "$INSTALL_DIR/.git" &&
+          ! -L "$INSTALL_DIR" ]]; then
+      failed_dir="${INSTALL_DIR}.failed-install-$(date -u +%Y%m%dT%H%M%SZ)-$"
+      if [[ ! -e "$failed_dir" && ! -L "$failed_dir" ]] && mv -- "$INSTALL_DIR" "$failed_dir"; then
+        echo "FRESH_INSTALL_QUARANTINED path=$failed_dir: source remains available for recovery" >&2
+      else
+        echo "FRESH_INSTALL_QUARANTINE_REVIEW_REQUIRED: preserving unknown installation state" >&2
+      fi
+    else
+      echo "FRESH_INSTALL_ROLLBACK_REVIEW_REQUIRED: target identity changed; preserving it" >&2
+    fi
+  fi
+  exit "$rc"
+}
+
 if [[ -d "$INSTALL_DIR/.git" && "$CUSTOM_NO_START" != 1 ]]; then
   ensure_node_path
   invoke_existing_safe_update
@@ -456,6 +486,14 @@ else
     echo "Updating isolated/custom checkout in place without global routing mutation: $INSTALL_DIR"
   fi
   install_source
+  if [[ "$FRESH_INSTALL_CANDIDATE" == 1 ]]; then
+    FRESH_INSTALL_INODE="$(stat -c '%d:%i' -- "$INSTALL_DIR")"
+    FRESH_INSTALL_COMMIT="$(git -C "$INSTALL_DIR" rev-parse HEAD)"
+    FRESH_INSTALL_PREACTIVATION=1
+    trap rollback_fresh_preactivation EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+  fi
   install_portable_node
   ensure_node_path
   install_tunnel_client
@@ -469,6 +507,10 @@ else
     "$INSTALL_DIR/tools/gui-control-linux.py" "$INSTALL_DIR/tools/install-gnome-gui-extension.sh"
   install_linux_gui_backend "$INSTALL_DIR" "$INSTALL_DIR/config.local.json"
   validate_installation
+  # Beyond this point a new runtime may be activated. Never relocate an
+  # installation that could have a running server or enrolled owner state.
+  FRESH_INSTALL_PREACTIVATION=0
+  trap - EXIT INT TERM
   start_server
   if [[ "$START_SERVER" == "1" ]]; then
     head="$(git -C "$INSTALL_DIR" rev-parse HEAD)"

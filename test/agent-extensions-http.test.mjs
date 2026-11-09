@@ -17,7 +17,7 @@ test('agent extension tools are exposed read-only and return validated manifests
   let child;
   try {
     await fs.mkdir(path.join(root,'src'),{recursive:true});
-    for(const f of ['server-v0.3.mjs','transport-guard.mjs','gui-tools-windows.mjs','gui-incident-store.mjs','gui-contract.mjs','gui-process.mjs','browser-tools.mjs','browser-contract.mjs','browser-process.mjs','browser-owned-processes.mjs','browser-lease-store.mjs','browser-companion-monitor.mjs','schema-validator.mjs','async-operations.mjs','retry-guard.mjs','agent-extensions.mjs','coucou-bridge.mjs','no-codex-policy.mjs','conversation-store.mjs','conversation-continuation.mjs']) {
+    for(const f of ['server-v0.3.mjs','transport-guard.mjs','gui-tools-windows.mjs','gui-owner-delegation.mjs','gui-incident-store.mjs','gui-contract.mjs','gui-process.mjs','browser-tools.mjs','browser-contract.mjs','browser-process.mjs','browser-owned-processes.mjs','browser-lease-store.mjs','browser-companion-monitor.mjs','schema-validator.mjs','async-operations.mjs','retry-guard.mjs','agent-extensions.mjs','coucou-bridge.mjs','no-codex-policy.mjs','conversation-store.mjs','conversation-continuation.mjs']) {
       await fs.copyFile(new URL('../src/'+f,import.meta.url),path.join(root,'src',f));
     }
     await fs.writeFile(path.join(root,'src','security-v0.3.mjs'),'export const canonicalizeRoots = async x=>x;');
@@ -83,7 +83,19 @@ test('agent extension tools are exposed read-only and return validated manifests
     assert.match(skill.sha256,/^[0-9a-f]{64}$/);
     assert.match(skill.skill,/Fixture Extension/);
   } finally {
-    if(child){child.kill();await Promise.race([once(child,'close'),wait(5000)]);}
+    if(child){
+      child.kill();
+      // Keep the 5 s close deadline, but never retain its event-loop timer on fast exit.
+      let closeTimer;
+      try {
+        await Promise.race([
+          once(child,'close'),
+          new Promise(resolve=>{closeTimer=setTimeout(resolve,5000);})
+        ]);
+      } finally {
+        clearTimeout(closeTimer);
+      }
+    }
     await fs.rm(root,{recursive:true,force:true});
   }
 });

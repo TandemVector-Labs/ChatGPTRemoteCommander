@@ -16,7 +16,7 @@ for (const required of [
   'Detected active installation from Windows autostart',
   '$InstallDir = Resolve-InstallDir',
   'Tracked local changes exist in InstallDir',
-  "[string]$SourceRef = 'v0.10.23'",
+  "[string]$SourceRef = 'v0.10.24'",
   'ExpectedCommit',
   "rev-parse 'FETCH_HEAD^{commit}'",
   'incomplete Git checkout with no HEAD',
@@ -72,9 +72,28 @@ for (const required of [
 for (const forbidden of ['Add-MpPreference','Set-MpPreference','Remove-MpPreference']) {
   if (windowsServerInstaller.includes(forbidden)) throw new Error(`server installer must not mutate Defender exclusions/settings: ${forbidden}`);
 }
-if (!windowsServerInstaller.includes("[string]$SourceRef = 'v0.10.23'")) throw new Error('server-install-windows.ps1 default SourceRef must match current release');
-if (!windowsServerInstaller.includes('ChatGPTRemoteCommander-ServerInstaller/0.10.23')) throw new Error('server-install-windows.ps1 User-Agent must match current release');
+if (!windowsServerInstaller.includes("[string]$SourceRef = 'v0.10.24'")) throw new Error('server-install-windows.ps1 default SourceRef must match current release');
+if (!windowsServerInstaller.includes('ChatGPTRemoteCommander-ServerInstaller/0.10.24')) throw new Error('server-install-windows.ps1 User-Agent must match current release');
+for (const required of [
+  "[string]$GuiControl = 'Off'",
+  "$guiEnabled = $false # Server installer defaults headless regardless of Windows SKU or RDP."
+]) if (!windowsServerInstaller.includes(required)) throw new Error('Server install must select headless by default even on Client-SKU hosts: '+required);
 const serverCanaryWorkflow = readFileSync('.github/workflows/server-install-canary.yml','utf8');
+// Validate the newer, explicitly enumerated repository path instead of an
+// environment-controlled URL whose origin could be ambiguous.
+for (const [label, installer] of [['install.ps1', windowsInstaller], ['server-install-windows.ps1', windowsServerInstaller]]) {
+  for (const required of ["[ValidateSet('GOD13emad/ChatGPTRemoteCommander','TandemVector-Labs/ChatGPTRemoteCommander')]", '$Repo = "https://github.com/$SourceRepository.git"']) {
+    if (!installer.includes(required)) throw new Error(label + ' missing allowlisted repository source: ' + required);
+  }
+}
+for (const required of [
+  'RC_SOURCE_REPO_URL: https://github.com/' + '$' + '{{ github.repository }}.git',
+  '-e REMOTE_COMMANDER_REPO_URL="$RC_SOURCE_REPO_URL"',
+  '-SourceRepository $env:GITHUB_REPOSITORY',
+  "github.event.pull_request.head.repo.full_name == github.repository"
+]) {
+  if (!serverCanaryWorkflow.includes(required)) throw new Error('Canary missing protected source identity: ' + required);
+}
 for (const required of [
   "$script:BootstrapGitHubToken = [Environment]::GetEnvironmentVariable('RC_GITHUB_API_TOKEN','Process')",
   "[Environment]::SetEnvironmentVariable('RC_GITHUB_API_TOKEN',$null,'Process')",
@@ -90,8 +109,8 @@ for (const required of [
   "RC_GITHUB_API_TOKEN: ${{ github.token }}",
 ]) if (!serverCanaryWorkflow.includes(required)) throw new Error('server canary missing least-privilege same-repo token guard: '+required);
 
-if (!linuxServerInstaller.includes('SOURCE_REF="${REMOTE_COMMANDER_SOURCE_REF:-v0.10.23}"')) throw new Error('server-install-linux.sh default SourceRef must match current release');
-if (!linuxServerInstaller.includes('default: v0.10.23')) throw new Error('server-install-linux.sh usage default must match current release');
+if (!linuxServerInstaller.includes('SOURCE_REF="${REMOTE_COMMANDER_SOURCE_REF:-v0.10.24}"')) throw new Error('server-install-linux.sh default SourceRef must match current release');
+if (!linuxServerInstaller.includes('default: v0.10.24')) throw new Error('server-install-linux.sh usage default must match current release');
 const publicConfig = JSON.parse(readFileSync('config.json','utf8'));
 if (publicConfig.auditMaxBytes !== 8388608 || publicConfig.auditKeepFiles !== 3) {
   throw new Error('config.json missing bounded audit defaults');
@@ -132,7 +151,7 @@ for (const required of [
   'Alpine/musl is not qualified'
 ]) if (!linuxServerInstaller.includes(required)) throw new Error(`server-install-linux.sh missing server bootstrap behavior: ${required}`);
 for (const required of [
-  'SOURCE_REF="${REMOTE_COMMANDER_SOURCE_REF:-v0.10.23}"',
+  'SOURCE_REF="${REMOTE_COMMANDER_SOURCE_REF:-v0.10.24}"',
   '--source-ref',
   '--skip-tunnel-client',
   '--expected-commit',

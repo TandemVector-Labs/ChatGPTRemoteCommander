@@ -210,12 +210,22 @@ test('local emergency stop rejects capture and input without killing services', 
   await assert.rejects(s.run('gui_key_press',{...a,keys:['A']}),/GUI_LOCAL_STOP/);
   assert.equal(s.calls.length,2);
 });
-test('uncertain native outcome suspends further GUI actions; no blind retry', async () => {
+test('uncertain native outcome blocks all further input; only a fresh observe lease is allowed', async () => {
   let count=0;
   const s=setup({invoke:async r=>{count++;if(r.action==='status')return{ok:true,available:true};if(r.action==='screenshot')return image();throw new Error('GUI_SENDINPUT_FAILED');}});
   const a=await prepared(s); await assert.rejects(s.run('gui_key_press',{...a,keys:['A']}),/GUI_SENDINPUT_FAILED/);
-  await assert.rejects(s.run('gui_screenshot',{lease:a.lease}),/GUI_OUTCOME_UNCERTAIN/);
-  assert.equal((await s.run('gui_status')).uncertain,true);assert.equal(count,3);
+  await assert.rejects(s.run('gui_screenshot',{lease:a.lease}),/GUI_LEASE_REQUIRED_OR_EXPIRED/);
+  const status=await s.run('gui_status');
+  assert.equal(status.uncertain,true);
+  assert.equal(status.inputAvailable,false);
+  assert.equal(status.readOnlyAvailable,true);
+  await assert.rejects(s.run('gui_session_begin',{mode:'takeover',explicitUserAuthorization:'Synthetic consent'}),/GUI_INCIDENT_REVIEW_REQUIRED/);
+  const next=await s.run('gui_session_begin',{mode:'observe'});
+  assert.equal(next.mode,'observe');
+  const shot=await s.run('gui_screenshot',{lease:next.lease});
+  await assert.rejects(s.run('gui_key_press',{lease:next.lease,frame:shot.__structuredContent.frame,keys:['A']}),/GUI_INCIDENT_REVIEW_REQUIRED/);
+  await s.run('gui_session_end',{lease:next.lease});
+  assert.equal(count,6);
 });
 
 test('Linux attested pre-dispatch click rejection preserves no-effect without replaying input',async()=>{
@@ -251,8 +261,14 @@ for(const [platform,tool,code,attested] of [
   const a=await prepared(s);
   const args=tool==='gui_focus_window'?{...a,handle:'123'}:tool==='gui_key_press'?{...a,keys:['A']}:{...a,x:-750,y:5};
   await assert.rejects(s.run(tool,args),/GUI_/);
-  assert.equal((await s.run('gui_status')).uncertain,true);
-  await assert.rejects(s.run('gui_session_begin',{mode:'observe'}),/GUI_OUTCOME_UNCERTAIN/);
+  const status=await s.run('gui_status');
+  assert.equal(status.uncertain,true);
+  assert.equal(status.inputAvailable,false);
+  const readOnly=await s.run('gui_session_begin',{mode:'observe'});
+  assert.equal(readOnly.mode,'observe');
+  const shot=await s.run('gui_screenshot',{lease:readOnly.lease});
+  await assert.rejects(s.run(tool,{...args,lease:readOnly.lease,frame:shot.__structuredContent.frame}),/GUI_INCIDENT_REVIEW_REQUIRED/);
+  await s.run('gui_session_end',{lease:readOnly.lease});
 });
 
 test('Linux native no-effect attestation occurs before MutterInput dispatch',async()=>{
@@ -284,12 +300,97 @@ test('persistent helper propagates exact pre-dispatch no-effect receipt without 
   }finally{client?.close();await fs.rm(folder,{recursive:true,force:true});}
 });
 
-test('concurrent GUI requests are rejected, not queued for stale execution', async () => {
-  let unblock;
-  const s=setup({invoke:r => r.action==='status' ? Promise.resolve({ok:true,available:true}) : new Promise(resolve=>{unblock=()=>resolve(image());})});
-  const {lease}=await s.run('gui_session_begin'); const pending=s.run('gui_screenshot',{lease});
-  await new Promise(resolve=>setImmediate(resolve)); await assert.rejects(s.run('gui_screenshot',{lease}),/GUI_BUSY/);
-  unblock(); await pending;
+test('one read-only observation waits; concurrent input and extra readers fail without injection', async () => {
+  let unblock, captures=0;
+  const s=setup({invoke:r => {
+    if(r.action==='status')return Promise.resolve({ok:true,available:true});
+    if(r.action==='screenshot') {
+      captures++;
+      if(captures===1)return new Promise(resolve=>{unblock=()=>resolve(image());});
+      return Promise.resolve(image());
+    }
+    throw Error('UNEXPECTED_NATIVE_INPUT');
+  }});
+  const {lease}=await s.run('gui_session_begin');
+  const first=s.run('gui_screenshot',{lease});
+  await new Promise(resolve=>setImmediate(resolve));
+  const second=s.run('gui_screenshot',{lease});
+  await new Promise(resolve=>setImmediate(resolve));
+  await assert.rejects(s.run('gui_key_press',{lease,frame:'invalid',keys:['A']}),/GUI_BUSY/);
+  await assert.rejects(s.run('gui_screenshot',{lease}),/GUI_BUSY/);
+  assert.equal(captures,1);
+  unblock();
+  const [a,b]=await Promise.all([first,second]);
+  assert.ok(a.__structuredContent.frame);
+  assert.ok(b.__structuredContent.frame);
+  assert.notEqual(a.__structuredContent.frame,b.__structuredContent.frame);
+  assert.equal(captures,2);
+  await s.run('gui_session_end',{lease});
+});
+test('read-only queue rechecks lease after first operation and never revives expiry',async()=>{
+  let unblock, advance;
+  const s=setup({invoke:r=>r.action==='status'?Promise.resolve({ok:true,available:true}):new Promise(resolve=>{unblock=()=>resolve(image());})});
+  const {lease}=await s.run('gui_session_begin',{ttlSeconds:10});
+  const pending=s.run('gui_screenshot',{lease});
+  await new Promise(resolve=>setImmediate(resolve));
+  const waiting=s.run('gui_list_windows',{lease});
+  await new Promise(resolve=>setImmediate(resolve));
+  s.time(10001);
+  unblock();
+  await assert.rejects(pending,/GUI_LEASE_REQUIRED/);
+  await assert.rejects(waiting,/GUI_LEASE_REQUIRED/);
+});
+test('queued lease end completes only after an in-flight screenshot',async()=>{
+  let unblock,closed=0,active=true;
+  const s=setup({invoke:r=>r.action==='status'?Promise.resolve({ok:true,available:true}):
+    new Promise(resolve=>{unblock=()=>resolve(image());}),closeInvoke:()=>{closed++;active=false;}});
+  const {lease}=await s.run('gui_session_begin');
+  const first=s.run('gui_screenshot',{lease});
+  await new Promise(resolve=>setImmediate(resolve));
+  const end=s.run('gui_session_end',{lease});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(closed,0);
+  unblock();
+  await first;
+  assert.deepEqual(await end,{ok:true});
+  assert.equal(closed,1);
+  await assert.rejects(s.run('gui_screenshot',{lease}),/GUI_LEASE_REQUIRED/);
+});
+test('queued read-only operation reevaluates emergency STOP before native dispatch',async()=>{
+  let unblock,captures=0;
+  const s=setup({invoke:r=>{
+    if(r.action==='status')return Promise.resolve({ok:true,available:true});
+    if(r.action==='screenshot'){captures++;return new Promise(resolve=>{unblock=()=>resolve(image());});}
+    throw Error('UNEXPECTED_NATIVE_ACTION');
+  }});
+  const {lease}=await s.run('gui_session_begin');
+  const first=s.run('gui_screenshot',{lease});
+  await new Promise(resolve=>setImmediate(resolve));
+  const second=s.run('gui_screenshot',{lease});
+  await new Promise(resolve=>setImmediate(resolve));
+  s.stop();
+  unblock();
+  await first;
+  await assert.rejects(second,/GUI_LOCAL_STOP/);
+  assert.equal(captures,1);
+});
+test('bounded observation wait times out without invoking another native action',async()=>{
+  let release,captures=0;
+  const s=setup({invoke:r=>{
+    if(r.action==='status')return Promise.resolve({ok:true,available:true});
+    if(r.action==='screenshot'){captures++;return new Promise(resolve=>{release=()=>resolve(image());});}
+    throw Error('UNEXPECTED_NATIVE_DISPATCH');
+  }});
+  const {lease}=await s.run('gui_session_begin');
+  const first=s.run('gui_screenshot',{lease});
+  await new Promise(resolve=>setImmediate(resolve));
+  const queued=s.run('gui_screenshot',{lease});
+  await assert.rejects(queued,/GUI_BUSY/);
+  assert.equal(captures,1);
+  release();
+  await first;
+  assert.equal(captures,1);
+  await s.run('gui_session_end',{lease});
 });
 test('expired lease during slow capture does not acquire a new frame', async () => {
   let advance;

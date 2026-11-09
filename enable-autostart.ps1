@@ -163,8 +163,11 @@ if ([string]::IsNullOrWhiteSpace($PlainKey)) {
   throw 'Runtime API key is empty.'
 }
 
+$HadAmbientOpenAiApiKey = Test-Path Env:OPENAI_API_KEY
+$AmbientOpenAiApiKey = if ($HadAmbientOpenAiApiKey) { $env:OPENAI_API_KEY } else { $null }
 $ValidationPassed = $false
 try {
+  Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue
   $env:CONTROL_PLANE_API_KEY = $PlainKey
 
   if (-not $ProfileExists) {
@@ -200,6 +203,9 @@ try {
   $ValidationPassed = $true
 } finally {
   Remove-Item Env:CONTROL_PLANE_API_KEY -ErrorAction SilentlyContinue
+  if ($HadAmbientOpenAiApiKey) { $env:OPENAI_API_KEY = $AmbientOpenAiApiKey }
+  else { Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue }
+  $AmbientOpenAiApiKey = $null
   if (-not $ValidationPassed -and $CreatedProfile) {
     Remove-Item -LiteralPath $ProfileFile -Force -ErrorAction SilentlyContinue
   }

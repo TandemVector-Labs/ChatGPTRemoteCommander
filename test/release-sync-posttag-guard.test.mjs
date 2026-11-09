@@ -1,0 +1,76 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {spawnSync,execFileSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
+import crypto from 'node:crypto';
+const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
+const workflow=fs.readFileSync(path.join(root,'.github/workflows/release-sync.yml'),'utf8');
+const start=workflow.indexOf('      - name: Validate matching annotated tag and versioned 20/21-asset manifest');
+const end=workflow.indexOf('      - name: Authorize Windows distribution mode for this exact version',start);
+assert.ok(start>0&&end>start,'release identity step not found');
+const block=workflow.slice(start,end);
+const runPos=block.indexOf('        run: |');
+assert.ok(runPos>=0,'release identity script missing');
+const script=block.slice(runPos+'        run: |'.length).split(/\r?\n/).map(l=>l.startsWith('          ')?l.slice(10):l).join('\n');
+assert.ok(script.includes('R171_POSTTAG_MAIN_SKIP'));
+assert.ok(script.includes('R171_TAG_SOURCE_MISMATCH'));
+assert.ok(script.includes('test "$count" -eq "$expected_count"'));
+assert.ok(script.includes('expected_count=20'));
+assert.ok(script.includes('then expected_count=21; fi'));
+assert.ok(workflow.includes("steps.release_identity.outputs.accepted == 'true'"));
+const git=(cwd,...args)=>execFileSync('git',['-C',cwd,...args],{encoding:'utf8'});
+test('R171 tag-only publication gate skips post-tag main without re-signing or retagging',t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'rc-posttag-r171-'));
+ t.after(()=>{assert.match(path.basename(dir),/^rc-posttag-r171-/);fs.rmSync(dir,{recursive:true,force:true});});
+ const bash=process.platform==='win32'?'C:\\Program Files\\Git\\bin\\bash.exe':'bash';
+ if(process.platform==='win32'&&!fs.existsSync(bash))return t.skip('Git Bash unavailable on Windows');
+ const repo=path.join(dir,'repo');fs.mkdirSync(repo,{recursive:true});
+ git(repo,'init','-q');fs.writeFileSync(path.join(repo,'package.json'),JSON.stringify({version:'0.10.25'}));
+ fs.mkdirSync(path.join(repo,'docs'));fs.writeFileSync(path.join(repo,'docs','RELEASE_0.10.25.md'),'release fixture');
+ const assets=path.join(repo,'dist','release');fs.mkdirSync(assets,{recursive:true});
+ for(let i=0;i<19;i++)fs.writeFileSync(path.join(assets,'asset-'+i+'.txt'),'asset '+i);
+ // Compute a proper SHA-256 manifest from native Node, with portable two-space filename separator.
+ const sums=[];
+ for(let i=0;i<19;i++){const n='asset-'+i+'.txt';sums.push(crypto.createHash('sha256').update(fs.readFileSync(path.join(assets,n))).digest('hex')+'  '+n);}
+ fs.writeFileSync(path.join(assets,'SHA256SUMS.txt'),sums.join('\n')+'\n');
+ git(repo,'add','.');git(repo,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','release fixture');
+ git(repo,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','tag','-a','v0.10.25','-m','annotated release');
+ // Materialize the fixed workflow fixture as an isolated script file.
+ // Avoid dynamically evaluating repository text as a shell -c command.
+ const scriptFile=path.join(dir,'release-identity-fixture.sh');
+ fs.writeFileSync(scriptFile,script,{mode:0o600});
+ const output=path.join(dir,'result.txt');
+ const invoke=(event,ref)=>{
+   fs.writeFileSync(output,'');
+   const env={...process.env,GITHUB_OUTPUT:output,GITHUB_EVENT_NAME:event,GITHUB_REF:ref};
+   const r=spawnSync(bash,['../release-identity-fixture.sh'],{cwd:repo,env,encoding:'utf8',timeout:16000});
+   assert.equal(r.error,undefined,String(r.error));
+   return {r,output:fs.readFileSync(output,'utf8')};
+ };
+ const original=invoke('push','refs/tags/v0.10.25');
+ assert.equal(original.r.status,0,original.r.stderr);
+ assert.match(original.output,/accepted=true/);
+ assert.match(original.r.stdout,/R171_IMMUTABLE_TAG_AND_ASSETS_PREATTEST_PASS/);
+ fs.writeFileSync(path.join(repo,'new-feature.txt'),'new main feature');
+ git(repo,'add','.');git(repo,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','post tag dev');
+ const later=invoke('push','refs/heads/main');
+ assert.equal(later.r.status,0,later.r.stderr);
+ assert.match(later.output,/accepted=false/);
+ assert.match(later.r.stdout,/R171_POSTTAG_MAIN_SKIP/);
+ assert.doesNotMatch(later.r.stdout,/R171_IMMUTABLE_TAG_AND_ASSETS_PREATTEST_PASS/);
+ const wrongTag=invoke('push','refs/tags/v0.10.25');
+ assert.notEqual(wrongTag.r.status,0);
+ assert.match(wrongTag.r.stdout,/R171_TAG_SOURCE_MISMATCH/);
+ assert.doesNotMatch(wrongTag.output,/accepted=true/);
+ const wrongEvent=invoke('workflow_dispatch','refs/heads/main');
+ assert.notEqual(wrongEvent.r.status,0);
+ assert.match(wrongEvent.r.stdout,/R171_TAG_SOURCE_MISMATCH/);
+ git(repo,'tag','-d','v0.10.25');
+ const missing=invoke('push','refs/heads/main');
+ assert.equal(missing.r.status,0,missing.r.stderr);
+ assert.match(missing.r.stdout,/R171_NO_TAG_SKIP/);
+ assert.match(missing.output,/accepted=false/);
+});

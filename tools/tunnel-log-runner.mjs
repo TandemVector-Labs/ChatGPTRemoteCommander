@@ -209,6 +209,9 @@ writeStatus(true, { lastRotationReason: rotations ? 'startup-legacy-oversize' : 
 
 const [exe, ...args] = cfg.child;
 const childEnv = { ...process.env };
+// Remove private Commander/LLM credentials before child creation.
+delete childEnv.CONTROL_PLANE_API_KEY;
+delete childEnv.OPENAI_API_KEY;
 child = spawn(exe, args, {
   stdio: ['ignore', 'pipe', 'pipe'],
   shell: false,

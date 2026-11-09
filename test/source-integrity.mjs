@@ -15,7 +15,7 @@ exact(install, "Write-Host 'INSTALL_PASS'", 1, 'install.ps1');
 exact(install, 'Require-Windows', 2, 'install.ps1'); // definition + invocation
 
 const supervisor = read('autostart-windows.ps1');
-if (!supervisor.startsWith('param(') || supervisor.split(/\r?\n/).length > 350) throw new Error('autostart-windows.ps1 structural envelope invalid');
+if (!supervisor.startsWith('param(') || supervisor.split(/\r?\n/).length > 390) throw new Error('autostart-windows.ps1 structural envelope invalid');
 for (const marker of ['function Find-TunnelExe {','function Start-TunnelProfile($Item) {','SUPERVISOR_STARTED','TUNNEL_READY']) {
   exact(supervisor, marker, 1, 'autostart-windows.ps1');
 }

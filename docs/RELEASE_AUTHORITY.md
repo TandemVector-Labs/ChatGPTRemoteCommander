@@ -1,4 +1,31 @@
+## OWNER DEV-TRAIN POLICY — 2026-10-28 (accepted; supersedes pre-v1 rollback-only release blockers)
+
+Before the first fully accepted Stable `v1.0.0`, owner directs **forward-only numbered development builds** on all five pilot hosts and generic Windows/Linux/Headless packages. Qualification of a development build no longer requires successful promotion back to an earlier broken `0.10.x` product or passing the old **rollback-specific** R170/R173 tests. Retain and explicitly label prior failed R170/R173 evidence; they are still valuable for installer faults, but their rollback subchecks are not pre-v1 gates. No development build is Stable, and all secure source, build, installer, manifest, per-platform startup, profile, data, browser, Control Center and GUI permission gates stay mandatory. The Windows R157 failure is **not** excused merely because it mentions rollback: separately test native Windows installer, integrity, no-promotion guard and healthy start. Preserve exact install and configuration rescue copies, but do not switch the active route back to a known broken release as a routine acceptance step. If a candidate cannot start, leave the last healthy route in place and issue a corrected `dev.N+1`; do not destroy live connectivity. For `v1.0.0`, repeat full rollback, integrity, recovery and cross-platform soak qualifications.
+
+Source governance: personal `GOD13emad/ChatGPTRemoteCommander` is authoritative, organizational `TandemVector-Labs/ChatGPTRemoteCommander` is its *GitHub fork*, with protected PR and independent review. They are one product family, not independent product branches; no forced main ref updates. One installer/runtime manifest per compatible Windows/Linux/headless host, with Browser, GUI/Cua and Control Center as governed components, not separate standalone Commander installs. Full accepted target/DoD is in [COMMANDER_ARCHITECTURE.md](COMMANDER_ARCHITECTURE.md). This documented policy does not prove a current installed build or authorize public release without exact-commit evidence.
+
+---
+
+## 2026-10-20 post-merge Windows MCP Tasks fixture readiness — scoped QA correction
+
+- Host CI run 39404729742, Windows job 118567804779, on merged main 6b2f7fe8eca2900b28e162369fd16b9f169ac0c2 failed only the mcp-tasks-extension server-health assertion at line 57. Its 400x25ms short startup polling loop did not observe a healthy isolated fixture under the loaded hosted Windows suite; stderr showed the SQLite experimental warning but no definitive server crash. The same product tree passed prior Windows PR CI and Ubuntu main CI.
+- Scoped fixture-only correction follows the repository's already accepted 30,000ms readiness pattern in test/profile-instance-http.test.mjs: wall-clock deadline, 300ms bounded health request attempts, explicit process-exit detection and bounded diagnostic stderr. Runtime code, protocol assertions, asynchronous operation deadlines, Browser/GUI scope, user profiles and installations are unchanged.
+- This is NOT a claim that post-fix hosted Windows CI passed. Require exact new-SHA Windows/Ubuntu CI, Release Sync, and an updated immutable Preview tag after verified merge. Historical failed job and source identity remain evidence.
+
+
+### 2026-10-20 exact-head Linux promotion fault and scoped test isolation fix
+
+GitHub dedicated candidate rollback run 39400701020, Linux job 118554390618 on source d1072080c4dcfd0c1d5e8f70d7d20d1fa557047f, failed its updater qualification when test/concurrency-smoke.mjs attempted to bind a hardcoded test port 47931 and received EADDRINUSE. This is a fixture isolation defect, not evidence that the candidate runtime is safe or unsafe after successful promotion; its promotion did not pass. The proposed narrow correction asks the OS for an unused ephemeral loopback port and gives each smoke instance a unique UUID-owned fixture root/config/app. Fixed deadlines, assertions, owner data and production listen ports remain unchanged. Two independently started native Linux smoke tests completed simultaneously with exit 0 and CONCURRENCY_SMOKE_PASS. Hosted exact-corrected-SHA rollback is still an open gate until a fresh completed run; never inherit its old PASS or ignore the prior failure.
+
+## 2026-10-20 unsigned v0.10.25 Preview admission (not a release receipt)
+
+A new exact-v0.10.25-only unsigned Preview exception was expressly requested by the project user. See docs/UNSIGNED_WINDOWS_RELEASE_POLICY_0.10.25.json. The previous v0.10.24 exception and Stable v0.10.20 authority remain unchanged; GitHub brand TandemVector Labs / Usefull-Skills and author Dr. Aliakbar Emadoddin do not replace Authenticode or publisher-verified installed acceptance. Stable auto-update remains disabled for this Preview.
+
 # Current release authority — 2026-10-14
+
+## 2026-10-19 release-first scope pointer — candidate / no promotion
+
+Owner direction: finish usable Core, Browser and Control Center releases separately, then supply later feature increments via safe, version-pinned GitHub automatic updates. The current **Core v0.10.25 is SOURCE CANDIDATE ONLY**, not a new published Stable or authorized unsigned Preview; the last verified installed Core on Saeid/MMZ is v0.10.24. The frozen scope, release-specific blockers, GitHub updater invariants, product separation and exact acceptance requirements are in [RELEASE_CANDIDATE_0.10.25](RELEASE_CANDIDATE_0.10.25.md). Earlier dated facts below remain historical evidence, not overriding promotion instructions. Never enable automatic updates, publish unsigned v0.10.25, merge unrelated Draft GUI branches or replace installed profiles merely because source QA passes.
 
 ## 2026-10-14 R498 authoritative source/release delta
 

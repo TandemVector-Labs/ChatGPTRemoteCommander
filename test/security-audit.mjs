@@ -59,7 +59,7 @@ function makeHistoryScanner(rules) {
     }
     const content = line.slice(1);
     function append(previous) {
-      const sample = previous + content;
+      const sample = previous ? previous + '\n' + content.replace(/\r?\n$/, '') : content.replace(/\r?\n$/, '');
       // Single-line matches are already handled by the raw scanner and its
       // commit/path/shape-pinned fixture rule. Any cross-line hit fails closed.
       const matcher = new RegExp(bearerPattern.source, bearerPattern.flags.replace(/[gy]/g, '') + 'g');

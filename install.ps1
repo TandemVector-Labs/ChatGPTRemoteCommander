@@ -10,14 +10,21 @@ param(
   [switch]$StartServer,
   [switch]$SkipTunnelClient,
   [string]$TunnelClientVersion = '0.0.15',
-  [string]$SourceRef = 'v0.10.23',
-  [string]$ExpectedCommit = ''
+  [string]$SourceRef = 'v0.10.24',
+  [string]$ExpectedCommit = '',
+  [ValidateSet('GOD13emad/ChatGPTRemoteCommander','TandemVector-Labs/ChatGPTRemoteCommander')][string]$SourceRepository = 'GOD13emad/ChatGPTRemoteCommander'
 )
 $ErrorActionPreference = 'Stop'
 
-$Repo=[Environment]::GetEnvironmentVariable('REMOTE_COMMANDER_REPO_URL','Process')
-if([string]::IsNullOrWhiteSpace($Repo)){$Repo='https://github.com/GOD13emad/ChatGPTRemoteCommander.git'}
+$Repo = "https://github.com/$SourceRepository.git"
+$ProcessRepositoryOverride = [Environment]::GetEnvironmentVariable('REMOTE_COMMANDER_REPO_URL','Process')
+if(-not [string]::IsNullOrWhiteSpace($ProcessRepositoryOverride)){
+  if($ProcessRepositoryOverride -cnotin @('https://github.com/GOD13emad/ChatGPTRemoteCommander.git','https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git')){throw 'RC_SOURCE_REPO_DENIED'}
+  if($PSBoundParameters.ContainsKey('SourceRepository') -and $ProcessRepositoryOverride -cne $Repo){throw 'RC_SOURCE_REPO_CONFLICT'}
+  $Repo = $ProcessRepositoryOverride
+}
 if($Repo -cnotin @('https://github.com/GOD13emad/ChatGPTRemoteCommander.git','https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git')){throw 'RC_SOURCE_REPO_DENIED'}
+$SourceRepository = if($Repo -ceq 'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git'){'TandemVector-Labs/ChatGPTRemoteCommander'}else{'GOD13emad/ChatGPTRemoteCommander'}
 
 if ($PowerMode -and $StandardMode) {
   throw 'Use only one of -PowerMode or -StandardMode.'

@@ -354,3 +354,33 @@ test('transport-receipt repair tool is bounded and explicitly non-acknowledging'
   assert.equal(tool.inputSchema.additionalProperties,false);
   assert.match(tool.description,/Does not delete artifacts or synthesize user acknowledgement/i);
 });
+
+
+test('delivery health breakdown is read-only and separates unattempted results by kind/source',()=>{
+  const f=fixture();const store=f.open();
+  try{
+    const completed=store.publish({eventKey:'operation:classify-ok',correlationId:'chat-qa',
+      source:'operation',sourceId:'qa1',kind:'COMPLETED'});
+    const failed=store.publish({eventKey:'operation:classify-failed',correlationId:'chat-qa',
+      source:'operation',sourceId:'qa2',kind:'FAILED'});
+    store.publish({eventKey:'project:classify-blocked',correlationId:'project-qa',
+      source:'project',sourceId:'qa3',kind:'BLOCKED'});
+    const first=store.health();
+    assert.equal(first.pending,3);
+    assert.deepEqual(first.pendingBreakdown, {
+      byKind:{BLOCKED:1,COMPLETED:1,FAILED:1},
+      bySource:{operation:2,project:1},
+      attempted:0
+    });
+    assert.equal(store.get(completed.deliveryId,'chat-qa').state,'COMPLETED_UNDELIVERED');
+    assert.equal(store.get(failed.deliveryId,'chat-qa').state,'COMPLETED_UNDELIVERED');
+    const claim=store.claim({deliveryId:completed.deliveryId,correlationId:'chat-qa',
+      attemptId:'qa-read-one',leaseMs:1000});
+    assert.equal(claim.claimed,true);
+    const second=store.health();
+    assert.equal(second.pending,3);
+    assert.equal(second.pendingBreakdown.attempted,1);
+    assert.equal(second.pendingBreakdown.byKind.COMPLETED,1);
+    assert.equal(store.get(completed.deliveryId,'chat-qa').state,'DELIVERY_PENDING');
+  } finally {store.close();f.dispose();}
+});

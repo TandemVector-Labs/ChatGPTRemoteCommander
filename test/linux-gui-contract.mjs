@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { assertPinnedReleaseDiscovery } from './release-discovery-contract.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -69,7 +70,7 @@ assert.ok(!/(logout|logoff|reboot|shutdown)[ \t]/i.test(installer), 'GUI install
 assert.ok(controller.includes("platform === 'linux'"));
 assert.ok(server.includes("process.platform === 'win32' || process.platform === 'linux'"));
 assert.ok(updater.includes('install_linux_gui_backend'));
-assert.ok(updater.includes('https://github.com/GOD13emad/ChatGPTRemoteCommander/releases/latest') && updater.includes('%{url_effective}'));
+assertPinnedReleaseDiscovery(updater,'linux');
 
 const headlessValidation = process.env.REMOTE_COMMANDER_HEADLESS_VALIDATE === '1';
 if (process.platform === 'linux' && !headlessValidation) {
@@ -130,6 +131,19 @@ exit 0
 `);
     fs.chmodSync(path.join(fakeBin,'gdbus'),0o755);
     fs.chmodSync(path.join(fakeBin,'gnome-extensions'),0o755);
+    // The test simulates GNOME even on KDE/headless Linux. Supply a private
+    // in-memory Gio schema rather than depending on a host GNOME Shell package.
+    // This prevents GLib from aborting the test process when org.gnome.shell
+    // is legitimately absent, while still executing the actual installer.
+    const fakeSchemas=path.join(tmp,'schemas');
+    fs.mkdirSync(fakeSchemas,{recursive:true});
+    fs.writeFileSync(path.join(fakeSchemas,'org.gnome.shell.gschema.xml'),
+      '<schemalist><schema id="org.gnome.shell" path="/org/gnome/shell/">'+
+      '<key name="enabled-extensions" type="as"><default>[]</default></key>'+
+      '<key name="disabled-extensions" type="as"><default>[]</default></key>'+
+      '</schema></schemalist>\n');
+    const schemaCompile=spawnSync('glib-compile-schemas',[fakeSchemas],{encoding:'utf8'});
+    assert.equal(schemaCompile.status,0,schemaCompile.stderr||schemaCompile.stdout);
     const env={
       ...process.env,
       PATH:`${fakeBin}:${process.env.PATH}`,
@@ -138,6 +152,7 @@ exit 0
       XDG_DATA_HOME:fakeData,
       XDG_CONFIG_HOME:path.join(tmp,'config'),
       GSETTINGS_BACKEND:'memory',
+      GSETTINGS_SCHEMA_DIR:fakeSchemas,
       GNOME_TEST_STATE:state,
       GNOME_TEST_CALLS:calls
     };
@@ -163,4 +178,7 @@ exit 0
     fs.rmSync(tmp,{recursive:true,force:true});
   }
 }
+const ownerGuiContract = spawnSync(process.execPath, ['--test','test/gui-owner-delegation.test.mjs'],
+  {encoding:'utf8',timeout:10000});
+assert.equal(ownerGuiContract.status,0,ownerGuiContract.stderr || ownerGuiContract.stdout);
 console.log('LINUX_GUI_CONTRACT_PASS');

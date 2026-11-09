@@ -46,7 +46,10 @@ try {
     $stop = Join-Path (Split-Path -Parent $PSScriptRoot) 'var\GUI_STOP'
     # Fixed local path: a request may not replace the local emergency-stop file.
     $mutex = [Threading.Mutex]::new($false, 'Local\ChatGPTRemoteCommander.GuiInput')
-    try { $owned = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owned=$true; throw 'GUI_PREVIOUS_HELPER_ABANDONED' }
+    # Read-only observation may wait briefly for another legitimate native action.
+    # Input/focus never queues behind a mutex: its observed frame may be stale.
+    $nativeWaitMs = if ($req['action'] -in @('status','screenshot','cursor','listWindows')) { 1500 } else { 0 }
+    try { $owned = $mutex.WaitOne($nativeWaitMs) } catch [Threading.AbandonedMutexException] { $owned=$true; throw 'GUI_PREVIOUS_HELPER_ABANDONED' }
     if (-not $owned) { return @{ok=$false;error='GUI_NATIVE_BUSY';submission='NOT_SUBMITTED'} }
     $oldDpi = [RcGuiNative]::SetThreadDpiAwarenessContext([IntPtr]::new(-4))
     if ($oldDpi -eq [IntPtr]::Zero) { throw 'GUI_DPI_CONTEXT_FAILED' }

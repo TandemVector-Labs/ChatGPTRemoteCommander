@@ -17,12 +17,33 @@ Remove-Item Env:REMOTE_COMMANDER_CONFIG -ErrorAction SilentlyContinue
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $Root 'windows-supervisor-runtime.ps1')
-$runtime = Initialize-WindowsSupervisorRuntime $Root $OwnerUserProfile ([bool]$BootCore)
+$runtime = $null
+try{
+  $runtime = Initialize-WindowsSupervisorRuntime $Root $OwnerUserProfile ([bool]$BootCore) $CredentialScope
+}catch{
+  if(-not $SelfTest){throw}
+  # In a self-test, even an early credential-root trust failure must produce a
+  # structured failure receipt, never a false healthy BootCore result.
+  $early=[pscustomobject]@{ok=$false;bootCore=[bool]$BootCore;credentialScope=$CredentialScope;error=$_.Exception.Message}
+  $earlyJson=$early|ConvertTo-Json -Compress
+  if($SelfTestOutput){
+    $earlyPath=[IO.Path]::GetFullPath($SelfTestOutput)
+    $earlyDir=Split-Path -Parent $earlyPath
+    New-Item -ItemType Directory -Force -Path $earlyDir|Out-Null
+    [IO.File]::WriteAllText($earlyPath,$earlyJson+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
+  }
+  Write-Output $earlyJson
+  exit 3
+}
 $OwnerUserProfile = $runtime.OwnerUserProfile
 $VarDir = Join-Path $Root 'var'
 $CredDir = $runtime.CredDir
 $ProfileDir = $runtime.ProfileDir
 $InstanceRoot = $runtime.InstanceRoot
+if($BootCore){
+  $script:MachineRuntimeRoot=$runtime.MachineRuntimeRoot
+  $env:REMOTE_COMMANDER_CONFIG=Join-Path $script:MachineRuntimeRoot 'primary\config.json'
+}
 New-Item -ItemType Directory -Force -Path $VarDir,$CredDir,$InstanceRoot | Out-Null
 
 function Write-SupervisorLog([string]$Message) {
@@ -36,12 +57,10 @@ if (-not $SelfTest) {
   $mutex = [Threading.Mutex]::new($false, 'Local\ChatGPTRemoteCommanderSupervisor', [ref]$created)
   if (-not $created) { exit 0 }
 }
-
 function Get-McpHealth([int]$Port) {
   try { return Invoke-RestMethod "http://127.0.0.1:$Port/health" -TimeoutSec 2 }
   catch { return $null }
 }
-
 function Test-McpHealth([int]$Port,[string]$ExpectedConfigSha='',[string]$ExpectedProfile='') {
   $h = Get-McpHealth $Port
   if (-not $h -or -not $h.ok -or $h.name -ne 'chatgpt-remote-commander') { return $false }
@@ -53,6 +72,7 @@ function Test-McpHealth([int]$Port,[string]$ExpectedConfigSha='',[string]$Expect
 $script:PrimaryHealthFailures = 0
 
 function Find-TunnelExe {
+  if($BootCore){return Get-RcMachineTunnelExecutable}
   $stableAppRoot = Join-Path (Join-Path $OwnerUserProfile 'AppData\Local') 'ChatGPTRemoteCommander\app'
   $stateFile = Join-Path $stableAppRoot 'var\tunnel-client.json'
   if (-not (Test-Path -LiteralPath $stateFile -PathType Leaf)) {
@@ -72,7 +92,6 @@ function Find-TunnelExe {
 
   return $exe
 }
-
 function Get-InstanceRecord([string]$Profile) {
   if (-not (Test-RcProfileName $Profile)) { throw "invalid instance profile $Profile" }
   $dir = Join-Path $InstanceRoot $Profile
@@ -91,7 +110,6 @@ function Get-InstanceRecord([string]$Profile) {
   if ([int]$cfg.port -ne $port -or [string]$cfg.instance.profile -ne $Profile -or $cfg.instance.isolated -ne $true) { throw "instance config identity mismatch $Profile" }
   return [pscustomobject]@{ Profile=$Profile; Port=$port; ConfigPath=$actualConfig; ConfigSha256=$sha; StateDir=$dir }
 }
-
 function Stop-OwnedMcpInstance($Instance, [int]$ListenerPid) {
   $markerFile = Join-Path $Instance.StateDir 'mcp-runtime.json'
   if (-not (Test-Path -LiteralPath $markerFile -PathType Leaf)) {
@@ -111,7 +129,6 @@ function Stop-OwnedMcpInstance($Instance, [int]$ListenerPid) {
   }
   throw "owned instance did not release port $($Instance.Port)"
 }
-
 function Start-McpInstance($Instance) {
   if (Test-McpHealth $Instance.Port $Instance.ConfigSha256 $Instance.Profile) { return }
   $listener = Get-NetTCPConnection -State Listen -LocalPort $Instance.Port -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -162,12 +179,10 @@ function Get-ManagedProfiles {
   }
   return $items
 }
-
 function Test-TunnelReady([int]$Port) {
   if ($Port -le 0) {
     return $false
   }
-
   try {
     $response = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/readyz" -UseBasicParsing -TimeoutSec 2
     return ($response.StatusCode -eq 200 -and $response.Content.Trim() -eq 'ready')
@@ -175,7 +190,23 @@ function Test-TunnelReady([int]$Port) {
     return $false
   }
 }
-
+$script:TunnelControlPlaneNextCheck = @{}; $script:TunnelControlPlaneLastState = @{}
+function Observe-TunnelControlPlane([string]$Profile,[int]$Port) {
+  if($Port -le 0){return}; $now=[DateTimeOffset]::UtcNow; $next=$script:TunnelControlPlaneNextCheck[$Profile]
+  if($next -and $now -lt [DateTimeOffset]$next){return}
+  $script:TunnelControlPlaneNextCheck[$Profile]=$now.AddSeconds(30)
+  try{$r=Invoke-RestMethod "http://127.0.0.1:$Port/health/control-plane" -TimeoutSec 2 -ErrorAction Stop}catch{return}
+  $previous=[string]$script:TunnelControlPlaneLastState[$Profile]
+  if([string]$r.status -eq 'degraded') {
+    $category=[string]$r.details.failure_category; if($category -notin @('http_error','network_error','timeout','auth_error','transport_error')){$category='other'}
+    $http=[int]$r.details.http_status; if($http -lt 100 -or $http -gt 599){$http=0}
+    $key="degraded/$category/$http"; if($previous -ne $key){Write-SupervisorLog "TUNNEL_CONTROL_PLANE_DEGRADED profile=$Profile category=$category http=$http"}
+    $script:TunnelControlPlaneLastState[$Profile]=$key
+  } elseif([string]$r.status -eq 'ok') {
+    if($previous.StartsWith('degraded/')){Write-SupervisorLog "TUNNEL_CONTROL_PLANE_RECOVERED profile=$Profile"}
+    $script:TunnelControlPlaneLastState[$Profile]='ok'
+  }
+}
 function Get-TunnelProcess([string]$Profile, [string]$Exe) {
   $expected = [IO.Path]::GetFullPath($Exe)
   $escaped = [regex]::Escape($Profile)
@@ -189,7 +220,6 @@ function Get-TunnelProcess([string]$Profile, [string]$Exe) {
     } |
     Select-Object -First 1
 }
-
 function Start-TunnelProfile($Item) {
   if (-not (Test-Path -LiteralPath $Item.Credential -PathType Leaf)) {
     throw "credential not enrolled for profile $($Item.Profile)"
@@ -248,7 +278,6 @@ function Start-TunnelProfile($Item) {
     $plain = $null
   }
 }
-
 . (Join-Path $Root 'supervisor-routing.ps1')
 
 if ($SelfTest) {
@@ -279,11 +308,10 @@ if ($SelfTest) {
   if (-not $result.ok) { exit 3 }
   exit 0
 }
-
 $missingLogged = @{}
+$ownerUnknownLogged = @{}
 try {
   Write-SupervisorLog "SUPERVISOR_STARTED pid=$PID root=$Root"
-
   while ($true) {
     try {
       $primaryReady=$true
@@ -309,7 +337,17 @@ try {
           }
           [void]$missingLogged.Remove($item.Profile)
           $process = Get-TunnelProcess $item.Profile $exe
-          if (-not $process -or -not (Test-TunnelReady $item.HealthPort)) { Start-TunnelProfile $item }
+          $ready = Test-TunnelReady $item.HealthPort
+          Observe-TunnelControlPlane $item.Profile $item.HealthPort
+          if (-not $process -and $ready) {
+            if (-not $ownerUnknownLogged.ContainsKey($item.Profile)) {
+              Write-SupervisorLog "TUNNEL_OWNER_UNVERIFIED profile=$($item.Profile) port=$($item.HealthPort); skipping competing launch"
+              $ownerUnknownLogged[$item.Profile] = $true
+            }
+            continue
+          }
+          [void]$ownerUnknownLogged.Remove($item.Profile)
+          if (-not $process -or -not $ready) { Start-TunnelProfile $item }
         } catch {
           Write-SupervisorLog "PROFILE_ITERATION_ERROR profile=$($item.Profile) $($_.Exception.Message)"
           continue

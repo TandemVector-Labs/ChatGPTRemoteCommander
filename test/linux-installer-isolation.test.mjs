@@ -185,3 +185,58 @@ test('Linux canonical installation reached through an alias retains candidate-fi
   assert.deepEqual(fs.readFileSync(f.route), routeBefore);
   assert.equal(fs.existsSync(f.npmCalls), false);
 });
+
+
+function installFailureFixture(t) {
+  const f = fixture(t);
+  const source = path.join(f.root, 'source');
+  // This stub guarantees a post-checkout, pre-activation failure without any
+  // network access or privileged operations.
+  write(path.join(source, 'tools/install-tunnel-client-linux.sh'),
+    "#!/bin/sh\nprintf 'FIXTURE_TUNNEL_FAILURE\\n' >&2\nexit 79\n", true);
+  run('git', ['add', 'tools/install-tunnel-client-linux.sh'], { cwd: source });
+  run('git', ['commit', '-m', 'test: simulate preactivation dependency failure'], { cwd: source });
+  const commit = run('git', ['rev-parse', 'HEAD'], { cwd: source });
+  return { ...f, source, commit };
+}
+
+test('new Linux installation quarantines only its own incomplete checkout after dependency failure', linuxOnly, t => {
+  const f = installFailureFixture(t);
+  // fixture() creates an older existing test installation; discard only this
+  // fixture-owned directory to exercise true first installation semantics.
+  fs.rmSync(f.target, { recursive: true, force: true });
+  const route = fs.readFileSync(f.route), config = fs.readFileSync(f.activeConfig);
+  const result = spawnSync('bash', [f.installedScript, '--install-dir', f.target, '--source-ref', 'HEAD',
+    '--expected-commit', f.commit, '--standard-mode'], { cwd: f.root, env: f.env, encoding: 'utf8', timeout: 30000 });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 79, result.stdout + '\n' + result.stderr);
+  assert.match(result.stderr, /FIXTURE_TUNNEL_FAILURE/);
+  assert.match(result.stderr, /FRESH_INSTALL_QUARANTINED/);
+  assert.equal(fs.existsSync(f.target), false, 'failed new installation must not remain active at target');
+  const quarantines = fs.readdirSync(f.root).filter(name => name.startsWith('custom-install.failed-install-'));
+  assert.equal(quarantines.length, 1, 'preserve exactly one recoverable quarantine');
+  const saved = path.join(f.root, quarantines[0]);
+  assert.equal(run('git', ['rev-parse', 'HEAD'], { cwd: saved }), f.commit);
+  assert.equal(fs.existsSync(path.join(saved, 'config.local.json')), false);
+  assert.deepEqual(fs.readFileSync(f.route), route);
+  assert.deepEqual(fs.readFileSync(f.activeConfig), config);
+  assert.equal(fs.existsSync(f.effects), false, 'no production services or GUIs may be touched');
+});
+
+test('existing custom Linux install is preserved when a later dependency fails', linuxOnly, t => {
+  const f = installFailureFixture(t);
+  const sentinel = path.join(f.target, 'owner-sentinel');
+  write(sentinel, 'user data must survive\n');
+  const before = fs.readFileSync(sentinel);
+  const result = spawnSync('bash', [f.installedScript, '--install-dir', f.target, '--source-ref', 'HEAD',
+    '--expected-commit', f.commit, '--standard-mode'], { cwd: f.root, env: f.env, encoding: 'utf8', timeout: 30000 });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 79, result.stdout + '\n' + result.stderr);
+  assert.match(result.stderr, /FIXTURE_TUNNEL_FAILURE/);
+  assert.doesNotMatch(result.stderr, /FRESH_INSTALL_QUARANTINED/);
+  assert.equal(fs.existsSync(f.target), true);
+  assert.deepEqual(fs.readFileSync(sentinel), before);
+  assert.equal(run('git', ['rev-parse', 'HEAD'], { cwd: f.target }), f.commit);
+  assert.equal(fs.readdirSync(f.root).filter(name => name.startsWith('custom-install.failed-install-')).length, 0);
+  assert.equal(fs.existsSync(f.effects), false);
+});

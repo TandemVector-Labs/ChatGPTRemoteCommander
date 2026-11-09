@@ -1,0 +1,48 @@
+name: Linux Control Center portable QA package (NoPromote)
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/linux-control-center-preview-package.yml'
+      - 'tools/build-linux-control-center-preview.py'
+      - 'test/test_linux_control_center_archive.py'
+      - 'test/test_linux_control_center_userlocal_lifecycle.py'
+      - 'tools/manage-linux-control-center-qa.py'
+      - 'desktop/linux-control-center/**'
+      - 'package.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-gtk-qa-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  portable-qa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+      - name: Pin exact candidate and exercise deterministic, non-installing packaging
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+          python3 -B -m unittest discover -s test -p test_linux_control_center_archive.py -v
+          python3 -B -m unittest discover -s test -p test_linux_control_center_userlocal_lifecycle.py -v
+          python3 -B -m unittest discover -s desktop/linux-control-center -p 'test*.py' -v
+          python3 tools/build-linux-control-center-preview.py --output "$RUNNER_TEMP/Remote-Commander-Linux-Control-Center-QA.zip"
+          sha256sum "$RUNNER_TEMP/Remote-Commander-Linux-Control-Center-QA.zip"
+          echo LINUX_GTK_PORTABLE_QA_NO_INSTALL_PASS
+      - name: Upload isolated QA archive (not public release)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-control-center-portable-qa
+          retention-days: 7
+          if-no-files-found: error
+          path: ${{ runner.temp }}/Remote-Commander-Linux-Control-Center-QA.zip

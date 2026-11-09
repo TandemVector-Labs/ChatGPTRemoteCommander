@@ -1,26 +1,13 @@
-# Windows unsigned release policy — v0.10.23
+# Windows unsigned release policy: v0.10.24 only
 
-Owner-directed, version-scoped distribution option (2026-10-14). Traditional code-signing certificate enrollment is unavailable. This policy does **not** claim that the final Windows installer is Authenticode-signed.
+**Approval scope: owner-authorized public unsigned PREVIEW; not Stable.** The user explicitly approved an unsigned Windows distribution for this specific version on 2026-10-16. The previous policy was fail-closed; this decision authorizes only the v0.10.24 version-scoped exception with exact GitHub Sigstore provenance. It does not grant consent for future versions, silent installation, or any bypass of Windows protections.
 
-## Requirements for this one release
-- Immutable annotated `v0.10.23` tag referencing the exact release source commit; release notes and the fixed 20-asset manifest must be present.
-- `SHA256SUMS.txt` for all release assets verified at publish time.
-- A **GitHub Sigstore build-provenance attestation** must be created, then independently verified for the final Windows installer against the expected repository, signing workflow, tag and source commit **before** GitHub Release publication.
-- An explicit allowlist for *this tag only* in `docs/UNSIGNED_WINDOWS_RELEASE_POLICY.json`. This decision must not generalize to future versions.
-- The release notes must warn of the missing Authenticode publisher identity and potential SmartScreen/Smart App Control warnings. Do not disable or evade Windows security policies.
-- If trusted Authenticode signing becomes available, use that route. If neither a valid signature nor a verifiable GitHub attestation exists, the release must fail closed.
+**Windows installer: UNSIGNED.** Authenticode publisher identity is absent. SmartScreen and Smart App Control may warn, classify the binary as **Unknown publisher**, or block it. GitHub organization/maintainer names, exact source tags, SHA256SUMS and GitHub attestation do not replace Authenticode; none is a Microsoft-trusted signer. We will not disable or bypass Defender, SmartScreen, Smart App Control, UAC or certificate trust checks.
 
-## Verification by recipient
-Verify the file SHA-256 against the `SHA256SUMS.txt` fetched from the matching official GitHub release, and run:
+**Mandatory release integrity:** use a fresh immutable annotated v0.10.24 Git tag matching its qualified exact commit; require all 20 assets, sorted complete SHA256SUMS checks, and independent GitHub Sigstore attestation verification of the exact tag, source digest and expected signer workflow. Recheck actual installer signature status. If NotSigned, the verifier may return UNSIGNED_WITH_REQUIRED_SIGSTORE_PROVENANCE for v0.10.24 only. Stable v0.10.20 and existing v0.10.23 Draft remain untouched.
 
-```bash
-gh attestation verify Remote-Commander-Setup-v0.10.23.exe \
-  --repo GOD13emad/ChatGPTRemoteCommander \
-  --source-ref refs/tags/v0.10.23 \
-  --signer-workflow GOD13emad/ChatGPTRemoteCommander/.github/workflows/release-sync.yml
-```
+**Mandatory visibility:** release notes must display source credits, lack of Authenticode, prerelease scope, remaining native GUI/CEF and J01, Work same-chat ACK and fleet risk. Automatic stable updates are not authorized.
 
-`gh attestation verify` checks where the artifact was built and which source was used. It does **not** grant OS publisher trust, guarantee absence of bugs/malware, or silence SmartScreen. If Windows refuses execution under the machine's policy, do not disable security controls.
+**Project brand:** TandemVector Labs is the GitHub display name of organization Usefull-Skills; its legal registration has not been independently verified. Publishing Core source repository: GOD13emad/ChatGPTRemoteCommander. Primary release/source maintainer: Aliakbar Emadoddin (@GOD13emad); supporting contributor: MMZ (@mohammadmohammadzadeh19960-code).
 
-## Scope
-Applies only to the release **distribution gate**, not to automatic unattended upgrades. The four deployed stable Core `0.10.20` instances remain unchanged until the separate compatibility, data-preservation and rollback gates pass.
+The approval evidence is the user instruction of 2026-10-16 and this bounded policy. It is not a Windows OS signature.
