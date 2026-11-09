@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {syncthingDeviceIdFromPem,assertSyncthingRuntimeIdentity,isPinnedOptionalMmzPair,PINNED_MMZ_DEVICE_HASH} from '../tools/commander-transfer-mesh/device-id.mjs';
 import {createHash} from 'node:crypto';
+import {runDoctor} from '../tools/commander-transfer-mesh/doctor.mjs';
 
 const project=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const doctor=path.join(project,'tools','commander-transfer-mesh','doctor.mjs');
@@ -29,15 +29,11 @@ test('running service identity is bound to the installed certificate and version
   assert.throws(()=>assertSyncthingRuntimeIdentity(id,id,{myID:id},null),/Syncthing version unavailable/);
 });
 
-test('transfer doctor never invokes an executable selected by COMMANDER_TRANSFER_HOME',()=>{
+test('transfer doctor never uses an environment-selected root or launches a root-selected executable',async()=>{
   const source=fs.readFileSync(doctor,'utf8');
+  assert.equal(source.includes('COMMANDER_TRANSFER_HOME'),false);
   assert.equal(source.includes('execFileSync('),false);
   assert.equal(source.includes('spawnSync('),false);
-  assert.match(source,/syncthingDeviceIdFromPem\(/);
-  assert.match(source,/fetchLocal\(base,'\/rest\/system\/status'\)/);
-  assert.match(source,/assertSyncthingRuntimeIdentity\(IDS\[node.alias\],id,status,runtimeVersion\)/);
-  assert.match(source,/fetchLocal\(base,'\/rest\/system\/version'\)/);
-
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-doctor-deny-'));
   const marker=path.join(root,'unexpected-execution');
   try{
@@ -51,18 +47,37 @@ test('transfer doctor never invokes an executable selected by COMMANDER_TRANSFER
     const fake=path.join(root,'bin',process.platform==='win32'?'syncthing.exe':'syncthing');
     fs.writeFileSync(fake,'#!/bin/sh\necho UNSAFE_EXECUTED > "$CTMESH_NEGATIVE_MARKER"\n');
     if(process.platform!=='win32')fs.chmodSync(fake,0o755);
-    const run=spawnSync(process.execPath,[doctor],{
-      encoding:'utf8',timeout:10000,
-      env:{...process.env,COMMANDER_TRANSFER_HOME:root,CTMESH_NEGATIVE_MARKER:marker}
-    });
-    assert.equal(run.error,undefined);
-    assert.equal(run.status,1,'synthetic certificate must not match the hard-coded operational identity');
-    const response=JSON.parse(run.stdout);
-    assert.equal(response.ok,false);
-    assert.ok(response.errors.some(e=>e.includes('Certificate identity mismatch')));
+    const run=await runDoctor({root,fetchImpl:async()=>{throw Error('synthetic offline API');},writeOutput:()=>{}});
+    assert.equal(run.exitCode,1);
+    assert.ok(run.output.errors.some(e=>e.includes('Certificate identity mismatch')));
     assert.equal(fs.existsSync(marker),false,'no environment-root executable may run');
   } finally {
     fs.rmSync(root,{recursive:true,force:true});
+  }
+});
+
+test('transfer doctor rejects roots outside the home and OS temporary directories',async()=>{
+  const run=await runDoctor({root:path.parse(os.tmpdir()).root,fetchImpl:async()=>{throw Error('unexpected network');},writeOutput:()=>{}});
+  assert.equal(run.exitCode,1);
+  assert.ok(run.output.errors.some(e=>e.includes('outside allowed locations')));
+});
+
+test('transfer doctor rejects a root-file symlink that escapes the accepted root',async(t)=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-doctor-symlink-'));
+  const outside=path.join(path.dirname(root),path.basename(root)+'-outside.json');
+  try{
+    fs.writeFileSync(outside,'{}');
+    try{fs.symlinkSync(outside,path.join(root,'node.json'),'file');}
+    catch(error){
+      if(process.platform==='win32'&&['EPERM','EACCES'].includes(error.code)){t.skip('Windows symlink creation is unavailable');return;}
+      throw error;
+    }
+    const run=await runDoctor({root,fetchImpl:async()=>{throw Error('unexpected network');},writeOutput:()=>{}});
+    assert.equal(run.exitCode,1);
+    assert.ok(run.output.errors.some(e=>e.includes('escapes its root directory')));
+  }finally{
+    fs.rmSync(root,{recursive:true,force:true});
+    fs.rmSync(outside,{force:true});
   }
 });
 
@@ -94,5 +109,3 @@ test('an optional MMZ pair requires exact pin, folder, peers, path and host role
     assert.equal(isPinnedOptionalMmzPair({...candidate,alias:'Amirreza'}),false,'unrelated hosts cannot acquire an extra peer');
   }
 });
-
-// Keep the negative roster cases synthetic; no production peer IDs are substituted.

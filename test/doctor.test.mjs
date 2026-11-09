@@ -145,3 +145,5 @@ test('runDoctor reports missing core tool', async () => {
     assert.match(report.checks.find((item) => item.name === 'tools/list').detail, /missing:/);
   });
 });
+
+// Doctor regression tests remain source-only and do not mutate live Syncthing state.
