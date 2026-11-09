@@ -59,3 +59,5 @@ for(const file of browserHelpers){
   assert.throws(()=>literal(undefined),/BROWSER_INPUT_INVALID/,'fail closed for missing string');
  });
 }
+
+// These checks compare static helper source; repository text is never evaluated as code.
