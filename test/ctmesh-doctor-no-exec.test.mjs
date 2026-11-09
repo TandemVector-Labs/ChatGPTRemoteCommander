@@ -54,3 +54,28 @@ test('transfer doctor never uses an environment-selected root or launches a root
     fs.rmSync(root,{recursive:true,force:true});
   }
 });
+
+test('transfer doctor rejects roots outside the home and OS temporary directories',async()=>{
+  const run=await runDoctor({root:path.parse(os.tmpdir()).root,fetchImpl:async()=>{throw Error('unexpected network');},writeOutput:()=>{}});
+  assert.equal(run.exitCode,1);
+  assert.ok(run.output.errors.some(e=>e.includes('outside allowed locations')));
+});
+
+test('transfer doctor rejects a root-file symlink that escapes the accepted root',async(t)=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-doctor-symlink-'));
+  const outside=path.join(path.dirname(root),path.basename(root)+'-outside.json');
+  try{
+    fs.writeFileSync(outside,'{}');
+    try{fs.symlinkSync(outside,path.join(root,'node.json'),'file');}
+    catch(error){
+      if(process.platform==='win32'&&['EPERM','EACCES'].includes(error.code)){t.skip('Windows symlink creation is unavailable');return;}
+      throw error;
+    }
+    const run=await runDoctor({root,fetchImpl:async()=>{throw Error('unexpected network');},writeOutput:()=>{}});
+    assert.equal(run.exitCode,1);
+    assert.ok(run.output.errors.some(e=>e.includes('escapes its root directory')));
+  }finally{
+    fs.rmSync(root,{recursive:true,force:true});
+    fs.rmSync(outside,{force:true});
+  }
+});
