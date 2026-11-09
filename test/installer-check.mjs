@@ -79,6 +79,15 @@ for (const required of [
   "$guiEnabled = $false # Server installer defaults headless regardless of Windows SKU or RDP."
 ]) if (!windowsServerInstaller.includes(required)) throw new Error('Server install must select headless by default even on Client-SKU hosts: '+required);
 const serverCanaryWorkflow = readFileSync('.github/workflows/server-install-canary.yml','utf8');
+// Only the two approved official GitHub source repositories may be selected on Windows.
+for (const [label, installer] of [['install.ps1', windowsInstaller], ['server-install-windows.ps1', windowsServerInstaller]]) {
+  for (const required of ['$env:REMOTE_COMMANDER_REPO_URL', '^https://github[.]com/(?:GOD13emad|TandemVector-Labs)/ChatGPTRemoteCommander[.]git$', 'Unapproved source repository URL']) {
+    if (!installer.includes(required)) throw new Error(`${label} missing bounded source override: ${required}`);
+  }
+}
+for (const required of ['REMOTE_COMMANDER_REPO_URL: https://github.com/${{ github.repository }}.git', '-e REMOTE_COMMANDER_REPO_URL="$REMOTE_COMMANDER_REPO_URL"']) {
+  if (!serverCanaryWorkflow.includes(required)) throw new Error(`Canary must test its own checkout's immutable source: ${required}`);
+}
 for (const required of [
   "$script:BootstrapGitHubToken = [Environment]::GetEnvironmentVariable('RC_GITHUB_API_TOKEN','Process')",
   "[Environment]::SetEnvironmentVariable('RC_GITHUB_API_TOKEN',$null,'Process')",
