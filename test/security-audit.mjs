@@ -172,3 +172,5 @@ if (findings.length) {
 }
 console.log('SECURITY_AUDIT_PASS');
 console.log('No secret-key, tunnel-id, private-key, bearer-token, GitHub-token, tracked local-config, or developer-path finding detected.');
+
+// Provenance pins are intentionally exact; do not widen fixture exceptions to other commits.
