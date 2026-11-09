@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import fs from 'node:fs';
@@ -263,4 +264,95 @@ test('router runtime metadata write failure releases listener and preserves stat
    fs.writeFileSync=originalWrite;
    fs.rmSync(root,{recursive:true,force:true});
  }
+});
+
+test('router CAS serializes separate processes and rejects concurrent stale generation',()=>{
+ const root=temp(),file=path.join(root,'state.json'),oldRename=fs.renameSync;
+ const state={schema:1,profile:'qa',generation:1,active:{port:41001,version:'qa',commit:'a'.repeat(40),configSha256:'b'.repeat(64)}};
+ const next={...state,generation:2,active:{...state.active,port:41002}};
+ const competing={...state,generation:2,active:{...state.active,port:41003}};
+ const worker="import {writeRouterStateAtomic} from "+JSON.stringify(new URL('../src/stable-router.mjs',import.meta.url).href)+";\n"+
+   "const file=process.env.ROUTER_QA_FILE, state="+JSON.stringify(competing)+";\n"+
+   "try {writeRouterStateAtomic(file,state,1);process.exitCode=7;} catch(error) {process.exitCode=error?.message==='ROUTER_STATE_WRITE_LOCKED'?0:9;}\n";
+ let seen=false,child;
+ try {
+   writeRouterStateAtomic(file,state);
+   fs.renameSync=function(src,dst){
+     if(!seen&&dst===file){
+       seen=true;
+       child=spawnSync(process.execPath,['--input-type=module','-e',worker],{
+         env:{...process.env,ROUTER_QA_FILE:file},encoding:'utf8',timeout:5000
+       });
+     }
+     return oldRename.apply(fs,arguments);
+   };
+   writeRouterStateAtomic(file,next,1);
+   assert.equal(seen,true);
+   assert.equal(child?.status,0,JSON.stringify({status:child?.status,signal:child?.signal,stderr:child?.stderr}));
+   assert.equal(JSON.parse(fs.readFileSync(file,'utf8')).active.port,41002);
+   fs.renameSync=oldRename;
+   assert.throws(()=>writeRouterStateAtomic(file,competing,1),/ROUTER_GENERATION_CONFLICT/);
+   writeRouterStateAtomic(file,{...next,generation:3},2);
+   assert.equal(JSON.parse(fs.readFileSync(file,'utf8')).generation,3);
+   assert.equal(fs.existsSync(file+'.write-lock'),false);
+ }finally{fs.renameSync=oldRename;fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('router pre-existing lock is fail-closed and never removed by a losing writer',()=>{
+ const root=temp(),file=path.join(root,'state.json'),lock=file+'.write-lock';
+ const state={schema:1,profile:'qa',generation:1,active:{port:41001,version:'qa',commit:'a'.repeat(40),configSha256:'b'.repeat(64)}};
+ try{
+   fs.writeFileSync(lock,'SYNTHETIC_UNCERTAIN_LOCK',{mode:0o600,flag:'wx'});
+   assert.throws(()=>writeRouterStateAtomic(file,state),/ROUTER_STATE_WRITE_LOCKED/);
+   assert.equal(fs.readFileSync(lock,'utf8'),'SYNTHETIC_UNCERTAIN_LOCK');
+   assert.equal(fs.existsSync(file),false);
+   fs.unlinkSync(lock);
+   writeRouterStateAtomic(file,state);
+   assert.equal(fs.existsSync(lock),false);
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('router refuses POSIX group-writable state parent', {skip:process.platform==='win32'},()=>{
+ const root=temp(),file=path.join(root,'state.json');
+ const state={schema:1,profile:'qa',generation:1,active:{port:41001,version:'qa',commit:'a'.repeat(40),configSha256:'b'.repeat(64)}};
+ try{
+   fs.chmodSync(root,0o770);
+   assert.throws(()=>writeRouterStateAtomic(file,state),/ROUTER_STATE_UNTRUSTED_PARENT/);
+   assert.equal(fs.existsSync(file),false);
+ }finally{fs.chmodSync(root,0o700);fs.rmSync(root,{recursive:true,force:true});}
+});
+
+
+test('router rejects a group/world-writable nonsticky ancestor before first state write', {skip:process.platform==='win32'},()=>{
+ const root=temp(),outer=path.join(root,'writable-ancestor'),privateDir=path.join(outer,'private');
+ const file=path.join(privateDir,'state.json');
+ const state={schema:1,profile:'qa',generation:1,active:{port:41001,version:'qa',commit:'a'.repeat(40),configSha256:'b'.repeat(64)}};
+ try {
+  fs.mkdirSync(privateDir,{recursive:true,mode:0o700});fs.chmodSync(outer,0o777);
+  assert.throws(()=>writeRouterStateAtomic(file,state),/ROUTER_STATE_UNTRUSTED_ANCESTOR/);
+  assert.equal(fs.existsSync(file),false);
+  assert.equal(fs.existsSync(file+'.write-lock'),false);
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('router rechecks its namespace after lock open to stop initial write ancestor swap', {skip:process.platform==='win32'},()=>{
+ const root=temp(),outer=path.join(root,'controlled'),privateDir=path.join(outer,'private'),outside=path.join(root,'outside');
+ const file=path.join(privateDir,'state.json'),outsideFile=path.join(outside,'state.json');
+ const state={schema:1,profile:'qa',generation:1,active:{port:41001,version:'qa',commit:'a'.repeat(40),configSha256:'b'.repeat(64)}};
+ const originalOpen=fs.openSync;let swapped=false;
+ try{
+  fs.mkdirSync(privateDir,{recursive:true,mode:0o700});fs.mkdirSync(outside,{mode:0o700});
+  fs.writeFileSync(outsideFile,'OUTSIDE_SENTINEL');
+  fs.openSync=function(p,...args){
+   if(!swapped&&p===file+'.write-lock'){
+    swapped=true;fs.renameSync(privateDir,privateDir+'-moved');fs.symlinkSync(outside,privateDir,'dir');
+   }
+   return originalOpen.call(fs,p,...args);
+  };
+  assert.throws(()=>writeRouterStateAtomic(file,state),/ROUTER_LINK_NOT_ALLOWED/);
+  assert.equal(swapped,true);
+  assert.equal(fs.readFileSync(outsideFile,'utf8'),'OUTSIDE_SENTINEL');
+  assert.equal(fs.existsSync(path.join(privateDir+'-moved','state.json')),false);
+  assert.equal(fs.existsSync(path.join(outside,'state.json.write-lock')),false);
+ }finally{fs.openSync=originalOpen;fs.rmSync(root,{recursive:true,force:true});}
 });

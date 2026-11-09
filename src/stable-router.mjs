@@ -80,16 +80,70 @@ function writeAtomicPrivateJson(file,value) {
     throw error;
   }
 }
+// POSIX-only: every ancestor must have trusted ownership. A sticky, writable
+// ancestor (e.g. /tmp) is acceptable only if the next directory entry belongs
+// to this user or root; an ordinary group/world-writable ancestor is not.
+// This is permission-based path trust, NOT a native directory-handle pin.
+function assertTrustedRouterWriteAncestors(dir) {
+  let cursor=path.parse(dir).root;
+  let parent=fs.lstatSync(cursor);
+  const uid=process.platform==='win32' ? null : process.getuid();
+  const safeOwner=entry=>entry.uid===uid || entry.uid===0;
+  for(const part of path.relative(cursor,dir).split(path.sep).filter(Boolean)){
+    const next=path.join(cursor,part),child=fs.lstatSync(next);
+    if(!parent.isDirectory()||parent.isSymbolicLink() || !child.isDirectory()||child.isSymbolicLink()) fail('ROUTER_STATE_UNTRUSTED_ANCESTOR');
+    if(process.platform!=='win32'){
+      if(!safeOwner(parent)||!safeOwner(child)) fail('ROUTER_STATE_UNTRUSTED_ANCESTOR');
+      if(parent.mode&0o022){
+        if(!(parent.mode&0o1000)||!safeOwner(child)) fail('ROUTER_STATE_UNTRUSTED_ANCESTOR');
+      }
+    }
+    cursor=next;parent=child;
+  }
+  if(!parent.isDirectory()||parent.isSymbolicLink()) fail('ROUTER_STATE_UNTRUSTED_ANCESTOR');
+  if(process.platform!=='win32' && (!safeOwner(parent)||(parent.mode&0o022))) fail('ROUTER_STATE_UNTRUSTED_PARENT');
+}
+// A local-filesystem, cooperative-writer mutex. Never auto-reclaim an orphan:
+// an uncertain prior writer must be reconciled before a new state transition.
+function withRouterStateWriteLock(file,action) {
+  const dir=path.dirname(file);
+  assertTrustedRouterWriteAncestors(dir);
+  const lock=file+'.write-lock';
+  let fd;
+  try { fd=fs.openSync(lock,'wx',0o600); }
+  catch(error){ if(error?.code==='EEXIST') fail('ROUTER_STATE_WRITE_LOCKED'); throw error; }
+  try {
+    const owner=fs.fstatSync(fd);
+    if(!owner.isFile()||owner.nlink!==1) fail('ROUTER_STATE_LOCK_TAMPERED');
+    // The namespace may have changed after the initial localFile/ancestor
+    // checks but before exclusive lock creation. Fail closed before writing.
+    if(localFile(file)!==file) fail('ROUTER_LOCAL_FILE_REQUIRED');
+    assertTrustedRouterWriteAncestors(dir);
+    return action();
+  }finally{
+    const owner=fs.fstatSync(fd);
+    let candidate;
+    try { candidate=fs.lstatSync(lock); } catch {}
+    const same=candidate?.isFile()&&candidate.nlink===1&&candidate.dev===owner.dev&&candidate.ino===owner.ino;
+    fs.closeSync(fd);
+    if(!same) fail('ROUTER_STATE_LOCK_TAMPERED');
+    fs.unlinkSync(lock);
+  }
+}
 export function writeRouterStateAtomic(file,state,expectedGeneration=null) {
   file=localFile(file);
   const next=validateRouterState(state);
-  if(fs.existsSync(file) && expectedGeneration!==null){
-    const current=readRouterState(file);
-    if(current.generation!==expectedGeneration) fail('ROUTER_GENERATION_CONFLICT');
-  }
   fs.mkdirSync(path.dirname(file),{recursive:true});
-  writeAtomicPrivateJson(file,next);
-  return next;
+  file=localFile(file);
+  return withRouterStateWriteLock(file,()=>{
+    if(expectedGeneration!==null){
+      if(!fs.existsSync(file)) fail('ROUTER_GENERATION_CONFLICT');
+      const current=readRouterState(file);
+      if(current.generation!==expectedGeneration) fail('ROUTER_GENERATION_CONFLICT');
+    }
+    writeAtomicPrivateJson(file,next);
+    return next;
+  });
 }
 function collect(req) {
   return new Promise((resolve,reject)=>{
@@ -263,7 +317,7 @@ export async function startRouter({listenPort,stateFile,runtimeFile=null,host=LO
     if(runtimeFile){
       runtimeFile=localFile(runtimeFile);fs.mkdirSync(path.dirname(runtimeFile),{recursive:true});
       const state={schema:1,pid:process.pid,host,port:listenPort,stateFile,sourceSha256:ROUTER_SOURCE_SHA256,startedAt:new Date().toISOString()};
-      writeAtomicPrivateJson(runtimeFile,state);
+      withRouterStateWriteLock(runtimeFile,()=>writeAtomicPrivateJson(runtimeFile,state));
     }
   }catch(error){
     clearInterval(routeTimer);
