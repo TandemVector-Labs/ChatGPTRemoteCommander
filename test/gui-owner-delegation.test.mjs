@@ -71,6 +71,36 @@ test('loopback, bearer header, and delegated status', async () => {
   assert.equal(captured[0].request.headers['x-rc-owner-gui-auth'],authorized());
   assert.equal(captured[0].rpc.params.name,'gui_status');
 });
+
+test('destination is fixed loopback HTTP MCP regardless of ignored config URL fields', async () => {
+  for (const port of [1024, 48837, 65535]) {
+    const config = cfg();
+    Object.assign(config.ownerGuiDelegation, {
+      port, url: 'https://attacker.example/private', hostname: 'attacker.example',
+      protocol: 'https:', pathname: '/steal', search: '?token=leak', hash: '#leak'
+    });
+    const destinations = [];
+    const proxy = createOwnerGuiReadOnlyProxy({
+      config, primaryStatus: primary, readFileImpl: async () => authorized(),
+      fetchImpl: async (url, request) => {
+        destinations.push({url, request});
+        return {status:200, text: async () => JSON.stringify({
+          jsonrpc:'2.0', id:1, result:{structuredContent:{enabled:true, available:true},isError:false}
+        })};
+      }
+    });
+    const result = await proxy.execute('gui_status');
+    assert.equal(result.handled, true);
+    assert.equal(destinations.length, 1);
+    assert.equal(destinations[0].url, 'http://127.0.0.1:'+port+'/mcp');
+    assert.equal(destinations[0].request.redirect, 'error');
+  }
+  for (const bad of [-1, 0, 80, 65536, 48837.2, '48837', NaN, Infinity]) {
+    const config = cfg(); config.ownerGuiDelegation.port = bad;
+    assert.throws(() => createOwnerGuiReadOnlyProxy({config, primaryStatus:primary}), /OWNER_GUI_PORT_INVALID/);
+  }
+});
+
 test('downstream unavailable cannot be called ready', async () => {
   const {proxy}=make({handler:()=>({available:false,enabled:true})});
   assert.equal((await proxy.execute('gui_status')).handled,false);
