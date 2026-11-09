@@ -2,6 +2,7 @@
 // four Luhn32 check digits, and seven-character display groups.
 // Protocol specification: https://docs.syncthing.net/dev/device-ids.html
 import {createHash, X509Certificate} from 'node:crypto';
+import path from 'node:path';
 
 const alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 
@@ -42,4 +43,21 @@ export function assertSyncthingRuntimeIdentity(expectedId, certificateId, status
   if(typeof version?.version !== 'string' || !/^v[0-9]+\.[0-9]+\.[0-9]+(?:[+-][A-Za-z0-9.-]+)?$/.test(version.version))
     throw new Error('Syncthing version unavailable');
   return 'syncthing ' + version.version;
+}
+
+
+// SHA-256 of the public MMZ Syncthing certificate device ID. Never infer trust
+// from a folder name alone; peer must also match this exact pinned fingerprint.
+export const PINNED_MMZ_DEVICE_HASH='c51ff1c36a87da050b1f320e302cfd1a9bf69570efad6be68d2bf5a165724af8';
+
+export function isPinnedOptionalMmzPair({alias,localDeviceId,root,folder,expectedPeerHash=PINNED_MMZ_DEVICE_HASH}) {
+  if(alias!=='PC' && alias!=='Linux')return false;
+  if(!folder || folder.paused || folder.type!=='sendreceive')return false;
+  const pairId='ctmesh-v1-'+[alias,'MMZ'].sort((a,b)=>a.toLowerCase().localeCompare(b.toLowerCase())).join('-').toLowerCase();
+  if(folder.id!==pairId || path.resolve(folder.path)!==path.resolve(root,'pairs','MMZ'))return false;
+  if(!Array.isArray(folder.devices) || folder.devices.length!==2)return false;
+  const members=folder.devices.map(x=>x?.deviceID);
+  if(members.some(x=>typeof x!=='string') || new Set(members).size!==2 || !members.includes(localDeviceId))return false;
+  const peer=members.find(x=>x!==localDeviceId);
+  return createHash('sha256').update(peer).digest('hex')===expectedPeerHash;
 }

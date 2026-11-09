@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import {syncthingDeviceIdFromPem,assertSyncthingRuntimeIdentity} from './device-id.mjs';
+import {syncthingDeviceIdFromPem,assertSyncthingRuntimeIdentity,isPinnedOptionalMmzPair} from './device-id.mjs';
 const IDS={
  PC:'EFE6R4U-O3B6JVV-N4OKZFL-7X4U24W-A5GFD4G-TM4OPRK-AXBDALA-OCJUBQ6',
  Linux:'6YUIRAM-GDPWPT4-XXX2DD7-K2M7G23-F246XXK-ENQQ3G2-RHIQI2Y-TDRJGAB',
@@ -14,7 +14,7 @@ const root=process.env.COMMANDER_TRANSFER_HOME || (process.platform==='win32'
  ?path.join(process.env.LOCALAPPDATA||path.join(os.homedir(),'AppData','Local'),'CommanderTransferPilot')
  :path.join(os.homedir(),'.local','share','commander-transfer-pilot'));
 const output={schema:'ctmesh-doctor-v1',ok:false,alias:null,version:null,apiStatus:'unavailable',
- activePairCount:0,legacyBroadcastPaused:false,staleMisconfiguredActive:0,connectedPeers:0,transports:{},errors:[]};
+ activePairCount:0,optionalPairCount:0,legacyBroadcastPaused:false,staleMisconfiguredActive:0,connectedPeers:0,transports:{},errors:[]};
 function err(e){output.errors.push(String(e?.message||e).slice(0,200).replace(/<apikey>.*?<\/apikey>/ig,'[REDACTED]'));}
 try {
  const node=JSON.parse(fs.readFileSync(path.join(root,'node.json'),'utf8'));
@@ -58,7 +58,20 @@ try {
    ||path.resolve(f.path)!==path.resolve(root,'pairs',exp.peerName)){err(new Error('Invalid pair '+exp.id));}
   else output.activePairCount++;
  }
- output.staleMisconfiguredActive=scoped.filter(f=>!expected.some(x=>x.id===f.id)&&!f.paused).length;
+ // The owner MMZ device is an explicitly pinned, optional fourth pair for
+ // PC and Linux, not a new compulsory peer on every Core installation.
+ // A similarly named untrusted folder/device still fails closed.
+ const optionalId=['PC','Linux'].includes(node.alias)
+   ?'ctmesh-v1-'+[node.alias,'MMZ'].sort((a,b)=>a.toLowerCase().localeCompare(b.toLowerCase())).join('-').toLowerCase()
+   :null;
+ const mmz=optionalId?scoped.find(x=>x.id===optionalId):null;
+ if(mmz && !mmz.paused){
+  if(isPinnedOptionalMmzPair({alias:node.alias,localDeviceId:id,root,folder:mmz}))
+    output.optionalPairCount=1;
+  else err(new Error('Untrusted optional MMZ pair'));
+ }
+ output.staleMisconfiguredActive=scoped.filter(f=>!expected.some(x=>x.id===f.id)
+  && !(output.optionalPairCount===1 && f.id===optionalId) && !f.paused).length;
  if(output.staleMisconfiguredActive)err(new Error('Unexpected active shared folders'));
  const broadcast=folders.find(x=>x.id==='ctmesh-pilot-20261013');
  output.legacyBroadcastPaused=broadcast?.paused===true;

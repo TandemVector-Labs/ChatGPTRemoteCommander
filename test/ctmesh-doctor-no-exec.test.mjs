@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-import {syncthingDeviceIdFromPem,assertSyncthingRuntimeIdentity} from '../tools/commander-transfer-mesh/device-id.mjs';
+import {syncthingDeviceIdFromPem,assertSyncthingRuntimeIdentity,isPinnedOptionalMmzPair,PINNED_MMZ_DEVICE_HASH} from '../tools/commander-transfer-mesh/device-id.mjs';
+import {createHash} from 'node:crypto';
 
 const project=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const doctor=path.join(project,'tools','commander-transfer-mesh','doctor.mjs');
@@ -62,5 +63,34 @@ test('transfer doctor never invokes an executable selected by COMMANDER_TRANSFER
     assert.equal(fs.existsSync(marker),false,'no environment-root executable may run');
   } finally {
     fs.rmSync(root,{recursive:true,force:true});
+  }
+});
+
+
+test('an optional MMZ pair requires exact pin, folder, peers, path and host role',()=>{
+  assert.equal(PINNED_MMZ_DEVICE_HASH,'c51ff1c36a87da050b1f320e302cfd1a9bf69570efad6be68d2bf5a165724af8');
+  const root=path.join(os.tmpdir(),'ctmesh-pinned-roster-fixture');
+  const local='LOCAL-QA-DEVICE';
+  const peer='SYNTHETIC-MMZ-QA-DEVICE';
+  const expectedPeerHash=createHash('sha256').update(peer).digest('hex');
+  for(const alias of ['PC','Linux']){
+    const id='ctmesh-v1-'+[alias,'MMZ'].sort((a,b)=>a.toLowerCase().localeCompare(b.toLowerCase())).join('-').toLowerCase();
+    const folder={id,paused:false,type:'sendreceive',path:path.join(root,'pairs','MMZ'),
+      devices:[{deviceID:local},{deviceID:peer}]};
+    const candidate={alias,localDeviceId:local,root,folder,expectedPeerHash};
+    assert.equal(isPinnedOptionalMmzPair(candidate),true,'strict valid pair');
+    assert.equal(isPinnedOptionalMmzPair({...candidate,expectedPeerHash:PINNED_MMZ_DEVICE_HASH}),false,'unknown QA peer is not production MMZ');
+    for(const edited of [
+      {...folder,id:'ctmesh-v1-similar-mmz'},
+      {...folder,path:path.join(root,'pairs','Other')},
+      {...folder,type:'sendonly'},
+      {...folder,paused:true},
+      {...folder,devices:[{deviceID:local},{deviceID:'UNTRUSTED'}]},
+      {...folder,devices:[{deviceID:local},{deviceID:local}]},
+      {...folder,devices:[{deviceID:peer}]},
+      {...folder,devices:[{deviceID:local},{deviceID:peer},{deviceID:'THIRD'}]}
+    ])assert.equal(isPinnedOptionalMmzPair({...candidate,folder:edited}),false,'invalid optional pair must fail closed');
+    assert.equal(isPinnedOptionalMmzPair({...candidate,alias:'EmadServer'}),false,'server roles cannot acquire an extra peer');
+    assert.equal(isPinnedOptionalMmzPair({...candidate,alias:'Amirreza'}),false,'unrelated hosts cannot acquire an extra peer');
   }
 });
