@@ -38,11 +38,11 @@ function readDoctorFile(root,relative) {
 }
 
 export async function runDoctor({root=defaultRoot,fetchImpl=fetch,writeOutput=console.log}={}) {
- const resolvedRoot=resolveDoctorRoot(root);
 const output={schema:'ctmesh-doctor-v1',ok:false,alias:null,version:null,apiStatus:'unavailable',
  activePairCount:0,legacyBroadcastPaused:false,staleMisconfiguredActive:0,connectedPeers:0,transports:{},errors:[]};
 function err(e){output.errors.push(String(e?.message||e).slice(0,200).replace(/<apikey>.*?<\/apikey>/ig,'[REDACTED]'));}
 try {
+ const resolvedRoot=resolveDoctorRoot(root);
  const node=JSON.parse(readDoctorFile(resolvedRoot,'node.json'));
  output.alias=node.alias;
  if(!Object.hasOwn(IDS,node.alias)||node.deviceID!==IDS[node.alias])throw new Error('Node identity mismatch');
