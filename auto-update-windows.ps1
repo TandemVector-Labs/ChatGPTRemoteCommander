@@ -24,7 +24,9 @@ foreach($requestedProfile in $TargetProfile){
 }
 $TargetProfile=@($TargetProfile|Select-Object -Unique)
 
-$Repo='https://github.com/GOD13emad/ChatGPTRemoteCommander.git'
+$Repo=[Environment]::GetEnvironmentVariable('REMOTE_COMMANDER_REPO_URL','Process')
+if([string]::IsNullOrWhiteSpace($Repo)){$Repo='https://github.com/GOD13emad/ChatGPTRemoteCommander.git'}
+if($Repo -cnotin @('https://github.com/GOD13emad/ChatGPTRemoteCommander.git','https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git')){throw 'RC_SOURCE_REPO_DENIED'}
 $StateRoot=Join-Path $env:LOCALAPPDATA 'ChatGPTRemoteCommander'
 $PauseFile=Join-Path $StateRoot 'maintenance\auto-update-paused.json'
 if(-not $Force -and (Test-Path -LiteralPath $PauseFile -PathType Leaf)){

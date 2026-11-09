@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { spawn, spawnSync } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
-import {isVerifiedSyntheticNotionBearer} from '../tools/security-audit-history.mjs';
+import { createHash } from 'node:crypto';
 
 function git(args, options = {}) {
   const result = spawnSync('git', args, {
@@ -23,39 +23,48 @@ const tunnelPattern = patterns.find(([type]) => type === 'Tunnel identifier')[1]
 if (!tunnelPattern.test('tunnel' + '_' + '0123456789abcdef'.repeat(2)) || tunnelPattern.test('tunnel_control_plane_fresh') || tunnelPattern.test('TUNNEL_HEALTH_UNKNOWN_LISTENER')) {
   throw new Error('Tunnel identifier audit pattern regression');
 }
-// Scan complete Git history without buffering the entire potentially multi-GB patch.
-// Lines are bounded; anything above the bound fails closed instead of being skipped.
+// Preserve complete-history streaming, including cross-line secret detection.
+// One immutable Notion mock assertion may be classified per original Git commit,
+// only at the exact diff path, diff kind and SHA-256 of the matched literal.
+// This is a review candidate; it is NOT an owner security-policy approval.
+const knownFixtureKinds = new Map([
+  ['7b28ae4ffbfc3094c70647fd1ad8c4c491ba7bf5', '+'],
+  ['7602330376070ca3681838e49bf7f932179a04d9', ' ']
+]);
+const knownFixtureSha256 = '753fbcab19311b48b629811e9bc841272ad59190d7299d62715a105f467e22d7';
+const knownFixtureDiff = 'diff --git a/test/notion-mcp-engine.test.mjs b/test/notion-mcp-engine.test.mjs';
 function makeHistoryScanner(rules) {
-  const hits = new Set();
-  let pending = '', preceding = '', currentCommit = null, currentFile = null;
+  const hits = new Set(), recognized = new Set();
+  let pending = '', preceding = '', currentCommit = null, currentDiff = null;
   const limit = 16 * 1024 * 1024;
-  // Git's +/- prefix is patch metadata, not file content. Scan each side
-  // independently within one file hunk, preserving a real newline boundary.
-  // These cross-line findings MUST NOT use the single-line mock fixture exception.
-  const bearerRule = rules.find(([type]) => type === 'Bearer token literal')?.[1];
-  let hunk = false, addedTail = '', removedTail = '';
+  // Git patch prefixes are not source characters. Reconstruct adjacent diff
+  // lines independently for added/removed sides to detect split history tokens.
+  // Keep the original raw-line scanner and its exact fixture exemption intact.
+  let addedTail = '', removedTail = '', inHunk = false;
+  const bearerPattern = patterns.find(([name]) => name === 'Bearer token literal')[1];
   function scanDiffSide(line) {
     if (/^commit [0-9a-f]{40}\r?\n?$/.test(line) || line.startsWith('diff --git ')) {
-      hunk = false; addedTail = ''; removedTail = '';
+      inHunk = false; addedTail = ''; removedTail = '';
       return;
     }
     if (line.startsWith('@@ ')) {
-      hunk = true; addedTail = ''; removedTail = '';
+      inHunk = true; addedTail = ''; removedTail = '';
       return;
     }
-    if (!hunk || !bearerRule) return;
+    if (!inHunk) return;
     const kind = line[0];
     if (kind !== '+' && kind !== '-' && kind !== ' ') {
       addedTail = ''; removedTail = '';
       return;
     }
-    const content = line.slice(1).replace(/\r?\n$/, '');
+    const content = line.slice(1);
     function append(previous) {
-      const sample = previous ? previous + '\n' + content : content;
-      const boundary = previous.length;
-      const matcher = new RegExp(bearerRule.source, bearerRule.flags.replace(/[gy]/g, '') + 'g');
-      for (const match of sample.matchAll(matcher)) {
-        if (previous && match.index < boundary && match.index + match[0].length > boundary)
+      const sample = previous ? previous + '\n' + content.replace(/\r?\n$/, '') : content.replace(/\r?\n$/, '');
+      // Single-line matches are already handled by the raw scanner and its
+      // commit/path/shape-pinned fixture rule. Any cross-line hit fails closed.
+      const matcher = new RegExp(bearerPattern.source, bearerPattern.flags.replace(/[gy]/g, '') + 'g');
+      for (const m of sample.matchAll(matcher)) {
+        if (m.index < previous.length && m.index + m[0].length > previous.length)
           hits.add('Bearer token literal');
       }
       return sample.slice(-512);
@@ -65,23 +74,29 @@ function makeHistoryScanner(rules) {
     if (kind === '-' || kind === ' ') removedTail = append(removedTail);
     else removedTail = '';
   }
+  function isExactFixture(line, match) {
+    if (knownFixtureKinds.get(currentCommit) !== line[0] ||
+        currentDiff !== knownFixtureDiff || recognized.has(currentCommit)) return false;
+    const content = line.replace(/\r?\n$/, '');
+    if (!/^[ +]\s*assert\.equal\(options\.headers\.Authorization,'Bearer\s+[A-Za-z0-9._-]{20,}'\);$/.test(content))
+      return false;
+    if (createHash('sha256').update(match).digest('hex') !== knownFixtureSha256) return false;
+    recognized.add(currentCommit);
+    return true;
+  }
   function scanLine(line) {
-    // Git emits immutable commit boundaries and per-file diff headers.
-    // Keep provenance while streaming; never buffer full history or raw hits.
-    const commit = /^commit ([0-9a-f]{40})(?:\r?\n|$)/.exec(line);
-    if (commit) { currentCommit = commit[1]; currentFile = '(commit metadata)'; }
-    const changedFile = /^diff --git a\/(.+?) b\/(.+?)\r?\n?$/.exec(line);
-    if (changedFile) {
-      const candidate = changedFile[2];
-      currentFile = /^[a-zA-Z0-9._/-]{1,128}$/.test(candidate)
-        ? candidate : '(nonstandard path)';
-    }
+    const commitLine = /^commit ([0-9a-f]{40})\r?\n?$/.exec(line);
+    if (commitLine) { currentCommit = commitLine[1]; currentDiff = null; }
+    else if (line.startsWith('diff --git ')) currentDiff = line.replace(/\r?\n$/, '');
     const sample = preceding + line;
     for (const [name, pattern] of rules) {
-      const flags = pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g';
-      const finder = new RegExp(pattern.source, flags);
-      for (const match of sample.matchAll(finder)) {
-        if (isVerifiedSyntheticNotionBearer(name, match[0], {commit:currentCommit,file:currentFile})) continue;
+      const matcher = new RegExp(pattern.source, pattern.flags.replace(/[gy]/g, '') + 'g');
+      for (const m of sample.matchAll(matcher)) {
+        // Previously fully scanned prefix matches must not be reclassified.
+        if (m.index + m[0].length <= preceding.length) continue;
+        // Cross-line matches are ALWAYS findings; never silently classify them.
+        if (name === 'Bearer token literal' && m.index >= preceding.length &&
+            isExactFixture(line, m[0])) continue;
         hits.add(name);
       }
     }
@@ -102,7 +117,8 @@ function makeHistoryScanner(rules) {
     finish() {
       if (pending) { scanLine(pending); pending = ''; }
       return hits;
-    }
+    },
+    get recognizedFixtureCount() { return recognized.size; }
   };
 }
 const boundaryProbe = makeHistoryScanner(patterns);
@@ -112,6 +128,16 @@ boundaryProbe.write('A'.repeat(25) + '\n');
 const probed = boundaryProbe.finish();
 if (!probed.has('Tunnel identifier') || !probed.has('Bearer token literal')) {
   throw new Error('SECURITY_AUDIT_STREAM_SCANNER_REGRESSION');
+}
+// Adversarial probe: a different bearer value at the same spoofed path and
+// historical commit identity MUST remain a finding.
+const hostileProbe = makeHistoryScanner(patterns);
+hostileProbe.write('commit 7b28ae4ffbfc3094c70647fd1ad8c4c491ba7bf5\n');
+hostileProbe.write(knownFixtureDiff + '\n');
+hostileProbe.write("+assert.equal(options.headers.Authorization,'Bearer " + 'Z'.repeat(30) + "');\n");
+if (!hostileProbe.finish().has('Bearer token literal') ||
+    hostileProbe.recognizedFixtureCount !== 0) {
+  throw new Error('SECURITY_AUDIT_EXACT_FIXTURE_FAIL_CLOSED_REGRESSION');
 }
 async function scanCompleteHistory() {
   const args = ['log', '--all', '-p', '--no-color', '--no-ext-diff'];
@@ -137,7 +163,7 @@ async function scanCompleteHistory() {
     if (done.code !== 0 || done.signal) {
       throw new Error('git log --all -p failed: ' + stderr.slice(-1024));
     }
-    return { hits: scanner.finish(), bytes };
+    return { hits: scanner.finish(), bytes, knownFixtures: scanner.recognizedFixtureCount };
   } catch (error) {
     if (child.exitCode === null) child.kill();
     await closed.catch(() => {});
@@ -170,6 +196,7 @@ for (const type of historyScan.hits) {
   findings.push({ scope: 'HISTORY', type, location: 'git log --all -p' });
 }
 console.log('SECURITY_AUDIT_HISTORY_BYTES ' + historyScan.bytes);
+if (historyScan.knownFixtures) console.log('AUDIT_KNOWN_TEST_FIXTURE_SIGNATURES ' + historyScan.knownFixtures);
 const emails = [...new Set(git(['log', '--all', '--format=%ae%n%ce']).split(/\r?\n/).filter(Boolean))].sort();
 if (emails.length) {
   console.log('COMMIT_EMAILS (public metadata, not credentials):');
@@ -183,3 +210,5 @@ if (findings.length) {
 }
 console.log('SECURITY_AUDIT_PASS');
 console.log('No secret-key, tunnel-id, private-key, bearer-token, GitHub-token, tracked local-config, or developer-path finding detected.');
+
+// Security audit fixtures must remain synthetic and never read live owner credentials.

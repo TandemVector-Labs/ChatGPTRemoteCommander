@@ -17,6 +17,14 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $Repo = "https://github.com/$SourceRepository.git"
+$ProcessRepositoryOverride = [Environment]::GetEnvironmentVariable('REMOTE_COMMANDER_REPO_URL','Process')
+if(-not [string]::IsNullOrWhiteSpace($ProcessRepositoryOverride)){
+  if($ProcessRepositoryOverride -cnotin @('https://github.com/GOD13emad/ChatGPTRemoteCommander.git','https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git')){throw 'RC_SOURCE_REPO_DENIED'}
+  if($PSBoundParameters.ContainsKey('SourceRepository') -and $ProcessRepositoryOverride -cne $Repo){throw 'RC_SOURCE_REPO_CONFLICT'}
+  $Repo = $ProcessRepositoryOverride
+}
+if($Repo -cnotin @('https://github.com/GOD13emad/ChatGPTRemoteCommander.git','https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git')){throw 'RC_SOURCE_REPO_DENIED'}
+$SourceRepository = if($Repo -ceq 'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git'){'TandemVector-Labs/ChatGPTRemoteCommander'}else{'GOD13emad/ChatGPTRemoteCommander'}
 
 if ($PowerMode -and $StandardMode) {
   throw 'Use only one of -PowerMode or -StandardMode.'

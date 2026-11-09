@@ -19,6 +19,14 @@ $script:BootstrapGitHubToken = [Environment]::GetEnvironmentVariable('RC_GITHUB_
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $Repo = "https://github.com/$SourceRepository.git"
+$ProcessRepositoryOverride = [Environment]::GetEnvironmentVariable('REMOTE_COMMANDER_REPO_URL','Process')
+if(-not [string]::IsNullOrWhiteSpace($ProcessRepositoryOverride)){
+  if($ProcessRepositoryOverride -cnotin @('https://github.com/GOD13emad/ChatGPTRemoteCommander.git','https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git')){throw 'RC_SOURCE_REPO_DENIED'}
+  if($PSBoundParameters.ContainsKey('SourceRepository') -and $ProcessRepositoryOverride -cne $Repo){throw 'RC_SOURCE_REPO_CONFLICT'}
+  $Repo = $ProcessRepositoryOverride
+}
+if($Repo -cnotin @('https://github.com/GOD13emad/ChatGPTRemoteCommander.git','https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git')){throw 'RC_SOURCE_REPO_DENIED'}
+$SourceRepository = if($Repo -ceq 'https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git'){'TandemVector-Labs/ChatGPTRemoteCommander'}else{'GOD13emad/ChatGPTRemoteCommander'}
 $BootstrapRoot = Join-Path $env:ProgramData 'ChatGPTRemoteCommander\bootstrap'
 $ManifestPath = Join-Path $env:ProgramData 'ChatGPTRemoteCommander\server-install-allowlist.json'
 $Downloads = Join-Path $BootstrapRoot ('downloads-' + [guid]::NewGuid().ToString('N'))
