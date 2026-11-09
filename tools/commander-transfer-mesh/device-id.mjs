@@ -61,3 +61,6 @@ export function isPinnedOptionalMmzPair({alias,localDeviceId,root,folder,expecte
   const peer=members.find(x=>x!==localDeviceId);
   return createHash('sha256').update(peer).digest('hex')===expectedPeerHash;
 }
+
+// Updating this pin requires independent certificate-to-device-ID derivation and
+// a read-only roster check on the authorized owner hosts; never trust a folder label.
