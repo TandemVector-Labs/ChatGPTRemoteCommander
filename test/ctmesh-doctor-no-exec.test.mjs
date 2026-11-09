@@ -94,3 +94,5 @@ test('an optional MMZ pair requires exact pin, folder, peers, path and host role
     assert.equal(isPinnedOptionalMmzPair({...candidate,alias:'Amirreza'}),false,'unrelated hosts cannot acquire an extra peer');
   }
 });
+
+// Keep the negative roster cases synthetic; no production peer IDs are substituted.
