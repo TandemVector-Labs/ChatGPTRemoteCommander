@@ -24,8 +24,8 @@ try {
  const node=JSON.parse(fs.readFileSync(path.join(resolvedRoot,'node.json'),'utf8'));
  output.alias=node.alias;
  if(!Object.hasOwn(IDS,node.alias)||node.deviceID!==IDS[node.alias])throw new Error('Node identity mismatch');
- // Verify the on-disk device certificate without executing a binary from an
- // environment-selected root. Cross-check that ID against the running service.
+ // Verify the installed certificate without executing a binary from the data
+ // directory. Cross-check its ID against the running service.
  const id=syncthingDeviceIdFromPem(fs.readFileSync(path.join(resolvedRoot,'state','cert.pem'),'utf8'));
  if(id!==IDS[node.alias])throw new Error('Certificate identity mismatch');
  const xml=fs.readFileSync(path.join(resolvedRoot,'state','config.xml'),'utf8');
