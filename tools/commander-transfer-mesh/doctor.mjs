@@ -15,20 +15,42 @@ const defaultRoot=process.platform==='win32'
  ?path.join(process.env.LOCALAPPDATA||path.join(os.homedir(),'AppData','Local'),'CommanderTransferPilot')
  :path.join(os.homedir(),'.local','share','commander-transfer-pilot');
 
+// A caller may select a fixture root for tests, but it must resolve below the
+// current user's home or the OS temporary directory. Resolve symlinks before
+// accepting the root so a friendly-looking path cannot escape those locations.
+function resolveDoctorRoot(candidate) {
+ const resolved=fs.realpathSync(path.resolve(candidate));
+ const allowed=[os.homedir(),os.tmpdir()].map(base=>fs.realpathSync(base));
+ if(!allowed.some(base=>resolved.startsWith(base+path.sep)))
+  throw new Error('Transfer Mesh root is outside allowed locations');
+ return resolved;
+}
+
+// Resolve every fixed relative file before reading it. This rejects traversal
+// components and symlinks that point outside the accepted root directory.
+function readDoctorFile(root,relative) {
+ if(path.isAbsolute(relative)||relative.split(/[\\\\/]/).some(part=>!part||part==='.'||part==='..'))
+  throw new Error('Invalid Transfer Mesh relative path');
+ const target=fs.realpathSync(path.resolve(root,relative));
+ if(!target.startsWith(root+path.sep))
+  throw new Error('Transfer Mesh file escapes its root directory');
+ return fs.readFileSync(target,'utf8');
+}
+
 export async function runDoctor({root=defaultRoot,fetchImpl=fetch,writeOutput=console.log}={}) {
- const resolvedRoot=path.resolve(root);
+ const resolvedRoot=resolveDoctorRoot(root);
 const output={schema:'ctmesh-doctor-v1',ok:false,alias:null,version:null,apiStatus:'unavailable',
  activePairCount:0,legacyBroadcastPaused:false,staleMisconfiguredActive:0,connectedPeers:0,transports:{},errors:[]};
 function err(e){output.errors.push(String(e?.message||e).slice(0,200).replace(/<apikey>.*?<\/apikey>/ig,'[REDACTED]'));}
 try {
- const node=JSON.parse(fs.readFileSync(path.join(resolvedRoot,'node.json'),'utf8'));
+ const node=JSON.parse(readDoctorFile(resolvedRoot,'node.json'));
  output.alias=node.alias;
  if(!Object.hasOwn(IDS,node.alias)||node.deviceID!==IDS[node.alias])throw new Error('Node identity mismatch');
  // Verify the installed certificate without executing a binary from the data
  // directory. Cross-check its ID against the running service.
- const id=syncthingDeviceIdFromPem(fs.readFileSync(path.join(resolvedRoot,'state','cert.pem'),'utf8'));
+ const id=syncthingDeviceIdFromPem(readDoctorFile(resolvedRoot,'state/cert.pem'));
  if(id!==IDS[node.alias])throw new Error('Certificate identity mismatch');
- const xml=fs.readFileSync(path.join(resolvedRoot,'state','config.xml'),'utf8');
+ const xml=readDoctorFile(resolvedRoot,'state/config.xml');
  const key=xml.match(/<apikey>([^<]+)<\/apikey>/)?.[1];
  if(!key)throw new Error('Local REST key missing');
  const fetchLocal=async(base,url,authenticated=true)=>{
