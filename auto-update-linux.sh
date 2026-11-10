@@ -65,6 +65,10 @@ done
 [[ -z "$SOURCE_REF" || "$SOURCE_REF" =~ ^[A-Za-z0-9._/-]{1,128}$ ]] || { echo 'invalid source ref' >&2; exit 2; }
 [[ -z "$EXPECTED_COMMIT" || "$EXPECTED_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]] || { echo 'invalid expected commit' >&2; exit 2; }
 [[ "$DRAIN_TIMEOUT" =~ ^[1-9][0-9]{0,2}$ ]] || { echo 'invalid drain timeout' >&2; exit 2; }
+case "$REPO_URL" in
+  https://github.com/GOD13emad/ChatGPTRemoteCommander.git|https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git) ;;
+  *) echo 'RC_SOURCE_REPO_DENIED' >&2; exit 2 ;;
+esac
 
 INSTALL_DIR="$(cd "$INSTALL_DIR" 2>/dev/null && pwd -P || printf '%s' "$INSTALL_DIR")"
 mkdir -p "$RELEASE_ROOT" "$ROUTING_ROOT" "$RUNTIME_ROOT" "$BACKUP_ROOT" "$LOG_DIR"

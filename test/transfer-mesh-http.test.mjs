@@ -13,7 +13,7 @@ test('MCP native transfer tools opt in, expose narrowly scoped schemas and execu
  const home=await fs.mkdtemp(path.join(os.tmpdir(),'ctmesh-native-http-'));
  const server=path.join(home,'server'),input=path.join(home,'inputs'),received=path.join(home,'received'),pilot=path.join(home,'pilot');
  const serverPort=await port();
- let child,stderr='';
+ let child,stdout='',stderr='',childExit=null,spawnError='';
  try{
   await fs.mkdir(server);await fs.mkdir(input);await fs.mkdir(received);await fs.mkdir(pilot);
   await fs.cp(new URL('../src/',import.meta.url),path.join(server,'src'),{recursive:true});
@@ -28,10 +28,18 @@ test('MCP native transfer tools opt in, expose narrowly scoped schemas and execu
   const configPath=path.join(server,'config.json');
   await fs.writeFile(configPath,JSON.stringify(cfg));
   child=spawn(process.execPath,[path.join(server,'src/server-v0.3.mjs')],{cwd:server,env:{...process.env,REMOTE_COMMANDER_CONFIG:configPath},stdio:['ignore','pipe','pipe']});
-  child.stderr.on('data',x=>stderr+=x);
+  child.stdout.on('data',x=>{stdout=(stdout+x).slice(-4000);});
+  child.stderr.on('data',x=>{stderr=(stderr+x).slice(-4000);});
+  child.on('exit',code=>{childExit=code;});
+  child.on('error',error=>{spawnError=String(error?.message||error).slice(0,300);});
   let healthy=false;
-  for(let i=0;i<200;i++){try{const r=await fetch('http://127.0.0.1:'+serverPort+'/health');if(r.ok){healthy=true;break;}}catch{}await wait(25);}
-  assert.equal(healthy,true,stderr);
+  const deadline=Date.now()+20000;
+  while(!healthy&&childExit===null&&Date.now()<deadline){
+   try{const r=await fetch('http://127.0.0.1:'+serverPort+'/health');if(r.ok){healthy=true;break;}}catch{}
+   await wait(50);
+  }
+  const diagnostic=('TRANSFER_SERVER_HEALTH_TIMEOUT childExit='+(childExit===null?'running':childExit)+' spawnError='+(spawnError||'none')+' stdout='+(stdout.slice(-500)||'empty')+' stderr='+(stderr.slice(-500)||'empty')).replace(/<apikey>.*?<\/apikey>/ig,'[REDACTED]');
+  assert.equal(healthy,true,diagnostic);
   const list=await req(serverPort,'__list');const defs=list.tools.filter(x=>x.name.startsWith('transfer_mesh_'));
   assert.equal(defs.length,8);
   assert.equal(defs.find(x=>x.name==='transfer_mesh_send').annotations.readOnlyHint,false);

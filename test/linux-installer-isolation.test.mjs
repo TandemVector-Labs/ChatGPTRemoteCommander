@@ -44,6 +44,8 @@ function fixture(t) {
   const arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
   write(path.join(target, `tools/tunnel-client-v0.0.15-linux-${arch}/tunnel-client`), '#!/bin/sh\nprintf "0.0.15+a390c168ff1b2d14e73a95991c186c6aba3ff5a0 (git sha: a390c168ff1b2d14e73a95991c186c6aba3ff5a0)\\n"\n', true);
   const bin = path.join(root, 'bin'), effects = path.join(root, 'unexpected-effects'), npmCalls = path.join(root, 'npm-calls');
+  const realGit = run('sh', ['-c', 'command -v git']);
+  write(path.join(bin, 'git'), '#!/bin/sh\nif [ "$1" = "-C" ] && [ "$3" = "remote" ] && [ "$4" = "add" ] && [ "$5" = "origin" ]; then\n  case "$6" in\n    https://github.com/GOD13emad/ChatGPTRemoteCommander.git|https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git) set -- "$1" "$2" "$3" "$4" "$5" "$RC_INSTALL_SOURCE" ;;\n  esac\nfi\nexec "$RC_REAL_GIT" "$@"\n', true);
   write(path.join(bin, 'npm'), '#!/bin/sh\nprintf "%s\\n" "$*" >> "$RC_INSTALL_NPM_CALLS"\nexit 0\n', true);
   for (const name of ['curl', 'systemctl', 'nohup', 'gnome-extensions']) {
     write(path.join(bin, name), '#!/bin/sh\nprintf unexpected > "$RC_INSTALL_EFFECTS"\nexit 92\n', true);
@@ -56,7 +58,9 @@ function fixture(t) {
   const installedScript = path.join(root, 'installer-under-test.sh');
   write(installedScript, fs.readFileSync(path.join(repository, 'install.sh')), true);
   const env = { ...process.env, PATH: bin + path.delimiter + process.env.PATH,
-    XDG_STATE_HOME: state, TMPDIR: root, REMOTE_COMMANDER_REPO_URL: source,
+    XDG_STATE_HOME: state, TMPDIR: root,
+    REMOTE_COMMANDER_REPO_URL: 'https://github.com/GOD13emad/ChatGPTRemoteCommander.git',
+    RC_INSTALL_SOURCE: source, RC_REAL_GIT: realGit,
     RC_INSTALL_EFFECTS: effects, RC_INSTALL_NPM_CALLS: npmCalls };
   return { root, target, commit, route, activeConfig, installedScript, env, effects, npmCalls };
 }
@@ -239,4 +243,28 @@ test('existing custom Linux install is preserved when a later dependency fails',
   assert.equal(run('git', ['rev-parse', 'HEAD'], { cwd: f.target }), f.commit);
   assert.equal(fs.readdirSync(f.root).filter(name => name.startsWith('custom-install.failed-install-')).length, 0);
   assert.equal(fs.existsSync(f.effects), false);
+});
+
+test('Linux bootstrap, core installer and updater reject arbitrary source origins before side effects', linuxOnly, t => {
+  const cases = [
+    ['server-install-linux.sh', ['--install-dir', 'target', '--source-ref', 'HEAD', '--no-start']],
+    ['install.sh', ['--install-dir', 'target', '--source-ref', 'HEAD', '--standard-mode']],
+    ['auto-update-linux.sh', ['--install-dir', 'target', '--source-ref', 'HEAD', '--no-promote']]
+  ];
+  for (const [script, args] of cases) {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rc-linux-source-deny-'));
+    t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+    const state = path.join(home, 'state');
+    const target = path.join(home, 'target');
+    const env = { ...process.env, HOME: home, XDG_STATE_HOME: state, XDG_CONFIG_HOME: path.join(home, 'config'),
+      REMOTE_COMMANDER_REPO_URL: 'https://attacker.invalid/ChatGPTRemoteCommander.git' };
+    const result = spawnSync('bash', [path.join(repository, script), ...args.map(x => x === 'target' ? target : x)], {
+      cwd: home, env, encoding: 'utf8', timeout: 10000
+    });
+    assert.equal(result.error, undefined, result.error?.message);
+    assert.equal(result.status, 2, script + ' must reject the untrusted origin: ' + result.stdout + '\\n' + result.stderr);
+    assert.match(result.stderr, /RC_SOURCE_REPO_DENIED/);
+    assert.equal(fs.existsSync(state), false, script + ' must reject before creating user state');
+    assert.equal(fs.existsSync(target), false, script + ' must reject before creating the installation');
+  }
 });
