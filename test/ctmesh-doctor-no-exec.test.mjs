@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {syncthingDeviceIdFromPem,assertSyncthingRuntimeIdentity,isPinnedOptionalMmzPair,PINNED_MMZ_DEVICE_HASH} from '../tools/commander-transfer-mesh/device-id.mjs';
+import {syncthingDeviceIdFromPem,assertSyncthingRuntimeIdentity,isPinnedOptionalMmzPair,inspectOptionalMmzPairs,inspectRequiredCorePairs,OPTIONAL_MMZ_CORE_ALIASES,PINNED_MMZ_DEVICE_HASH} from '../tools/commander-transfer-mesh/device-id.mjs';
 import {createHash} from 'node:crypto';
 import {runDoctor} from '../tools/commander-transfer-mesh/doctor.mjs';
 import {configuredLoopbackRest,fetchPinnedSyncthingJson} from '../tools/commander-transfer-mesh/pinned-rest.mjs';
@@ -83,19 +83,78 @@ test('transfer doctor rejects a root-file symlink that escapes the accepted root
 });
 
 
-test('an optional MMZ pair requires exact pin, folder, peers, path and host role',()=>{
+test('all three mandatory Core pairs fail closed on duplicate IDs and non-bidirectional types',()=>{
+  const root=path.join(os.tmpdir(),'ctmesh-strict-required-core-fixture');
+  for(const alias of OPTIONAL_MMZ_CORE_ALIASES){
+    const local='SYNTHETIC-LOCAL-'+alias;
+    const others=OPTIONAL_MMZ_CORE_ALIASES.filter(x=>x!==alias);
+    const expectedPairs=others.map(peerName=>({
+      id:'ctmesh-v1-'+[alias,peerName].sort((a,b)=>a.toLowerCase().localeCompare(b.toLowerCase())).join('-').toLowerCase(),
+      peerName,peerId:'SYNTHETIC-PEER-'+peerName
+    }));
+    const good=expectedPairs.map(pair=>({
+      id:pair.id,type:'sendreceive',paused:false,path:path.join(root,'pairs',pair.peerName),
+      devices:[{deviceID:local},{deviceID:pair.peerId}]
+    }));
+    const inspect=(folders,roster=expectedPairs)=>
+      inspectRequiredCorePairs({localDeviceId:local,root,expectedPairs:roster,folders});
+    assert.deepEqual(inspect(good),{count:3,errors:[]},alias+' healthy trio');
+    const baseline=good[0];
+    const invalidVariants=[
+      {...baseline,type:'sendonly'},
+      {...baseline,type:'receiveonly'},
+      {...baseline,type:'sendrecv'},
+      {...baseline,paused:true},
+      {...baseline,path:path.join(root,'pairs','Wrong')},
+      {...baseline,devices:[{deviceID:local},{deviceID:'UNTRUSTED'}]},
+      {...baseline,devices:[{deviceID:local},{deviceID:local}]},
+      {...baseline,devices:[{deviceID:local}]},
+      {...baseline,devices:[{deviceID:local},{deviceID:expectedPairs[0].peerId},{deviceID:'THIRD'}]}
+    ];
+    for(const bad of invalidVariants){
+      const result=inspect([bad,...good.slice(1)]);
+      assert.equal(result.count,2,'must reject invalid mandatory peer '+alias);
+      assert.equal(result.errors.length,1);
+    }
+    for(const duplicate of [baseline,{...baseline,paused:true},{...baseline,type:'sendonly'}]){
+      const result=inspect([...good,duplicate]);
+      assert.equal(result.count,2,'duplicate mandatory ID must fail closed '+alias);
+      assert.match(result.errors[0],/duplicated required Core pair/);
+    }
+    assert.equal(inspect(good.slice(1)).count,2,'missing required Core pair');
+    assert.deepEqual(inspect(good,[...expectedPairs,expectedPairs[0]]),
+      {count:0,errors:['Invalid required Core roster']},'roster cardinality bound');
+    assert.deepEqual(inspect(good,[expectedPairs[0],expectedPairs[0],expectedPairs[1]]),
+      {count:0,errors:['Invalid required Core roster']},'roster duplicate bound');
+  }
+});
+
+test('all four Core roles accept only one exactly pinned optional MMZ pair',()=>{
   assert.equal(PINNED_MMZ_DEVICE_HASH,'c51ff1c36a87da050b1f320e302cfd1a9bf69570efad6be68d2bf5a165724af8');
+  assert.deepEqual(OPTIONAL_MMZ_CORE_ALIASES,['PC','Linux','EmadServer','Amirreza']);
   const root=path.join(os.tmpdir(),'ctmesh-pinned-roster-fixture');
   const local='LOCAL-QA-DEVICE';
   const peer='SYNTHETIC-MMZ-QA-DEVICE';
   const expectedPeerHash=createHash('sha256').update(peer).digest('hex');
-  for(const alias of ['PC','Linux']){
+  const inspect=(alias,folders,additional={})=>
+    inspectOptionalMmzPairs({alias,localDeviceId:local,root,folders,expectedPeerHash,...additional});
+  for(const alias of OPTIONAL_MMZ_CORE_ALIASES){
     const id='ctmesh-v1-'+[alias,'MMZ'].sort((a,b)=>a.toLowerCase().localeCompare(b.toLowerCase())).join('-').toLowerCase();
     const folder={id,paused:false,type:'sendreceive',path:path.join(root,'pairs','MMZ'),
       devices:[{deviceID:local},{deviceID:peer}]};
     const candidate={alias,localDeviceId:local,root,folder,expectedPeerHash};
-    assert.equal(isPinnedOptionalMmzPair(candidate),true,'strict valid pair');
-    assert.equal(isPinnedOptionalMmzPair({...candidate,expectedPeerHash:PINNED_MMZ_DEVICE_HASH}),false,'unknown QA peer is not production MMZ');
+    assert.equal(isPinnedOptionalMmzPair(candidate),true,'strict '+alias+' pair');
+    assert.deepEqual(inspect(alias,[folder]),{count:1,error:null},'trusted '+alias+' optional pair');
+    assert.deepEqual(inspect(alias,[]),{count:0,error:null},'absence remains optional');
+    assert.deepEqual(inspect(alias,[{...folder,paused:true}]),{count:0,error:null},'paused pair remains inactive');
+    assert.deepEqual(inspect(alias,[folder,folder]),{count:0,error:'Duplicate optional MMZ pair'},
+      'duplicate IDs must fail closed even when one is valid');
+    assert.deepEqual(inspect(alias,[folder,{...folder,paused:true}]),
+      {count:0,error:'Duplicate optional MMZ pair'},'paused duplicate must also fail closed');
+    assert.equal(isPinnedOptionalMmzPair({...candidate,expectedPeerHash:PINNED_MMZ_DEVICE_HASH}),false,
+      'unknown QA peer must not equal production pin');
+    assert.deepEqual(inspect(alias,[folder],{expectedPeerHash:PINNED_MMZ_DEVICE_HASH}),
+      {count:0,error:'Untrusted optional MMZ pair'},'wrong pin must fail closed');
     for(const edited of [
       {...folder,id:'ctmesh-v1-similar-mmz'},
       {...folder,path:path.join(root,'pairs','Other')},
@@ -106,11 +165,19 @@ test('an optional MMZ pair requires exact pin, folder, peers, path and host role
       {...folder,devices:[{deviceID:peer}]},
       {...folder,devices:[{deviceID:local},{deviceID:peer},{deviceID:'THIRD'}]}
     ])assert.equal(isPinnedOptionalMmzPair({...candidate,folder:edited}),false,'invalid optional pair must fail closed');
-    assert.equal(isPinnedOptionalMmzPair({...candidate,alias:'EmadServer'}),false,'server roles cannot acquire an extra peer');
-    assert.equal(isPinnedOptionalMmzPair({...candidate,alias:'Amirreza'}),false,'unrelated hosts cannot acquire an extra peer');
+    for(const bad of [
+      {...folder,path:path.join(root,'pairs','Other')},
+      {...folder,type:'sendonly'},
+      {...folder,devices:[{deviceID:local},{deviceID:'UNTRUSTED'}]},
+      {...folder,devices:[{deviceID:local},{deviceID:peer},{deviceID:'THIRD'}]}
+    ])assert.deepEqual(inspect(alias,[bad]),{count:0,error:'Untrusted optional MMZ pair'});
+    for(const unknownAlias of ['MMZ','Unknown','PC ','pc',null,'__proto__']){
+      assert.equal(isPinnedOptionalMmzPair({...candidate,alias:unknownAlias}),false,
+        'no new owner or unlisted alias can acquire the MMZ pair');
+      assert.deepEqual(inspect(unknownAlias,[folder]),{count:0,error:'Invalid optional MMZ context'});
+    }
   }
 });
-
 
 test('pinned TLS Doctor selects exactly one configured GUI endpoint, not a health-probed port',()=>{
   const config=(address,enabled='true')=>'<configuration><gui enabled="'+enabled+'" tls="false">'+

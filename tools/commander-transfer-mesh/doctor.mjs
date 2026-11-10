@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import {pathToFileURL} from 'node:url';
-import {syncthingDeviceIdFromPem,assertSyncthingRuntimeIdentity,isPinnedOptionalMmzPair} from './device-id.mjs';
+import {syncthingDeviceIdFromPem,assertSyncthingRuntimeIdentity,inspectOptionalMmzPairs,inspectRequiredCorePairs} from './device-id.mjs';
 import {configuredLoopbackRest,fetchPinnedSyncthingJson} from './pinned-rest.mjs';
 // Owner-PC Syncthing launcher overrides config.xml GUI port with this fixed value.
 const GUI_OVERRIDES={PC:'127.0.0.1:18384'};
@@ -74,25 +74,19 @@ try {
   peerId:id, peerName:name
  }));
  const scoped=folders.filter(f=>f.id?.startsWith('ctmesh-v1-'));
- for(const exp of expected){
-  const f=scoped.find(x=>x.id===exp.id);
-  if(!f||f.paused||f.devices?.length!==2||new Set(f.devices.map(d=>d.deviceID)).size!==2
-   ||!f.devices.some(x=>x.deviceID===id)||!f.devices.some(x=>x.deviceID===exp.peerId)
-   ||path.resolve(f.path)!==path.resolve(resolvedRoot,'pairs',exp.peerName)){err(new Error('Invalid pair '+exp.id));}
-  else output.activePairCount++;
- }
- // The owner MMZ device is an explicitly pinned, optional fourth pair for
- // PC and Linux, not a new compulsory peer on every Core installation.
- // A similarly named untrusted folder/device still fails closed.
- const optionalId=['PC','Linux'].includes(node.alias)
-   ?'ctmesh-v1-'+[node.alias,'MMZ'].sort((a,b)=>a.toLowerCase().localeCompare(b.toLowerCase())).join('-').toLowerCase()
-   :null;
- const mmz=optionalId?scoped.find(x=>x.id===optionalId):null;
- if(mmz && !mmz.paused){
-  if(isPinnedOptionalMmzPair({alias:node.alias,localDeviceId:id,root:resolvedRoot,folder:mmz}))
-    output.optionalPairCount=1;
-  else err(new Error('Untrusted optional MMZ pair'));
- }
+ // Require a unique, exactly configured, bidirectional folder for each
+ // mandatory Core peer. A duplicate ID can never hide behind Array.find().
+ const core=inspectRequiredCorePairs({localDeviceId:id,root:resolvedRoot,expectedPairs:expected,folders:scoped});
+ output.activePairCount=core.count;
+ for(const message of core.errors)err(new Error(message));
+ // Every trusted Core alias can hold at most one optional MMZ pair; this
+ // remains strictly pinned to the known MMZ certificate/device ID and local
+ // exact folder path. Duplicates and untrusted pairs fail closed.
+ const optionalId='ctmesh-v1-'+[node.alias,'MMZ']
+   .sort((a,b)=>a.toLowerCase().localeCompare(b.toLowerCase())).join('-').toLowerCase();
+ const optional=inspectOptionalMmzPairs({alias:node.alias,localDeviceId:id,root:resolvedRoot,folders:scoped});
+ output.optionalPairCount=optional.count;
+ if(optional.error)err(new Error(optional.error));
  output.staleMisconfiguredActive=scoped.filter(f=>!expected.some(x=>x.id===f.id)
   && !(output.optionalPairCount===1 && f.id===optionalId) && !f.paused).length;
  if(output.staleMisconfiguredActive)err(new Error('Unexpected active shared folders'));
