@@ -5,6 +5,9 @@ import path from 'node:path';
 import os from 'node:os';
 import {pathToFileURL} from 'node:url';
 import {syncthingDeviceIdFromPem,assertSyncthingRuntimeIdentity,isPinnedOptionalMmzPair} from './device-id.mjs';
+import {configuredLoopbackRest,fetchPinnedSyncthingJson} from './pinned-rest.mjs';
+// Owner-PC Syncthing launcher overrides config.xml GUI port with this fixed value.
+const GUI_OVERRIDES={PC:'127.0.0.1:18384'};
 const IDS={
  PC:'EFE6R4U-O3B6JVV-N4OKZFL-7X4U24W-A5GFD4G-TM4OPRK-AXBDALA-OCJUBQ6',
  Linux:'6YUIRAM-GDPWPT4-XXX2DD7-K2M7G23-F246XXK-ENQQ3G2-RHIQI2Y-TDRJGAB',
@@ -37,7 +40,7 @@ function readDoctorFile(root,relative) {
  return fs.readFileSync(target,'utf8');
 }
 
-export async function runDoctor({root=defaultRoot,fetchImpl=fetch,writeOutput=console.log}={}) {
+export async function runDoctor({root=defaultRoot,writeOutput=console.log}={}) {
 const output={schema:'ctmesh-doctor-v1',ok:false,alias:null,version:null,apiStatus:'unavailable',
  activePairCount:0,optionalPairCount:0,legacyBroadcastPaused:false,staleMisconfiguredActive:0,connectedPeers:0,transports:{},errors:[]};
 function err(e){output.errors.push(String(e?.message||e).slice(0,200).replace(/<apikey>.*?<\/apikey>/ig,'[REDACTED]'));}
@@ -51,27 +54,21 @@ try {
  const id=syncthingDeviceIdFromPem(readDoctorFile(resolvedRoot,'state/cert.pem'));
  if(id!==IDS[node.alias])throw new Error('Certificate identity mismatch');
  const xml=readDoctorFile(resolvedRoot,'state/config.xml');
- const key=xml.match(/<apikey>([^<]+)<\/apikey>/)?.[1];
- if(!key)throw new Error('Local REST key missing');
- const fetchLocal=async(base,url,authenticated=true)=>{
-  const h=authenticated?{'X-API-Key':key}:{};
-  const r=await fetchImpl(base+url,{headers:h,signal:AbortSignal.timeout(2600)});
-  if(!r.ok)throw new Error('Local API HTTP '+r.status);
-  return await r.json();
- };
- const candidates=process.platform==='win32'?[8384,18384]:[8384];
- let base;
- for(const port of candidates) {
-  const u='http://127.0.0.1:'+port;
-  try {const health=await fetchLocal(u,'/rest/noauth/health',false);if(health.status==='OK'){base=u;break;}}catch{}
- }
- if(!base)throw new Error('Local Syncthing REST health unavailable');
- const status=await fetchLocal(base,'/rest/system/status');
- const runtimeVersion=await fetchLocal(base,'/rest/system/version');
+ // A health response never selects an API destination. Bind the endpoint to the
+ // configured GUI (or the explicitly pinned PC override), and verify its TLS
+ // certificate before sending the API key.
+ const {base,apiKey}=configuredLoopbackRest(xml,GUI_OVERRIDES[node.alias]);
+ const guiCert=readDoctorFile(resolvedRoot,'state/https-cert.pem');
+ const fetchLocal=(route,authenticated=true)=>
+   fetchPinnedSyncthingJson(base,route,guiCert,apiKey,authenticated);
+ const health=await fetchLocal('/rest/noauth/health',false);
+ if(health?.status!=='OK')throw new Error('Configured Syncthing REST health unavailable');
+ const status=await fetchLocal('/rest/system/status');
+ const runtimeVersion=await fetchLocal('/rest/system/version');
  output.version=assertSyncthingRuntimeIdentity(IDS[node.alias],id,status,runtimeVersion);
  output.apiStatus='OK';
- const folders=await fetchLocal(base,'/rest/config/folders');
- const connected=await fetchLocal(base,'/rest/system/connections');
+ const folders=await fetchLocal('/rest/config/folders');
+ const connected=await fetchLocal('/rest/system/connections');
  const expected=Object.entries(IDS).filter(([name])=>name!==node.alias).map(([name,id])=>({
   id:'ctmesh-v1-'+[node.alias,name].sort((a,b)=>a.toLowerCase().localeCompare(b.toLowerCase())).join('-').toLowerCase(),
   peerId:id, peerName:name
