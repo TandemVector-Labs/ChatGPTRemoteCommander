@@ -45,7 +45,7 @@ function fixture(t) {
   write(path.join(target, `tools/tunnel-client-v0.0.15-linux-${arch}/tunnel-client`), '#!/bin/sh\nprintf "0.0.15+a390c168ff1b2d14e73a95991c186c6aba3ff5a0 (git sha: a390c168ff1b2d14e73a95991c186c6aba3ff5a0)\\n"\n', true);
   const bin = path.join(root, 'bin'), effects = path.join(root, 'unexpected-effects'), npmCalls = path.join(root, 'npm-calls');
   const realGit = run('sh', ['-c', 'command -v git']);
-  write(path.join(bin, 'git'), '#!/bin/sh\\nif [ "$1" = "-C" ] && [ "$3" = "remote" ] && [ "$4" = "add" ] && [ "$5" = "origin" ]; then\\n  case "$6" in\\n    https://github.com/GOD13emad/ChatGPTRemoteCommander.git|https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git) set -- "$1" "$2" "$3" "$4" "$5" "$RC_INSTALL_SOURCE" ;;\\n  esac\\nfi\\nexec "$RC_REAL_GIT" "$@"\\n', true);
+  write(path.join(bin, 'git'), '#!/bin/sh\nif [ "$1" = "-C" ] && [ "$3" = "remote" ] && [ "$4" = "add" ] && [ "$5" = "origin" ]; then\n  case "$6" in\n    https://github.com/GOD13emad/ChatGPTRemoteCommander.git|https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git) set -- "$1" "$2" "$3" "$4" "$5" "$RC_INSTALL_SOURCE" ;;\n  esac\nfi\nexec "$RC_REAL_GIT" "$@"\n', true);
   write(path.join(bin, 'npm'), '#!/bin/sh\nprintf "%s\\n" "$*" >> "$RC_INSTALL_NPM_CALLS"\nexit 0\n', true);
   for (const name of ['curl', 'systemctl', 'nohup', 'gnome-extensions']) {
     write(path.join(bin, name), '#!/bin/sh\nprintf unexpected > "$RC_INSTALL_EFFECTS"\nexit 92\n', true);
