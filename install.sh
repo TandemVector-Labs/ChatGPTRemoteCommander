@@ -55,6 +55,10 @@ done
 [[ -z "$EXPECTED_COMMIT" || "$EXPECTED_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]] || { echo "Invalid --expected-commit SHA" >&2; exit 2; }
 [[ "$CURL_CONNECT_TIMEOUT" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "REMOTE_COMMANDER_CURL_CONNECT_TIMEOUT must be a positive integer" >&2; exit 2; }
 [[ "$CURL_MAX_TIME" =~ ^[1-9][0-9]{0,4}$ ]] || { echo "REMOTE_COMMANDER_CURL_MAX_TIME must be a positive integer" >&2; exit 2; }
+case "$REPO_URL" in
+  https://github.com/GOD13emad/ChatGPTRemoteCommander.git|https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git) ;;
+  *) echo 'RC_SOURCE_REPO_DENIED' >&2; exit 2 ;;
+esac
 need() { command -v "$1" >/dev/null 2>&1; }
 curl_fetch() {
   curl --fail --silent --show-error --location \
