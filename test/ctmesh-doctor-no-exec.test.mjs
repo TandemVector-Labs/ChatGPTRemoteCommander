@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {syncthingDeviceIdFromPem,assertSyncthingRuntimeIdentity,isPinnedOptionalMmzPair,inspectOptionalMmzPairs,OPTIONAL_MMZ_CORE_ALIASES,PINNED_MMZ_DEVICE_HASH} from '../tools/commander-transfer-mesh/device-id.mjs';
+import {syncthingDeviceIdFromPem,assertSyncthingRuntimeIdentity,isPinnedOptionalMmzPair,inspectOptionalMmzPairs,inspectRequiredCorePairs,OPTIONAL_MMZ_CORE_ALIASES,PINNED_MMZ_DEVICE_HASH} from '../tools/commander-transfer-mesh/device-id.mjs';
 import {createHash} from 'node:crypto';
 import {runDoctor} from '../tools/commander-transfer-mesh/doctor.mjs';
 import {configuredLoopbackRest,fetchPinnedSyncthingJson} from '../tools/commander-transfer-mesh/pinned-rest.mjs';
@@ -82,6 +82,52 @@ test('transfer doctor rejects a root-file symlink that escapes the accepted root
   }
 });
 
+
+test('all three mandatory Core pairs fail closed on duplicate IDs and non-bidirectional types',()=>{
+  const root=path.join(os.tmpdir(),'ctmesh-strict-required-core-fixture');
+  for(const alias of OPTIONAL_MMZ_CORE_ALIASES){
+    const local='SYNTHETIC-LOCAL-'+alias;
+    const others=OPTIONAL_MMZ_CORE_ALIASES.filter(x=>x!==alias);
+    const expectedPairs=others.map(peerName=>({
+      id:'ctmesh-v1-'+[alias,peerName].sort((a,b)=>a.toLowerCase().localeCompare(b.toLowerCase())).join('-').toLowerCase(),
+      peerName,peerId:'SYNTHETIC-PEER-'+peerName
+    }));
+    const good=expectedPairs.map(pair=>({
+      id:pair.id,type:'sendreceive',paused:false,path:path.join(root,'pairs',pair.peerName),
+      devices:[{deviceID:local},{deviceID:pair.peerId}]
+    }));
+    const inspect=(folders,roster=expectedPairs)=>
+      inspectRequiredCorePairs({localDeviceId:local,root,expectedPairs:roster,folders});
+    assert.deepEqual(inspect(good),{count:3,errors:[]},alias+' healthy trio');
+    const baseline=good[0];
+    const invalidVariants=[
+      {...baseline,type:'sendonly'},
+      {...baseline,type:'receiveonly'},
+      {...baseline,type:'sendrecv'},
+      {...baseline,paused:true},
+      {...baseline,path:path.join(root,'pairs','Wrong')},
+      {...baseline,devices:[{deviceID:local},{deviceID:'UNTRUSTED'}]},
+      {...baseline,devices:[{deviceID:local},{deviceID:local}]},
+      {...baseline,devices:[{deviceID:local}]},
+      {...baseline,devices:[{deviceID:local},{deviceID:expectedPairs[0].peerId},{deviceID:'THIRD'}]}
+    ];
+    for(const bad of invalidVariants){
+      const result=inspect([bad,...good.slice(1)]);
+      assert.equal(result.count,2,'must reject invalid mandatory peer '+alias);
+      assert.equal(result.errors.length,1);
+    }
+    for(const duplicate of [baseline,{...baseline,paused:true},{...baseline,type:'sendonly'}]){
+      const result=inspect([...good,duplicate]);
+      assert.equal(result.count,2,'duplicate mandatory ID must fail closed '+alias);
+      assert.match(result.errors[0],/duplicated required Core pair/);
+    }
+    assert.equal(inspect(good.slice(1)).count,2,'missing required Core pair');
+    assert.deepEqual(inspect(good,[...expectedPairs,expectedPairs[0]]),
+      {count:0,errors:['Invalid required Core roster']},'roster cardinality bound');
+    assert.deepEqual(inspect(good,[expectedPairs[0],expectedPairs[0],expectedPairs[1]]),
+      {count:0,errors:['Invalid required Core roster']},'roster duplicate bound');
+  }
+});
 
 test('all four Core roles accept only one exactly pinned optional MMZ pair',()=>{
   assert.equal(PINNED_MMZ_DEVICE_HASH,'c51ff1c36a87da050b1f320e302cfd1a9bf69570efad6be68d2bf5a165724af8');

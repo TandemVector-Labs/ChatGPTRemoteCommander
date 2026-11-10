@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import {pathToFileURL} from 'node:url';
-import {syncthingDeviceIdFromPem,assertSyncthingRuntimeIdentity,inspectOptionalMmzPairs} from './device-id.mjs';
+import {syncthingDeviceIdFromPem,assertSyncthingRuntimeIdentity,inspectOptionalMmzPairs,inspectRequiredCorePairs} from './device-id.mjs';
 import {configuredLoopbackRest,fetchPinnedSyncthingJson} from './pinned-rest.mjs';
 // Owner-PC Syncthing launcher overrides config.xml GUI port with this fixed value.
 const GUI_OVERRIDES={PC:'127.0.0.1:18384'};
@@ -74,13 +74,11 @@ try {
   peerId:id, peerName:name
  }));
  const scoped=folders.filter(f=>f.id?.startsWith('ctmesh-v1-'));
- for(const exp of expected){
-  const f=scoped.find(x=>x.id===exp.id);
-  if(!f||f.paused||f.devices?.length!==2||new Set(f.devices.map(d=>d.deviceID)).size!==2
-   ||!f.devices.some(x=>x.deviceID===id)||!f.devices.some(x=>x.deviceID===exp.peerId)
-   ||path.resolve(f.path)!==path.resolve(resolvedRoot,'pairs',exp.peerName)){err(new Error('Invalid pair '+exp.id));}
-  else output.activePairCount++;
- }
+ // Require a unique, exactly configured, bidirectional folder for each
+ // mandatory Core peer. A duplicate ID can never hide behind Array.find().
+ const core=inspectRequiredCorePairs({localDeviceId:id,root:resolvedRoot,expectedPairs:expected,folders:scoped});
+ output.activePairCount=core.count;
+ for(const message of core.errors)err(new Error(message));
  // Every trusted Core alias can hold at most one optional MMZ pair; this
  // remains strictly pinned to the known MMZ certificate/device ID and local
  // exact folder path. Duplicates and untrusted pairs fail closed.

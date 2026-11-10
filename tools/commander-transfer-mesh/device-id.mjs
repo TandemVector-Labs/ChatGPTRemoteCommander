@@ -84,3 +84,35 @@ export function inspectOptionalMmzPairs({alias,localDeviceId,root,folders,expect
     return {count:0,error:'Untrusted optional MMZ pair'};
   return {count:1,error:null};
 }
+
+
+// Validate all mandatory Core pairs against the exact roster, not the first
+// matching folder. Syncthing configurations normally require unique IDs, but
+// this read-only security audit must reject ambiguous/duplicate API records.
+export function inspectRequiredCorePairs({localDeviceId,root,expectedPairs,folders}) {
+  if(typeof localDeviceId!=='string' || typeof root!=='string' ||
+     !Array.isArray(folders) || !Array.isArray(expectedPairs) || expectedPairs.length!==3 ||
+     expectedPairs.some(x=>!x||typeof x.id!=='string'||typeof x.peerId!=='string'||typeof x.peerName!=='string') ||
+     new Set(expectedPairs.map(x=>x.id)).size!==3)
+    return {count:0,errors:['Invalid required Core roster']};
+  let count=0;
+  const errors=[];
+  for(const pair of expectedPairs){
+    const matches=folders.filter(f=>f?.id===pair.id);
+    if(matches.length!==1){
+      errors.push('Missing or duplicated required Core pair '+pair.id);
+      continue;
+    }
+    const f=matches[0];
+    const members=Array.isArray(f.devices)?f.devices.map(x=>x?.deviceID):[];
+    const valid=f.paused===false && f.type==='sendreceive' &&
+      members.length===2 && members.every(x=>typeof x==='string') &&
+      new Set(members).size===2 && members.includes(localDeviceId) &&
+      members.includes(pair.peerId) &&
+      typeof f.path==='string' &&
+      path.resolve(f.path)===path.resolve(root,'pairs',pair.peerName);
+    if(valid)count++;
+    else errors.push('Invalid required Core pair '+pair.id);
+  }
+  return {count,errors};
+}
