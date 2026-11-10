@@ -9,9 +9,9 @@ const ALLOWED_ROUTES=new Set([
 ]);
 
 function loopbackAddress(value){
-  const match=typeof value==='string'&&/^(127\.0\.0\.1|\[::1\]):([1-9][0-9]{0,4})$/.exec(value);
-  if(!match||Number(match[2])>65535)throw new Error('Syncthing GUI requires an explicit loopback address');
-  return value;
+  const match=typeof value==='string'&&/^127\.0\.0\.1:([1-9][0-9]{0,4})$/.exec(value);
+  if(!match||Number(match[1])>65535)throw new Error('Syncthing GUI requires an explicit loopback address');
+  return Number(match[1]);
 }
 
 export function configuredLoopbackRest(xml,hostOverride){
@@ -23,9 +23,9 @@ export function configuredLoopbackRest(xml,hostOverride){
   const addresses=[...gui[0][2].matchAll(/<address>([^<]*)<\/address>/gi)];
   const keys=[...gui[0][2].matchAll(/<apikey>([^<]+)<\/apikey>/gi)];
   if(addresses.length!==1||keys.length!==1)throw new Error('Syncthing GUI address/API key missing or ambiguous');
-  const configured=loopbackAddress(addresses[0][1].trim());
-  const effective=hostOverride===undefined?configured:loopbackAddress(hostOverride);
-  return {base:'https://'+effective,apiKey:keys[0][1]};
+  const configuredPort=loopbackAddress(addresses[0][1].trim());
+  const port=hostOverride===undefined?configuredPort:loopbackAddress(hostOverride);
+  return {base:'https://127.0.0.1:'+port,apiKey:keys[0][1]};
 }
 
 // Only the fixed paths the read-only Doctor uses are reachable.
@@ -33,8 +33,19 @@ export function configuredLoopbackRest(xml,hostOverride){
 export async function fetchPinnedSyncthingJson(base,route,certificatePem,apiKey,authenticated=true){
   if(typeof base!=='string'||!base.startsWith('https://'))
     throw new Error('Pinned Syncthing HTTPS required');
-  loopbackAddress(base.slice(8));
+  // Keep the transport hostname and path independent of runtime input. Only
+  // the range-validated numeric port is configurable; never assemble a URL.
+  const port=loopbackAddress(base.slice(8));
   if(!ALLOWED_ROUTES.has(route))throw new Error('Unapproved Syncthing REST route');
+  let safePath;
+  switch(route){
+    case '/rest/noauth/health':safePath='/rest/noauth/health';break;
+    case '/rest/system/status':safePath='/rest/system/status';break;
+    case '/rest/system/version':safePath='/rest/system/version';break;
+    case '/rest/config/folders':safePath='/rest/config/folders';break;
+    case '/rest/system/connections':safePath='/rest/system/connections';break;
+    default:throw new Error('Unapproved Syncthing REST route');
+  }
   if(typeof certificatePem!=='string'||certificatePem.length===0||certificatePem.length>65536)
     throw new Error('Syncthing GUI public certificate invalid');
   if(authenticated&&(typeof apiKey!=='string'||apiKey.length===0))
@@ -43,7 +54,8 @@ export async function fetchPinnedSyncthingJson(base,route,certificatePem,apiKey,
   try{pinned=createHash('sha256').update(new X509Certificate(certificatePem).raw).digest();}
   catch{throw new Error('Syncthing GUI public certificate invalid');}
   return await new Promise((resolve,reject)=>{
-    const req=https.get(base+route,{
+    const req=https.get({
+      protocol:'https:',hostname:'127.0.0.1',port,path:safePath,
       ca:certificatePem,
       rejectUnauthorized:true,
       agent:false,
