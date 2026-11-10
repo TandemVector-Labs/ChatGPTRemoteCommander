@@ -147,13 +147,16 @@ test('pinned TLS helper rejects plaintext, untrusted hosts and arbitrary paths b
 });
 
 test('pinned HTTPS prevents impostor key capture and permits an exact certificate',async t=>{
-  if(process.platform==='win32'){t.skip('Windows OpenSSL ephemeral TLS fixture not provisioned');return;}
   const {spawnSync}=await import('node:child_process');
+  const openssl=spawnSync('openssl',['version'],{encoding:'utf8',timeout:2500});
+  if(openssl.status!==0){t.skip('OpenSSL unavailable for synthetic TLS fixture');return;}
   const https=await import('node:https');
   const scratch=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-pinned-tls-fixture-'));
+  const opensslConfig=path.join(scratch,'openssl.cnf');
+  fs.writeFileSync(opensslConfig,'[req]\\ndistinguished_name=req_distinguished_name\\n[req_distinguished_name]\\n'.replaceAll('\\n','\n'));
   const generate=(which)=>{
     const pem=path.join(scratch,which+'.crt'),key=path.join(scratch,which+'.key');
-    const result=spawnSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes',
+    const result=spawnSync('openssl',['req','-config',opensslConfig,'-x509','-newkey','rsa:2048','-nodes',
       '-days','1','-subj','/CN=127.0.0.1','-addext','subjectAltName=IP:127.0.0.1',
       '-keyout',key,'-out',pem],{encoding:'utf8',timeout:6500});
     assert.equal(result.status,0,'OpenSSL fixture failed: '+(result.stderr||'').slice(-150));
