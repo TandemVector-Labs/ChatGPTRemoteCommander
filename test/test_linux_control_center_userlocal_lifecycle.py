@@ -48,6 +48,63 @@ class UserLocalLifecycleTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         return r
 
+    def test_payload_read_refuses_symlink_substitution_after_directory_pin(self):
+        # The test source and unrelated sentinel are exclusively inside a
+        # TemporaryDirectory; this does not read or modify user credentials.
+        import importlib.util
+        sentinel = self.base / "unrelated-sentinel.txt"
+        sentinel.write_text("synthetic private fixture", encoding="utf-8")
+        readme = self.source / "README.txt"
+        spec = importlib.util.spec_from_file_location("gtk_qa_read_guard", self.cli)
+        manager = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(manager)
+        real_open = manager.os.open
+        swapped = []
+
+        def replace_before_open(name, flags, *args, **kwargs):
+            if name == "README.txt" and kwargs.get("dir_fd") is not None and not swapped:
+                readme.unlink()
+                readme.symlink_to(sentinel)
+                swapped.append(True)
+            return real_open(name, flags, *args, **kwargs)
+
+        with patch.object(manager.os, "open", side_effect=replace_before_open):
+            with self.assertRaises(OSError):
+                manager.read_payload(self.source)
+        self.assertEqual(len(swapped), 1)
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "synthetic private fixture")
+        self.assertTrue(readme.is_symlink())
+
+    def test_install_reuses_verified_snapshot_after_symlink_replacement(self):
+        # Change source only after the pinned validation/read finished; the
+        # installation must still use verified bytes instead of reopening it.
+        import importlib.util
+        sentinel = self.base / "private-sentinel.txt"
+        sentinel.write_bytes(b"SYNTHETIC_EXTERNAL_NOT_PACKAGE_CONTENT")
+        component = self.source / "README.txt"
+        accepted = component.read_bytes()
+        spec = importlib.util.spec_from_file_location("gtk_qa_snapshot_guard", self.cli)
+        manager = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(manager)
+        manager.ensure_parents(self.scope)
+        actual_read = manager.read_payload
+        swapped = []
+
+        def replace_after_read(folder, *args, **kwargs):
+            value = actual_read(folder, *args, **kwargs)
+            if Path(folder) == self.source and kwargs.get("with_raw") and not swapped:
+                component.unlink()
+                component.symlink_to(sentinel)
+                swapped.append(True)
+            return value
+
+        with patch.object(manager, "read_payload", side_effect=replace_after_read):
+            manager.install(self.source, self.scope)
+        self.assertEqual(len(swapped), 1)
+        self.assertEqual((self.scope / "current/README.txt").read_bytes(), accepted)
+        self.assertEqual(sentinel.read_bytes(), b"SYNTHETIC_EXTERNAL_NOT_PACKAGE_CONTENT")
+        self.assertTrue(component.is_symlink())
+
     def test_install_noop_uninstall_with_no_core_mutation(self):
         no_ack = self.run_manager("--install", ack=False)
         self.assertEqual(no_ack.returncode, 2)
