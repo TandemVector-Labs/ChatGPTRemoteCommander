@@ -34,6 +34,10 @@ done
 
 [[ "$SOURCE_REF" =~ ^[A-Za-z0-9._/-]{1,128}$ ]] || { echo 'Invalid --source-ref' >&2; exit 2; }
 [[ -z "$EXPECTED_COMMIT" || "$EXPECTED_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]] || { echo 'Invalid --expected-commit' >&2; exit 2; }
+case "$REPO_URL" in
+  https://github.com/GOD13emad/ChatGPTRemoteCommander.git|https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git) ;;
+  *) echo 'RC_SOURCE_REPO_DENIED' >&2; exit 2 ;;
+esac
 
 need() { command -v "$1" >/dev/null 2>&1; }
 

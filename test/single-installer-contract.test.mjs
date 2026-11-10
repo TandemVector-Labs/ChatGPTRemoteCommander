@@ -125,6 +125,19 @@ test('Windows source fetches allow only the legacy or organization repository', 
     assert.ok(fetch<0 || fetch>denied, name+' may not fetch before repository validation');
   }
 });
+test('Linux source fetches allow only the legacy or organization repository', () => {
+  const org='https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git';
+  const legacy='https://github.com/GOD13emad/ChatGPTRemoteCommander.git';
+  for(const name of ['server-install-linux.sh','install.sh','auto-update-linux.sh']){
+    const script=read(name);
+    const policy=script.indexOf('case "$REPO_URL" in');
+    const denied=script.indexOf("echo 'RC_SOURCE_REPO_DENIED'");
+    assert.ok(policy>=0 && denied>policy, name+' must reject untrusted source overrides');
+    assert.ok(script.includes(legacy) && script.includes(org), name+' must allow only the legacy and organization repositories');
+    const fetch=script.indexOf('remote add origin');
+    assert.ok(fetch<0 || fetch>denied, name+' may not fetch before repository validation');
+  }
+});
 test('hosted canaries select the organizational source rather than implicit legacy default', () => {
   const expected='REMOTE_COMMANDER_REPO_URL: https://github.com/TandemVector-Labs/ChatGPTRemoteCommander.git';
   assert.ok(read('.github/workflows/server-install-canary.yml').includes(expected));
@@ -133,5 +146,6 @@ test('hosted canaries select the organizational source rather than implicit lega
   const linux=read('server-install-linux.sh');
   assert.ok(linux.includes('REMOTE_COMMANDER_REPO_URL'), 'Linux installer must inherit same explicit source');
   assert.ok(read('install.sh').includes('REMOTE_COMMANDER_REPO_URL'), 'nested Linux installer must inherit the same explicit source');
+  assert.ok(read('auto-update-linux.sh').includes('REMOTE_COMMANDER_REPO_URL'), 'Linux updater must inherit the same explicit source');
 });
 // The organization-source allowlist is exercised without mutating the host repository.
