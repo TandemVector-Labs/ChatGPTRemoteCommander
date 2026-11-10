@@ -50,8 +50,12 @@ export function assertSyncthingRuntimeIdentity(expectedId, certificateId, status
 // from a folder name alone; peer must also match this exact pinned fingerprint.
 export const PINNED_MMZ_DEVICE_HASH='c51ff1c36a87da050b1f320e302cfd1a9bf69570efad6be68d2bf5a165724af8';
 
+// Proposed five-node Mesh admission: all four Core aliases may hold exactly
+// one independently certificate-pinned MMZ pair. No other role is eligible.
+export const OPTIONAL_MMZ_CORE_ALIASES=Object.freeze(['PC','Linux','EmadServer','Amirreza']);
+
 export function isPinnedOptionalMmzPair({alias,localDeviceId,root,folder,expectedPeerHash=PINNED_MMZ_DEVICE_HASH}) {
-  if(alias!=='PC' && alias!=='Linux')return false;
+  if(!OPTIONAL_MMZ_CORE_ALIASES.includes(alias))return false;
   if(!folder || folder.paused || folder.type!=='sendreceive')return false;
   const pairId='ctmesh-v1-'+[alias,'MMZ'].sort((a,b)=>a.toLowerCase().localeCompare(b.toLowerCase())).join('-').toLowerCase();
   if(folder.id!==pairId || path.resolve(folder.path)!==path.resolve(root,'pairs','MMZ'))return false;
@@ -64,3 +68,19 @@ export function isPinnedOptionalMmzPair({alias,localDeviceId,root,folder,expecte
 
 // Updating this pin requires independent certificate-to-device-ID derivation and
 // a read-only roster check on the authorized owner hosts; never trust a folder label.
+
+
+// Decide whether this Core node has one OPTIONAL, trusted MMZ folder.
+// Fail closed on repeated identifiers (even if one duplicate is paused), wrong
+// role, wrong pair path/type/device list or an unpinned certificate identity.
+export function inspectOptionalMmzPairs({alias,localDeviceId,root,folders,expectedPeerHash=PINNED_MMZ_DEVICE_HASH}) {
+  if(!OPTIONAL_MMZ_CORE_ALIASES.includes(alias)||!Array.isArray(folders))
+    return {count:0,error:'Invalid optional MMZ context'};
+  const id='ctmesh-v1-'+[alias,'MMZ'].sort((a,b)=>a.toLowerCase().localeCompare(b.toLowerCase())).join('-').toLowerCase();
+  const matching=folders.filter(folder=>folder?.id===id);
+  if(matching.length>1)return {count:0,error:'Duplicate optional MMZ pair'};
+  if(matching.length===0||matching[0].paused)return {count:0,error:null};
+  if(!isPinnedOptionalMmzPair({alias,localDeviceId,root,folder:matching[0],expectedPeerHash}))
+    return {count:0,error:'Untrusted optional MMZ pair'};
+  return {count:1,error:null};
+}
