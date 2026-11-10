@@ -7,6 +7,7 @@ import {fileURLToPath} from 'node:url';
 import {syncthingDeviceIdFromPem,assertSyncthingRuntimeIdentity,isPinnedOptionalMmzPair,PINNED_MMZ_DEVICE_HASH} from '../tools/commander-transfer-mesh/device-id.mjs';
 import {createHash} from 'node:crypto';
 import {runDoctor} from '../tools/commander-transfer-mesh/doctor.mjs';
+import {configuredLoopbackRest,fetchPinnedSyncthingJson} from '../tools/commander-transfer-mesh/pinned-rest.mjs';
 
 const project=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const doctor=path.join(project,'tools','commander-transfer-mesh','doctor.mjs');
@@ -107,5 +108,93 @@ test('an optional MMZ pair requires exact pin, folder, peers, path and host role
     ])assert.equal(isPinnedOptionalMmzPair({...candidate,folder:edited}),false,'invalid optional pair must fail closed');
     assert.equal(isPinnedOptionalMmzPair({...candidate,alias:'EmadServer'}),false,'server roles cannot acquire an extra peer');
     assert.equal(isPinnedOptionalMmzPair({...candidate,alias:'Amirreza'}),false,'unrelated hosts cannot acquire an extra peer');
+  }
+});
+
+
+test('pinned TLS Doctor selects exactly one configured GUI endpoint, not a health-probed port',()=>{
+  const config=(address,enabled='true')=>'<configuration><gui enabled="'+enabled+'" tls="false">'+
+    '<address>'+address+'</address><apikey>synthetic-fixture-key</apikey></gui></configuration>';
+  assert.deepEqual(configuredLoopbackRest(config('127.0.0.1:8384')),
+    {base:'https://127.0.0.1:8384',apiKey:'synthetic-fixture-key'});
+  assert.deepEqual(configuredLoopbackRest(config('127.0.0.1:8384'),'127.0.0.1:18384'),
+    {base:'https://127.0.0.1:18384',apiKey:'synthetic-fixture-key'});
+  for(const address of ['localhost:8384','0.0.0.0:8384','127.0.0.2:8384',
+    '127.0.0.1:0','127.0.0.1:65536','evil.test:8384','127.0.0.1:8384/path'])
+    assert.throws(()=>configuredLoopbackRest(config(address)),/loopback/);
+  assert.throws(()=>configuredLoopbackRest(config('127.0.0.1:8384','false')),/disabled/);
+  assert.throws(()=>configuredLoopbackRest(config('127.0.0.1:8384'),'0.0.0.0:18384'),/loopback/);
+  assert.throws(()=>configuredLoopbackRest('<configuration/>'),/Exactly one/);
+  assert.throws(()=>configuredLoopbackRest(config('127.0.0.1:8384')+config('127.0.0.1:8384')),/Exactly one/);
+  assert.throws(()=>configuredLoopbackRest('<gui><address>127.0.0.1:8384</address></gui>'),/API key/);
+  const source=fs.readFileSync(doctor,'utf8');
+  assert.ok(source.includes('fetchPinnedSyncthingJson'));
+  assert.ok(source.includes("state/https-cert.pem"));
+  assert.ok(source.includes("const GUI_OVERRIDES={PC:'127.0.0.1:18384'}"));
+  assert.equal(source.includes('const candidates='),false);
+  assert.equal(source.includes('fetchImpl'),false);
+  assert.equal(source.includes("http://127.0.0.1:"),false);
+});
+
+test('pinned TLS helper rejects plaintext, untrusted hosts and arbitrary paths before I/O',async()=>{
+  const key='SYNTHETIC_FIXTURE_KEY';
+  for(const base of ['http://127.0.0.1:8384','https://evil.invalid:8384',
+     'https://127.0.0.2:8384','https://127.0.0.1:0','https://127.0.0.1:65536'])
+    await assert.rejects(fetchPinnedSyncthingJson(base,'/rest/system/status',cert,key),/HTTPS|loopback/);
+  await assert.rejects(fetchPinnedSyncthingJson('https://127.0.0.1:8384','/rest/unknown',cert,key),/Unapproved/);
+  await assert.rejects(fetchPinnedSyncthingJson('https://127.0.0.1:8384','/rest/system/status','invalid',key),/public certificate invalid/);
+  await assert.rejects(fetchPinnedSyncthingJson('https://127.0.0.1:8384','/rest/system/status',cert,''),/API key unavailable/);
+});
+
+test('pinned HTTPS prevents impostor key capture and permits an exact certificate',async t=>{
+  const {spawnSync}=await import('node:child_process');
+  const openssl=spawnSync('openssl',['version'],{encoding:'utf8',timeout:2500});
+  if(openssl.status!==0){t.skip('OpenSSL unavailable for synthetic TLS fixture');return;}
+  const https=await import('node:https');
+  const scratch=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-pinned-tls-fixture-'));
+  const opensslConfig=path.join(scratch,'openssl.cnf');
+  fs.writeFileSync(opensslConfig,'[req]\\ndistinguished_name=req_distinguished_name\\n[req_distinguished_name]\\n'.replaceAll('\\n','\n'));
+  const generate=(which)=>{
+    const pem=path.join(scratch,which+'.crt'),key=path.join(scratch,which+'.key');
+    const result=spawnSync('openssl',['req','-config',opensslConfig,'-x509','-newkey','rsa:2048','-nodes',
+      '-days','1','-subj','/CN=127.0.0.1','-addext','subjectAltName=IP:127.0.0.1',
+      '-keyout',key,'-out',pem],{encoding:'utf8',timeout:6500});
+    assert.equal(result.status,0,'OpenSSL fixture failed: '+(result.stderr||'').slice(-150));
+    return {pem:fs.readFileSync(pem,'utf8'),key:fs.readFileSync(key,'utf8')};
+  };
+  const start=server=>new Promise((resolve,reject)=>{
+    server.once('error',reject);server.listen(0,'127.0.0.1',()=>resolve(server.address().port));
+  });
+  const close=server=>server?new Promise(resolve=>server.close(resolve)):Promise.resolve();
+  let legitimate,impostor;
+  try{
+    const trusted=generate('trusted'),untrusted=generate('impostor');
+    let authenticated=0,unauthenticatedWithKey=0,impostorHits=0;
+    const fixtureKey='SYNTHETIC_TLS_QA_TOKEN_NOT_REAL';
+    legitimate=https.createServer({cert:trusted.pem,key:trusted.key},(req,res)=>{
+      const hasKey=req.headers['x-api-key']===fixtureKey;
+      if(req.url==='/rest/noauth/health' && hasKey)unauthenticatedWithKey++;
+      if(req.url==='/rest/system/status'&&hasKey)authenticated++;
+      res.writeHead(200,{'content-type':'application/json'});
+      res.end(JSON.stringify(req.url==='/rest/noauth/health'?{status:'OK'}:{myID:'SYNTHETIC'}));
+    });
+    const validPort=await start(legitimate);
+    const validBase='https://127.0.0.1:'+validPort;
+    assert.deepEqual(await fetchPinnedSyncthingJson(validBase,'/rest/noauth/health',trusted.pem,null,false),{status:'OK'});
+    assert.deepEqual(await fetchPinnedSyncthingJson(validBase,'/rest/system/status',trusted.pem,fixtureKey),{myID:'SYNTHETIC'});
+    assert.equal(authenticated,1);
+    assert.equal(unauthenticatedWithKey,0);
+    impostor=https.createServer({cert:untrusted.pem,key:untrusted.key},(req,res)=>{
+      impostorHits++;
+      res.writeHead(200,{'content-type':'application/json'});
+      res.end('{"status":"OK"}');
+    });
+    const falsePort=await start(impostor);
+    await assert.rejects(fetchPinnedSyncthingJson(
+      'https://127.0.0.1:'+falsePort,'/rest/system/status',trusted.pem,fixtureKey));
+    assert.equal(impostorHits,0,'wrong certificate must fail before any HTTP request or API key');
+  }finally{
+    await close(impostor);await close(legitimate);
+    fs.rmSync(scratch,{recursive:true,force:true});
   }
 });
