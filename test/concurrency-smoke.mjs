@@ -3,6 +3,7 @@ import path from 'node:path';
 import { cp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { waitForHealth } from './concurrency-health-readiness.mjs';
 
 const root = path.resolve('test', '.tmp-concurrency-root');
 const isolatedApp = path.resolve('test', '.tmp-concurrency-app');
@@ -49,17 +50,6 @@ server.stdout.on('data', (chunk) => { serverOutput += chunk.toString('utf8'); })
 server.stderr.on('data', (chunk) => { serverOutput += chunk.toString('utf8'); });
 process.once('exit', () => { try { server.kill('SIGTERM'); } catch {} });
 
-async function waitForHealth() {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/health`);
-      if (response.ok) return;
-    } catch { /* startup */ }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(`server did not become healthy: ${serverOutput}`);
-}
-
 async function waitForRuntimeState(timeoutMs = 30000) {
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
@@ -94,7 +84,7 @@ async function callTool(name, args = {}) {
 }
 
 try {
-  await waitForHealth();
+  await waitForHealth({ server, port, getOutput: () => serverOutput });
   const isolatedState = await waitForRuntimeState();
   assert.equal(isolatedState.port, port);
   assert.equal(path.resolve(isolatedState.projectDir), isolatedApp);
