@@ -3,6 +3,7 @@ import path from 'node:path';
 import { cp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { waitForHealth } from './concurrency-health-readiness.mjs';
 
 const root = path.resolve('test', '.tmp-concurrency-root');
 const isolatedApp = path.resolve('test', '.tmp-concurrency-app');
@@ -49,27 +50,6 @@ server.stdout.on('data', (chunk) => { serverOutput += chunk.toString('utf8'); })
 server.stderr.on('data', (chunk) => { serverOutput += chunk.toString('utf8'); });
 process.once('exit', () => { try { server.kill('SIGTERM'); } catch {} });
 
-async function waitForHealth() {
-  // CI Windows native module startup can be slower under concurrent runner load.
-  // Preserve a bounded deadline; do not treat premature child exit as a retry.
-  const deadline = Date.now() + (process.platform === 'win32' ? 30_000 : 15_000);
-  while (Date.now() < deadline) {
-    if (server.exitCode !== null || server.signalCode !== null) {
-      throw new Error('server exited before health became ready: ' + serverOutput);
-    }
-    try {
-      // A single stalled HTTP request must not bypass the overall startup limit.
-      const requestMs = Math.min(1_000, Math.max(1, deadline - Date.now()));
-      const response = await fetch('http://127.0.0.1:' + port + '/health', {
-        signal: AbortSignal.timeout(requestMs)
-      });
-      if (response.ok) return;
-    } catch { /* startup */ }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error('server did not become healthy within startup deadline: ' + serverOutput);
-}
-
 async function waitForRuntimeState(timeoutMs = 30000) {
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
@@ -104,7 +84,7 @@ async function callTool(name, args = {}) {
 }
 
 try {
-  await waitForHealth();
+  await waitForHealth({ server, port, getOutput: () => serverOutput });
   const isolatedState = await waitForRuntimeState();
   assert.equal(isolatedState.port, port);
   assert.equal(path.resolve(isolatedState.projectDir), isolatedApp);

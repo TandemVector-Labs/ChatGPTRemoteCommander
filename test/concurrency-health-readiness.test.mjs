@@ -1,13 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import vm from 'node:vm';
-
-const source = readFileSync(new URL('./concurrency-smoke.mjs', import.meta.url), 'utf8');
-const start = source.indexOf('async function waitForHealth() {');
-const end = source.indexOf('\nasync function waitForRuntimeState(', start);
-assert.ok(start !== -1 && end > start, 'startup health function must remain present');
-const implementation = source.slice(start, end).trim();
+import { waitForHealth } from './concurrency-health-readiness.mjs';
 
 function fixture({ platform = 'linux', reply, initialExit = null, exitAtMs = null }) {
   let nowMs = 10000;
@@ -15,33 +8,29 @@ function fixture({ platform = 'linux', reply, initialExit = null, exitAtMs = nul
   let fetchCalls = 0;
   const timeoutValues = [];
   const server = { exitCode: initialExit, signalCode: null };
-  const vmContext = {
-    Date: { now: () => nowMs },
-    process: { platform },
+  const execute = () => waitForHealth({
+    platform,
     server,
     port: 47931,
-    serverOutput: '[fixture-only-output]',
-    AbortSignal: {
-      timeout: (ms) => {
-        assert.ok(Number.isInteger(ms) && ms > 0 && ms <= 1000);
-        timeoutValues.push(ms);
-        return { fixtureTimeoutMs: ms };
-      },
+    getOutput: () => '[fixture-only-output]',
+    now: () => nowMs,
+    abortAfter: (ms) => {
+      assert.ok(Number.isInteger(ms) && ms > 0 && ms <= 1000);
+      timeoutValues.push(ms);
+      return { fixtureTimeoutMs: ms };
     },
-    fetch: async (url, options) => {
+    fetchHealth: async (url, options) => {
       assert.equal(url, 'http://127.0.0.1:47931/health');
-      assert.ok(options?.signal?.fixtureTimeoutMs > 0, 'each health fetch must have a bounded abort signal');
+      assert.ok(options?.signal?.fixtureTimeoutMs > 0);
       fetchCalls++;
       return reply({ fetchCalls, nowMs, timeoutMs: options.signal.fixtureTimeoutMs, advance: (ms) => { nowMs += ms; } });
     },
-    setTimeout: (resolve, ms) => {
+    sleep: async (ms) => {
       assert.equal(ms, 100);
       nowMs += ms;
       if (exitAtMs != null && nowMs - startedAt >= exitAtMs) server.exitCode = 17;
-      resolve();
-    },
-  };
-  const execute = () => vm.runInNewContext(implementation + '\nwaitForHealth();', vmContext, { timeout: 3000 });
+    }
+  });
   return { execute, getElapsedMs: () => nowMs - startedAt, getFetchCalls: () => fetchCalls, timeoutValues };
 }
 
