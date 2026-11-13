@@ -16,7 +16,10 @@ AppId={{7AB894C6-897D-43B7-B83A-24E1A8DF66A2}
 AppName=Remote Commander
 AppVersion={#MyVersion}
 AppVerName=Remote Commander {#MyVersion}
-AppPublisher=Remote Commander
+AppPublisher=TandemVector Labs
+AppPublisherURL=https://github.com/Usefull-Skills
+AppSupportURL=https://github.com/GOD13emad/ChatGPTRemoteCommander/issues
+; AppPublisher is installer metadata, not an Authenticode-trusted publisher identity.
 DefaultDirName={localappdata}\Programs\Remote Commander
 DefaultGroupName=Remote Commander
 DisableProgramGroupPage=yes
@@ -44,6 +47,7 @@ Name: "custom"; Description: "Custom"; Flags: iscustom
 [Components]
 Name: "core"; Description: "Remote Commander Core and profile management"; Types: core complete custom; Flags: fixed
 Name: "controlmonitor"; Description: "Control && Monitoring panel"; Types: complete
+Name: "workplugin"; Description: "ChatGPT Work Plugin setup (requires registered App ID after install)"; Types: complete
 #ifdef BrowserSetup
   #define BrowserSetupName ExtractFileName(BrowserSetup)
 Name: "browser"; Description: "Remote Commander Browser"; Types: complete
@@ -213,11 +217,17 @@ end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
-  PrereqScript, CoreScript, Params: String;
+  PrereqScript, CoreScript, Params, ExistingCoreGit: String;
+  ExistingCore: Boolean;
   ResultCode: Integer;
 begin
   Result := '';
   try
+    // Existing per-user Git installation is an access-policy authority.
+    // An ordinary Desktop/Control Center upgrade must not silently switch
+    // a previously owner-authorized FULL_POWER profile to Standard.
+    ExistingCoreGit := ExpandConstant('{localappdata}\ChatGPTRemoteCommander\app\.git');
+    ExistingCore := DirExists(ExistingCoreGit) or FileExists(ExistingCoreGit);
     EnsurePowerShell7;
 
     ExtractTemporaryFile('server-install-windows.ps1');
@@ -235,7 +245,8 @@ begin
     CoreScript := ExpandConstant('{tmp}\install.ps1');
     Params :=
       '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + CoreScript + '"' +
-      ' -StartServer -StandardMode -SourceRef "{#MySourceRef}" -ExpectedCommit "{#MyCommit}"';
+      ' -StartServer -SourceRef "{#MySourceRef}" -ExpectedCommit "{#MyCommit}"';
+    if not ExistingCore then Params := Params + ' -StandardMode';
     WizardForm.StatusLabel.Caption := 'Installing and verifying Remote Commander core for this user...';
     if not Exec(PwshPath, Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
       RaiseException('Could not start Remote Commander core installer.');
@@ -248,7 +259,7 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  QueueDir, QueuePath, Normalized, Mode, Manifest: String;
+  QueueDir, QueuePath, Normalized, Mode, Manifest, PluginStatus: String;
 begin
   if CurStep <> ssPostInstall then Exit;
 
@@ -262,6 +273,8 @@ begin
 
   if WizardIsComponentSelected('controlmonitor') then Mode := 'ControlMonitoring'
   else Mode := 'Core';
+  if WizardIsComponentSelected('workplugin') then PluginStatus := 'PENDING_APP_ID'
+  else PluginStatus := 'NOT_REQUESTED';
 
   Manifest :=
     '{' + #13#10 +
@@ -269,7 +282,9 @@ begin
     '  "product": "Remote Commander",' + #13#10 +
     '  "version": "{#MyVersion}",' + #13#10 +
     '  "mode": "' + Mode + '",' + #13#10 +
-    '  "controlMonitoring": ' + JsonBool(WizardIsComponentSelected('controlmonitor')) + ',' + #13#10 +
+    '  "controlMonitoring": ' + JsonBool(WizardIsComponentSelected('controlmonitor')) + ',' + #13#10
+    '  "workPluginSelected": ' + JsonBool(WizardIsComponentSelected('workplugin')) + ',' + #13#10
+    '  "workPluginStatus": "' + PluginStatus + '",' + #13#10 +
 #ifdef BrowserSetup
     '  "browserSelected": ' + JsonBool(WizardIsComponentSelected('browser')) + ',' + #13#10 +
 #else

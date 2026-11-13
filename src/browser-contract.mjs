@@ -12,6 +12,9 @@ const mutation={readOnlyHint:false,destructiveHint:true,openWorldHint:true,idemp
 const profile=str(32,{pattern:'^[a-z][a-z0-9_-]{0,31}$'});
 const selector=str(512);
 const defs=[
+ ['browser_chat_tabs','Read privacy-minimized ChatGPT tab presence from the Commander-owned Chromium browser core. No extension, Native Messaging, DOM text, account attestation or user-browser profile is involved.',object(lease,['lease']),ro],
+ ['browser_chat_tab_open','Open a lease-scoped ChatGPT tab in the Commander-owned browser only, maximum 16.',object({...lease,url:str(2048)},['lease','url']),open],
+ ['browser_chat_tab_close','Close a Commander-owned tab by opaque handle.',object({...lease,tabRef:str(32,{pattern:'^[a-f0-9]{32}$'})},['lease','tabRef']),mutation],
  ['browser_status','Report zero-interference background-browser readiness. This never opens a page, touches the user desktop, reads cookies, or accesses the browser password store.',object(),ro],
  ['browser_session_begin','Start one owned headless browser session using a Commander-only profile. Persistent mode preserves that owned profile cookies/local storage between sessions; it never reuses or unlocks the user browser profile/password store.',object({ttlSeconds:int(30,1800),profile,mode:choice('persistent','isolated')},[]),coordination],
  ['browser_session_renew','Renew the owned background-browser lease.',object({...lease,ttlSeconds:int(30,1800)},['lease']),coordination],
@@ -42,6 +45,13 @@ export function validateBrowserInput(name,input){
  const errors=validateJsonSchema(input,rule.inputSchema);
  if(errors.length)throw browserError('BROWSER_INVALID_ARGUMENTS');
  if(name==='browser_navigate'&&!validUrl(input.url))throw browserError('BROWSER_URL_NOT_ALLOWED');
+ if(name==='browser_chat_tab_open'){
+   let u;try{u=new URL(input.url);}catch{throw browserError('BROWSER_CHAT_URL_NOT_ALLOWED');}
+   if(u.protocol!=='https:'||!['chatgpt.com','chat.openai.com'].includes(u.hostname)||
+      u.username||u.password||u.port||u.search||u.hash||
+      !(u.pathname==='/'||/^\/(?:g\/[^/?#]{1,120}\/)?c\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/?$/i.test(u.pathname)))
+     throw browserError('BROWSER_CHAT_URL_NOT_ALLOWED');
+ }
  if(name==='browser_wait'){
    const count=Number(input.selector!==undefined)+Number(input.textIncludes!==undefined)+Number(input.urlIncludes!==undefined);
    if(count!==1)throw browserError('BROWSER_WAIT_EXACTLY_ONE_CONDITION');

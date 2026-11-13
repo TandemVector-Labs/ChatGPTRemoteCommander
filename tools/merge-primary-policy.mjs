@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { mergeExplicitOwnerRunnerPolicy } from '../src/project-runner-config.mjs';
+import { mergeExplicitOwnerGuiPolicy } from '../src/owner-gui-policy.mjs';
 
 function parse(argv) {
   const out = {};
@@ -26,12 +27,13 @@ const args = parse(process.argv.slice(2));
 const active = JSON.parse(fs.readFileSync(args.active, 'utf8'));
 const local = JSON.parse(fs.readFileSync(args.local, 'utf8'));
 const result = mergeExplicitOwnerRunnerPolicy(active, local);
-const outputText = JSON.stringify(result.config, null, 2) + '\n';
+const ownerGui = mergeExplicitOwnerGuiPolicy(result.config, local);
+const outputText = JSON.stringify(ownerGui.config, null, 2) + '\n';
 atomicWrite(args.output, outputText);
 console.log(JSON.stringify({
   ok: true,
-  merged: result.merged,
-  status: result.status,
+  merged: result.merged || ownerGui.merged,
+  status: ownerGui.merged ? 'EXPLICIT_OWNER_GUI_POLICY' : result.status,
   output: path.resolve(args.output),
   configSha256: createHash('sha256').update(outputText).digest('hex')
 }));

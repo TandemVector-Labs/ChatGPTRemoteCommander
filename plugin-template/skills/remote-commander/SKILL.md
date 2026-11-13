@@ -9,6 +9,8 @@ Use only the exact registered app for the intended computer. Verify `system_stat
 
 Before mutation, read the current state, identify the exact target, and keep the change narrow. Preserve unrelated files and use normal product confirmation for privileged actions. Do not change network/firewall/VPN/DNS, reboot, shutdown, logoff, credentials, or account permissions unless explicitly requested and supported. Never request Runtime API keys, tunnel credentials, bearer tokens, or private keys in chat.
 
+**ChatGPT-first key boundary:** execute the exposed Commander MCP tools in this ChatGPT conversation; Codex and Work are optional separate clients, not prerequisites or API-key brokers. The ChatGPT session has no automatically reusable `OPENAI_API_KEY`. The tunnel-client on the selected computer must use the **locally enrolled Runtime API key of that device/profile**, selected through the registered app and its Tunnel. Never request, extract, transplant or substitute credentials from the conversation, another user, a connected account, or an ambient shell variable. The server's `No authentication / None` on a private MCP loopback endpoint does not establish caller identity. `system_status` verifies the device/profile's observed runtime, not the human's authenticated ChatGPT account; enforce workspace and Platform permissions externally and respect tool/action confirmation.
+
 ## Linux-first runtime profile
 
 When `system_status.platform` is `linux`, treat Linux as the authoritative execution environment for this device.

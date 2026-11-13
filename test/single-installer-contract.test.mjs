@@ -44,7 +44,9 @@ test('fresh Windows bootstrap elevates only machine prerequisites and returns to
   assert.ok(iss.includes("ShellExec('runas'"),'machine prerequisite boundary must explicitly elevate');
   assert.ok(iss.includes('-PrerequisitesOnly'));
   assert.ok(iss.includes("Exec(PwshPath, Params"),'per-user core install must use the non-elevated setup context');
-  assert.ok(iss.includes('-StartServer -StandardMode'));
+  assert.ok(iss.includes(' -StartServer -SourceRef "'), 'setup must preserve the existing core profile');
+  assert.ok(iss.includes("if not ExistingCore then Params := Params + ' -StandardMode';"),
+    'fresh installations remain Standard while existing installations preserve their access tier');
   assert.ok(iss.includes('PowerShell-7.6.6-win-x64.msi'));
   assert.ok(iss.includes('958838FF55091E1C8705D89EFED0CC7E8245A3A6EF6C0CCFAE20015227108AD8'));
 
@@ -109,4 +111,22 @@ test('product icon is a standards-compliant multi-image ICO asset',()=>{
   assert.deepEqual([...b.subarray(0,4)],[0,0,1,0]);
   const count=b.readUInt16LE(4);
   assert.ok(count>=4,'ICO should contain multiple display sizes');
+});
+
+test('native Desktop upgrade preserves authorized existing Core tier instead of forcing Standard',()=>{
+  const iss=read('installer/RemoteCommander.iss');
+  const install=read('install.ps1');
+  const section=iss.slice(iss.indexOf('function PrepareToInstall'),iss.indexOf('procedure CurStepChanged'));
+  assert.ok(section.includes("ExistingCoreGit := ExpandConstant('{localappdata}\\ChatGPTRemoteCommander\\app\\.git');"),
+    'detect only the canonical existing user-local Core repository');
+  assert.ok(section.includes('ExistingCore := DirExists(ExistingCoreGit) or FileExists(ExistingCoreGit);'),
+    'accept directory or worktree Git markers without assuming a fresh installation');
+  assert.ok(section.includes("if not ExistingCore then Params := Params + ' -StandardMode';"),
+    'do not pass a demotion switch into an existing Core');
+  assert.equal(section.includes(' -StartServer -StandardMode -SourceRef'),false,
+    'unconditional Standard on Desktop update would downgrade existing owner-authorized Power');
+  assert.ok(install.includes("if ($StandardMode) { $args += '-StandardMode' }"),
+    'installer forwards explicit Standard only when supplied');
+  assert.ok(install.includes('Invoke-ExistingSafeUpdate'),
+    'existing Core still routes through the qualified updater');
 });

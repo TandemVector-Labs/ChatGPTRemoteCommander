@@ -1,7 +1,11 @@
 name: CI
 
+# A feature branch with a PR receives one required CI job from pull_request.
+# Retain CI for accepted main pushes and all release/other tag pushes.
 on:
   push:
+    branches: [main]
+    tags: ['**']
   pull_request:
 
 permissions:
@@ -21,13 +25,23 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
+      - name: Verify exactly one required CI context per pull request
+        run: node --test test/ci-single-required-context.test.mjs
       - name: Verify large-file transfer preflight safety on both platforms
         run: node --test tools/commander-transfer-mesh/large-transfer-preflight.test.mjs
       - name: Install Linux GUI helper dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
+          # Limit index updates to signed Ubuntu sources; unrelated vendor feeds can return 403.
+          test -f /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt-get update \
+            -o Dir::Etc::sourcelist=sources.list.d/ubuntu.sources \
+            -o Dir::Etc::sourceparts=-
           sudo apt-get install --yes python3-gi gir1.2-gdkpixbuf-2.0 gnome-shell-common
+      - name: Validate isolated 0.11 QA manifest and negative version cases
+        run: node --test test/isolated-qa-policy.test.mjs
+      - name: Check prerelease SemVer and updater fail-closed rules
+        run: node --test test/semver-release.test.mjs
       - name: Run qualification check with bounded Windows file concurrency
         if: runner.os == 'Windows'
         run: node tools/run-bounded-test-script.mjs --script check --concurrency 1 --prioritize-sensitive 1

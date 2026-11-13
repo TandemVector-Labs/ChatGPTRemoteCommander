@@ -1,0 +1,16 @@
+{
+  "schema": "commander-unsigned-windows-release-v1",
+  "version": "0.10.26",
+  "tag": "v0.10.26",
+  "allowUnsignedWithGitHubAttestation": true,
+  "scope": "only-this-version",
+  "publishedInstallerSignature": "NotSigned",
+  "verification": "GitHub Sigstore build provenance + exact source tag/commit + SHA256SUMS.txt",
+  "riskAcknowledgement": "On 2026-10-21 the user explicitly authorized public UNSIGNED Remote Commander distribution with TandemVector Labs project branding before obtaining a trusted Authenticode certificate, to gain real-world users, feedback and stars. Windows may show Unknown publisher and Microsoft SmartScreen or Smart App Control may warn or block. GitHub branding, SHA256SUMS.txt and GitHub Sigstore attestation do not replace Authenticode. Do not bypass or disable operating-system protections.",
+  "ownerApproval": "Explicit user instruction on 2026-10-21 to distribute Remote Commander publicly unsigned with the project organization brand while signing is unavailable. Applied only to v0.10.26 Preview, not a global future-version waiver, release-readiness approval, manual reviewer approval or stable-updater promotion.",
+  "releaseChannel": "public-prerelease-not-stable",
+  "organizationBrand": "TandemVector Labs (project branding; canonical repository GOD13emad/ChatGPTRemoteCommander)",
+  "primarySourceMaintainer": "Dr. Aliakbar Emadoddin (@GOD13emad)",
+  "supportingSourceMaintainer": "MMZ (@mohammadmohammadzadeh19960-code)",
+  "stableAutoUpdateAllowed": false
+}

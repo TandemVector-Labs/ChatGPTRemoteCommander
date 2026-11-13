@@ -5,7 +5,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
-const PEERS = Object.freeze(['PC', 'Linux', 'EmadServer', 'Amirreza']);
+const PEERS = Object.freeze(['PC', 'Linux', 'MMZ', 'EmadServer', 'Amirreza']);
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{2,90}$/;
 const opts = { timeout: 14000, maxBuffer: 131072, windowsHide: true };
 const immutable = (name, description, properties, required = [], readOnly = false) => ({

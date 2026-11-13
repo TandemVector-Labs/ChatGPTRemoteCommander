@@ -47,7 +47,8 @@ jobs:
           python3 test/release-rollback-owned-cleanup-r172.py --self-test
           bash -n auto-update-linux.sh
           node --check src/server-v0.3.mjs
-          test "$(node -p 'require("./package.json").version')" = '0.10.23'
+          # Only explicit versions may run isolated QA; no release/signing authority.
+          node tools/isolated-qa-policy.mjs
           test ! -e "$RUNNER_TEMP/remote-commander-rollback-r170"
           echo R170_STATIC_PASS
       - name: Real version promotion then rollback in fresh isolated runner

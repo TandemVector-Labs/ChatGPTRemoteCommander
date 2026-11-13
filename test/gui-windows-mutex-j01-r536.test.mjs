@@ -72,7 +72,13 @@ test('naked mutex busy cannot erase J01 incident or enable another input',()=>wi
   assert.equal(calls,1);
   assert.equal((await c.run('gui_status')).uncertain,true);
   assert.equal((await store.pending()).tool,'gui_focus_window');
-  await assert.rejects(c.run('gui_screenshot',{lease:old.lease}),/GUI_OUTCOME_UNCERTAIN/);
+  await assert.rejects(c.run('gui_screenshot',{lease:old.lease}),/GUI_LEASE_REQUIRED_OR_EXPIRED/);
+  const readOnly=await c.run('gui_session_begin',{mode:'observe'});
+  assert.equal(readOnly.mode,'observe');
+  const shot=await c.run('gui_screenshot',{lease:readOnly.lease});
+  await assert.rejects(c.run('gui_focus_window',
+    {lease:readOnly.lease,frame:shot.__structuredContent.frame,handle:'111'}),/GUI_INCIDENT_REVIEW_REQUIRED/);
+  assert.equal((await store.pending()).tool,'gui_focus_window');
   assert.equal(calls,1);
 }));
 test('forged JavaScript no-effect flag without exact native marker remains uncertain',()=>withStore(async file=>{

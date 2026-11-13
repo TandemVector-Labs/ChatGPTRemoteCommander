@@ -85,7 +85,11 @@ export function createCoucouBridge(config = {}, dependencies = {}) {
   const hookSha256 = typeof config?.hookSha256 === 'string' ? config.hookSha256.toLowerCase() : '';
   const validPath = platform === 'win32' || platform === 'linux' || platform === 'darwin';
   const expectedName = platform === 'win32' ? 'coucou-hook.exe' : 'coucou-hook';
-  const pathIsSafe = validPath && hookPath.length > 0 && hookPath.length <= 1024
+  // A Windows local drive path is required; UNC/device namespaces could leak
+  // sensitive share names through Coucou's auto-injected cwd metadata.
+  const localHookPath = platform !== 'win32' || /^[A-Za-z]:[\\/]/.test(hookPath);
+  const neutralCwd = nativePath.parse(hookPath).root;
+  const pathIsSafe = validPath && localHookPath && hookPath.length > 0 && hookPath.length <= 1024
     && !/[\x00-\x1f]/.test(hookPath)
     && nativePath.isAbsolute(hookPath)
     && nativePath.basename(hookPath).toLowerCase() === expectedName;
@@ -120,6 +124,9 @@ export function createCoucouBridge(config = {}, dependencies = {}) {
     };
     try {
       child = spawn(hookPath, ['--agent', COUCOU_AGENT, event.hook_event_name], {
+        // The official Coucou hook adds cwd to outbound event JSON even when
+        // Commander omits it. Never inherit the active project/user cwd.
+        cwd: neutralCwd,
         shell: false,
         windowsHide: true,
         stdio: ['pipe', 'ignore', 'ignore'],

@@ -49,6 +49,18 @@ test('explicit absolute coucou-hook path required; no arbitrary program executio
 });
 
 
+test('Windows hook refuses UNC, device and drive-relative launch paths', () => {
+  for (const hookPath of [
+    '\\\\server\\share\\coucou-hook.exe',
+    '\\\\?\\C:\\temp\\coucou-hook.exe',
+    '\\relative-root\\coucou-hook.exe'
+  ]) {
+    const x = harness({ enabled: true, hookPath, hookSha256: TRUSTED_TEST_SHA });
+    assert.equal(x.bridge.status().ready, false, hookPath);
+    assert.equal(x.bridge.emitTool('workflow_run_start'), false);
+  }
+});
+
 test('bridge requires explicit pinned SHA-256 before executing any user-local hook', () => {
   for (const hookSha256 of ['', 'invalid', '1'.repeat(63), 'zzz'.repeat(22)]) {
     const h = harness({enabled:true,hookPath:'C:\\Coucou\\coucou-hook.exe',hookSha256});
@@ -118,6 +130,7 @@ test('relay subprocess is shell-free, hidden, nonblocking, and receives no inher
   assert.deepEqual(c.args, ['--agent', 'remote-commander', 'PostToolUse']);
   assert.equal(c.options.shell, false);
   assert.equal(c.options.windowsHide, true);
+  assert.equal(c.options.cwd, 'C:\\');
   assert.equal(c.options.env.OPENAI_API_KEY, undefined);
   assert.equal(c.options.env.SECRET_TOKEN, undefined);
   assert.equal(c.payload.hook_event_name, 'PostToolUse');
@@ -164,6 +177,7 @@ test('Linux absolute Unix relay and user-local runtime accepted', () => {
   const x = harness({ enabled: true, hookPath: '/home/agent/.local/share/coucou/bin/coucou-hook' }, { platform: 'linux' });
   assert.equal(x.bridge.status().ready, true);
   assert.equal(x.bridge.emitTool('workflow_create'), true);
+  assert.equal(x.calls[0].options.cwd, '/');
 });
 
 import { readFileSync } from 'node:fs';

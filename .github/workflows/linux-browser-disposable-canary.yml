@@ -1,0 +1,67 @@
+name: Browser Linux disposable runtime canary
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/linux-browser-disposable-canary.yml'
+      - 'tools/install-browser-linux.sh'
+      - 'installer/products.json'
+      - 'setup-wizard.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  upstream-archive-install-rollback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Verify Linux Browser v0.8.1 upstream package in disposable HOME
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          command -v Xvfb
+          sudo -n -v
+          scope="$(mktemp -d)"
+          export HOME="$scope/home"
+          export DISPLAY=:95
+          mkdir -p "$HOME/.config/chatgpt-cef-v2"
+          printf 'UNCHANGED_PROFILE_SENTINEL\n' > "$HOME/.config/chatgpt-cef-v2/keep"
+          xvfb_pid=''
+          cleanup(){
+            if [ -n "$xvfb_pid" ]; then kill "$xvfb_pid" 2>/dev/null || true; fi
+            # Scope is unique to this disposable runner, never an owner machine.
+            sudo rm -f "$HOME/.local/share/chatgpt-cef-v2/runtime-v0.8.1/chrome-sandbox" 2>/dev/null || true
+            rm -rf -- "$scope"
+          }
+          trap cleanup EXIT
+          Xvfb "$DISPLAY" -screen 0 1280x800x24 -nolisten tcp >/dev/null 2>&1 &
+          xvfb_pid="$!"
+          base='remote-commander-browser-v0.8.1-linux-x86_64'
+          archive="$scope/$base.tar.gz"
+          curl --fail --location --proto '=https' --proto-redir '=https' --retry 3 \
+            --connect-timeout 20 --max-time 2400 \
+            -o "$archive" \
+            "https://github.com/TandemVector-Labs/remote-commander-browser/releases/download/v0.8.1/$base.tar.gz"
+          printf '8cac4150b844e48c5f6fbf90df84b306d49165bef77f716f5c61d20bad164073  %s\n' "$archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$scope" --no-same-owner
+          pkg="$scope/$base"
+          test -f "$pkg/install.sh"
+          test -f "$pkg/uninstall.sh"
+          (cd "$pkg" && sha256sum -c SHA256SUMS.txt >/dev/null)
+          /bin/bash tools/install-browser-linux.sh --plan-only |
+            grep -F 'changesApplied=false'
+          /bin/bash tools/install-browser-linux.sh --install --archive-file "$archive"
+          echo BROWSER_WRAPPER_REAL_INSTALL_PASS
+          test -x "$HOME/.local/bin/chatgpt-cef-v2"
+          test "$(stat -Lc '%a %U %G' "$HOME/.local/share/chatgpt-cef-v2/runtime-v0.8.1/chrome-sandbox")" = '4755 root root'
+          test "$(cat "$HOME/.config/chatgpt-cef-v2/keep")" = 'UNCHANGED_PROFILE_SENTINEL'
+          echo BROWSER_X11_SUID_INSTALL_PASS
+          /bin/bash "$pkg/uninstall.sh"
+          test ! -e "$HOME/.local/bin/chatgpt-cef-v2"
+          test ! -e "$HOME/.local/share/chatgpt-cef-v2/runtime-v0.8.1"
+          test "$(cat "$HOME/.config/chatgpt-cef-v2/keep")" = 'UNCHANGED_PROFILE_SENTINEL'
+          echo BROWSER_X11_PROFILE_PRESERVING_ROLLBACK_PASS

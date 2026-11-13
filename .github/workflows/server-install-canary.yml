@@ -54,12 +54,29 @@ jobs:
             $installDir=Join-Path $env:RUNNER_TEMP 'rc-server-app'
             & $script -SourceRef $env:RC_SOURCE_REF -ExpectedCommit $env:RC_EXPECTED_COMMIT -InstallDir $installDir -NoStartServer -GuiControl Off
             $manifestPath=Join-Path $env:ProgramData 'ChatGPTRemoteCommander\server-install-allowlist.json'
-            $manifest=Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-            if($manifest.resolvedCommit -ne $env:RC_EXPECTED_COMMIT){throw 'MANIFEST_COMMIT_MISMATCH'}
-            if($manifest.antivirusExclusionsAdded -ne $false){throw 'ANTIVIRUS_EXCLUSION_POLICY_VIOLATION'}
-            $names=@($manifest.artifacts | ForEach-Object {$_.name})
-            if($names -notcontains 'Node.js'){throw 'NODE_BOOTSTRAP_NOT_EVIDENCED'}
-            if($names -notcontains 'Git for Windows'){throw 'GIT_BOOTSTRAP_NOT_EVIDENCED'}
+            if($expectedVersion -match '^0\.11\.0-dev\.[1-9][0-9]*$'){
+              if(Test-Path -LiteralPath $manifestPath){throw 'DEV_PRODUCTION_ALLOWLIST_MUST_NOT_EXIST'}
+              $trainPath=Join-Path $installDir 'docs/release-train-0.11.json'
+              if(-not(Test-Path -LiteralPath $trainPath -PathType Leaf)){throw 'DEV_MANIFEST_MISSING'}
+              $train=Get-Content -LiteralPath $trainPath -Raw | ConvertFrom-Json
+              if($train.sourceVersion -cne $expectedVersion -or $train.channel -cne 'development' -or
+                 $train.isStable -ne $false -or $train.publishApproved -ne $false -or
+                 $train.autoupdateApproved -ne $false -or $train.installedPromotionApproved -ne $false -or
+                 $null -ne $train.releaseTag -or
+                 @($train.components|Where-Object {$_.required -ne $true -or $_.verified -ne $false}).Count -ne 0 -or
+                 @($train.acceptance.PSObject.Properties|Where-Object {$_.Value -ne $false}).Count -ne 0){
+                   throw 'DEV_MANIFEST_NO_PROMOTION_POLICY_INVALID'
+              }
+              Write-Output 'WINDOWS_SERVER_DEV_NOPROMOTE_MANIFEST_PASS'
+            } else {
+              $manifest=Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+              if($manifest.resolvedCommit -ne $env:RC_EXPECTED_COMMIT){throw 'MANIFEST_COMMIT_MISMATCH'}
+              if($manifest.antivirusExclusionsAdded -ne $false){throw 'ANTIVIRUS_EXCLUSION_POLICY_VIOLATION'}
+              $names=@($manifest.artifacts | ForEach-Object {$_.name})
+              if($names -notcontains 'Node.js'){throw 'NODE_BOOTSTRAP_NOT_EVIDENCED'}
+              if($names -notcontains 'Git for Windows'){throw 'GIT_BOOTSTRAP_NOT_EVIDENCED'}
+            }
+
             $pkg=Get-Content -LiteralPath (Join-Path $installDir 'package.json') -Raw | ConvertFrom-Json
             if($pkg.version -ne $expectedVersion){throw 'INSTALLED_VERSION_MISMATCH'}
             Write-Output 'WINDOWS_DISPOSABLE_SERVER_CANARY_PASS'

@@ -9,6 +9,7 @@ import { canonicalizeRoots } from './security-v0.3.mjs';
 import { audit, listDirectory, prepareProjectCommand, readText, runProjectCommand, writeText } from './tools-v0.3.mjs';
 import { executePowerTool, powerToolDefinitions, prepareDeferredPowerMutation, prepareShellCommand } from './power-tools-v0.3.mjs';
 import { executeGuiTool, guiToolDefinitions } from './gui-tools-windows.mjs';
+import { createOwnerGuiReadOnlyProxy } from './gui-owner-delegation.mjs';
 import { executeBrowserTool, browserToolDefinitions, reapBrowserOrphans } from './browser-tools.mjs';
 import { lockStats } from './locks.mjs';
 import { expandPathValue, shellName } from './platform.mjs';
@@ -28,7 +29,7 @@ import {
 
 let workflowTools = null;
 let browserCompanionMonitor = null;
-const VERSION = '0.10.23';
+const VERSION = '0.11.0-dev.15';
 const MODERN_VERSION = '2026-07-28';
 const LEGACY_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26'];
 const TASKS_EXTENSION = 'io.modelcontextprotocol/tasks';
@@ -64,6 +65,16 @@ const ctx = {
   roots,
   auditLog: path.resolve(projectDir, config.auditLog || 'var/audit.jsonl')
 };
+let ownerGuiProxy = null;
+let ownerGuiProxyConfigError = null;
+try {
+  ownerGuiProxy = createOwnerGuiReadOnlyProxy({
+    config, primaryStatus: () => executeGuiTool(ctx, 'gui_status', {})
+  });
+} catch (error) {
+  // Optional GUI routing must not prevent the primary Core from starting.
+  ownerGuiProxyConfigError = String(error?.message ?? error);
+}
 const configuredAgentExtensionDirectories = config.agentExtensions?.enabled === false
   ? []
   : (Array.isArray(config.agentExtensions?.directories) && config.agentExtensions.directories.length
@@ -74,6 +85,18 @@ const agentExtensionDirectories = configuredAgentExtensionDirectories.map(value 
   return path.isAbsolute(expanded) ? path.resolve(expanded) : path.resolve(projectDir, expanded);
 });
 const agentExtensions = createAgentExtensionRegistry({ directories: agentExtensionDirectories });
+// Notion REST and hosted Notion MCP are separate opt-in credential audiences.
+// Disabled configs must not load either client or change existing tool behavior.
+const notionTools = config.notion?.enabled === true
+  ? (await import('./notion-engine.mjs')).createNotionTools({
+      config: config.notion, profile: config.instance?.profile ?? 'default'
+    })
+  : { definitions: [], execute: async () => { throw new Error('NOTION_DISABLED'); } };
+const notionMcpTools = config.notionMcp?.enabled === true
+  ? (await import('./notion-mcp-engine.mjs')).createNotionMcpTools({
+      config: config.notionMcp, profile: config.instance?.profile ?? 'default'
+    })
+  : { definitions: [], execute: async () => { throw new Error('NOTION_MCP_DISABLED'); } };
 const transferMesh = config.transferMesh?.enabled === true && config.powerMode?.enabled === true
   ? (await import('./transfer-tools.mjs')).createTransferMeshTools({config})
   : { enabled: false, definitions: [], execute: async () => { throw new Error('TRANSFER_MESH_DISABLED'); } };
@@ -212,6 +235,8 @@ const TOOLS = [
   ...deliveryTools.definitions,
   ...agentExtensions.definitions,
   ...transferMesh.definitions,
+  ...notionTools.definitions,
+  ...notionMcpTools.definitions,
   ...powerToolDefinitions,
   ...(BROWSER_ENABLED ? browserToolDefinitions : []),
   ...(GUI_ENABLED ? guiToolDefinitions : [])
@@ -362,6 +387,10 @@ async function executeTool(name, args, executionContext = {}) {
       ...(executionContext.requestIdSource === 'transport' ? { __deliveryMode: 'transport-retry-only' } : {})
     });
   }
+  // OAuth callbacks are short process-local leases; never replay a stale login
+  // URL through a durable mutation idempotency receipt.
+  if (name === 'notion_connect_start' || name === 'notion_mcp_connect_start')
+    return executeToolEffect(name, args);
   if (isDirectMutationTool(name)) {
     const { requestId, ...effectArgs } = args ?? {};
     // Preserve no-effect transport/semantic/authority checks before durable mutation intent.
@@ -369,7 +398,7 @@ async function executeTool(name, args, executionContext = {}) {
     // execution remains hard-bounded to 15 seconds at runtime.
     if (name === 'run_project_command') await prepareProjectCommand(ctx, synchronousCommandInput(effectArgs));
     if (name === 'run_shell') await prepareShellCommand(ctx, synchronousCommandInput(effectArgs));
-    return mutationIdempotency.execute({ requestId, tool: name, input: effectArgs }, () => executeToolEffect(name, effectArgs));
+    return mutationIdempotency.execute({ requestId, tool: name, input: effectArgs }, () => executeToolEffect(name, effectArgs, { requestId }));
   }
   return executeToolEffect(name, args);
 }
@@ -432,7 +461,7 @@ async function buildBrowserMonitorSnapshot() {
   };
 }
 
-async function executeToolEffect(name, args) {
+async function executeToolEffect(name, args, delegationContext = {}) {
   if (!toolDefinition(name)) throw protocolFailure(200, -32602, 'Unknown tool');
   if (name.startsWith('delegation_')) return executeDelegationTool(name, args);
   if (name.startsWith('conversation_')) return conversationController.execute(name, args);
@@ -441,6 +470,8 @@ async function executeToolEffect(name, args) {
   if (name.startsWith('agent_extension_')) return agentExtensions.execute(name, args);
   if (name.startsWith('transfer_mesh_')) return transferMesh.execute(name, args);
   if (name.startsWith('workflow_')) return workflowTools.execute(name, args);
+  if (name.startsWith('notion_mcp_')) return notionMcpTools.execute(name, args);
+  if (name.startsWith('notion_')) return notionTools.execute(name, args);
   switch (name) {
     case 'system_status': {
       await audit(ctx, { action: 'system_status', ok: true });
@@ -509,6 +540,8 @@ async function executeToolEffect(name, args) {
             foregroundFallback:'explicit-current-request-only', workflowBrowserAllowed:false,
             userBrowserProfileReuse:false, savedPasswordExtraction:false, foregroundInterferenceByDefault:false } },
         guiControl: { backendSupported: GUI_BACKEND_SUPPORTED, availability: 'CHECK_gui_status', enabled: GUI_ENABLED,
+          ownerDelegation: { configured:config.ownerGuiDelegation?.enabled === true,
+            accepted:!!ownerGuiProxy, mode:'observe-only', ...(ownerGuiProxyConfigError ? { error:ownerGuiProxyConfigError } : {}) },
           policy: { ...(config.powerMode?.guiControl ?? { enabled:false }), interactionPolicy:'explicit-current-request-only',
             defaultSessionMode:'observe', backgroundPreferred:true, workflowTakeoverAllowed:false, foregroundInterferenceByDefault:false } }
       };
@@ -528,8 +561,10 @@ async function executeToolEffect(name, args) {
         return result;
       }
       if (name.startsWith('gui_')) {
-        const result = await executeGuiTool(ctx, name, args);
-        await audit(ctx, { action: name, ok: true, powerMode: true, guiControl: true });
+        const proxy = ownerGuiProxy ? await ownerGuiProxy.execute(name, args, delegationContext) : { handled: false };
+        const result = proxy.handled ? proxy.value : await executeGuiTool(ctx, name, args);
+        await audit(ctx, { action: name, ok: true, powerMode: true, guiControl: true,
+          ...(proxy.handled ? { delegatedOwnerGui: true } : {}) });
         return result;
       }
       const result = await executePowerTool(ctx, name, args);
