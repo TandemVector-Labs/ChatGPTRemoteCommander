@@ -1,0 +1,74 @@
+name: PR235 exact-head comparative CodeQL QA (no upload)
+on:
+  push:
+    branches: [qa/pr235-exact-codeql-20261125]
+    paths: ['.github/workflows/qa-pr235-exact-codeql.yml']
+permissions:
+  contents: read
+  actions: read
+  security-events: read
+jobs:
+  compare:
+    name: ${{ matrix.scope }} / JavaScript-TypeScript / no-upload
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scope: parent-231
+            sha: 819fa3da227d8e737520fb37388bccda1c1b66fd
+          - scope: candidate-235
+            sha: b67693d4a9fea80ac57a8aa4e861a1556769d283
+    steps:
+      - name: Exact immutable public source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ matrix.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check exact source identity
+        run: test "$(git rev-parse HEAD)" = "${{ matrix.sha }}"
+      - name: Initialize pinned CodeQL
+        uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee
+        with:
+          languages: javascript-typescript
+          build-mode: none
+          queries: security-and-quality
+          config: |
+            threat-models: local
+      - name: Analyze without upload or database publication
+        uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee
+        with:
+          upload: never
+          upload-database: false
+          output: sarif-results
+      - name: Report bounded aggregate evidence
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import collections, json, pathlib
+          files=sorted(pathlib.Path('sarif-results').rglob('*.sarif'))
+          assert files, 'NO_SARIF'
+          counts=collections.Counter()
+          focus=collections.Counter()
+          engines=set()
+          total=0
+          for f in files:
+              for run in json.loads(f.read_text(encoding='utf-8')).get('runs',[]):
+                  driver=run.get('tool',{}).get('driver',{})
+                  engines.add((driver.get('name','unknown'),driver.get('semanticVersion',driver.get('version','unknown'))))
+                  for result in run.get('results',[]):
+                      total+=1
+                      rule=result.get('ruleId','unknown')
+                      counts[rule]+=1
+                      locs=result.get('locations',[])
+                      uri=(locs[0].get('physicalLocation',{}).get('artifactLocation',{}).get('uri','') if locs else '')
+                      for name in ('src/project-planner.mjs','src/file-write-guard.mjs','src/server-v0.3.mjs'):
+                          if uri==name or uri.endswith('/'+name):
+                              focus[(name,rule)]+=1
+          print('CODEQL_ENGINES',json.dumps(sorted(engines)))
+          print('CODEQL_TOTAL',total)
+          print('CODEQL_RULE_COUNTS',json.dumps(sorted(counts.items())))
+          print('CODEQL_FOCUS_COUNTS',json.dumps(sorted((p,r,c) for (p,r),c in focus.items())))
+          PY
