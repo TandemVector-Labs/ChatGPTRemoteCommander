@@ -71,4 +71,34 @@ jobs:
           print('CODEQL_TOTAL',total)
           print('CODEQL_RULE_COUNTS',json.dumps(sorted(counts.items())))
           print('CODEQL_FOCUS_COUNTS',json.dumps(sorted((p,r,c) for (p,r),c in focus.items())))
+          # Bounded metadata, without messages, source snippets, absolute paths or raw SARIF.
+          import hashlib
+          from urllib.parse import unquote
+          focus_files={'src/file-write-guard.mjs','src/server-v0.3.mjs','src/project-planner.mjs'}
+          watch_rules={'js/path-injection','js/resource-exhaustion','js/user-controlled-bypass','js/command-line-injection','js/file-system-race'}
+          def relative(uri):
+              v=unquote(uri).replace(chr(92),'/')
+              if v.startswith('/') or ':' in v or '..' in v.split('/') or len(v)>220:
+                  return '<nonrelative>'
+              return v.removeprefix('./')
+          by_file=collections.Counter()
+          identities=[]
+          for f in files:
+              for run in json.loads(f.read_text(encoding='utf-8')).get('runs',[]):
+                  for result in run.get('results',[]):
+                      rule=result.get('ruleId','unknown')
+                      locs=result.get('locations',[])
+                      physical=locs[0].get('physicalLocation',{}) if locs else {}
+                      uri=relative(physical.get('artifactLocation',{}).get('uri',''))
+                      region=physical.get('region',{})
+                      if rule in watch_rules:
+                          by_file[(uri,rule)]+=1
+                      if uri not in focus_files and rule!='js/command-line-injection':
+                          continue
+                      fingerprints=result.get('partialFingerprints',{}) or result.get('fingerprints',{})
+                      fp=hashlib.sha256(json.dumps(fingerprints,sort_keys=True).encode()).hexdigest() if fingerprints else None
+                      identities.append([uri,rule,region.get('startLine'),region.get('startColumn'),fp])
+          assert sum(by_file.values())==sum(counts[r] for r in watch_rules)
+          print('CODEQL_WATCH_BY_FILE',json.dumps(sorted((p,r,c) for (p,r),c in by_file.items())))
+          print('CODEQL_FOCUS_IDENTITIES',json.dumps(sorted(identities,key=lambda x:json.dumps(x))))
           PY
