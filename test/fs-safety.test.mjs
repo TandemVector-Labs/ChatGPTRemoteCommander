@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { mkdtemp, mkdir, readFile, realpath, symlink, writeFile, rm } from 'node:fs/promises';
 import { copyPath, movePath, readAnyFile, writeAnyFile } from '../src/power-tools-v0.3.mjs';
+import { withFullPowerAccess } from './helpers/access-mode-fixtures.mjs';
 import { withPathLocks, lockStats } from '../src/locks.mjs';
 
 const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'rc-fs-root-')));
@@ -22,6 +23,7 @@ const ctx = {
     }
   }
 };
+withFullPowerAccess(ctx);
 
 try {
   await writeFile(path.join(root, 'src.txt'), 'SOURCE');
@@ -61,7 +63,12 @@ try {
 
     const fullCtx = {
       ...ctx,
-      config: { powerMode: { ...ctx.config.powerMode, fullFilesystem: true } }
+      config: {
+        capabilityProfile: {
+          tier: 'FULL_POWER', explicitlyAuthorized: true, disabledCapabilities: []
+        },
+        powerMode: { ...ctx.config.powerMode, fullFilesystem: true }
+      }
     };
     await assert.rejects(
       () => copyPath(fullCtx, { source: outside, destination: path.join(root, 'escape'), overwrite: true }),

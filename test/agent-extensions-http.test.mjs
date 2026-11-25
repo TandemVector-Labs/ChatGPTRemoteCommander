@@ -6,9 +6,10 @@ import os from 'node:os';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { requireNonElevatedLegacyHttp } from './fixtures/legacy-http-token-admission.mjs';
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
 
-test('agent extension tools are exposed read-only and return validated manifests',async()=>{
+test('agent extension tools are exposed read-only and return validated manifests',async t=>{
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'rc-agent-http-'));
   const extensionRoot=path.join(root,'extensions');
   const extensionDir=path.join(extensionRoot,'fixture-extension');
@@ -17,7 +18,7 @@ test('agent extension tools are exposed read-only and return validated manifests
   let child;
   try {
     await fs.mkdir(path.join(root,'src'),{recursive:true});
-    for(const f of ['server-v0.3.mjs','transport-guard.mjs','gui-tools-windows.mjs','gui-incident-store.mjs','gui-contract.mjs','gui-process.mjs','browser-tools.mjs','browser-contract.mjs','browser-process.mjs','browser-owned-processes.mjs','browser-lease-store.mjs','browser-companion-monitor.mjs','schema-validator.mjs','async-operations.mjs','retry-guard.mjs','agent-extensions.mjs','coucou-bridge.mjs','no-codex-policy.mjs','conversation-store.mjs','conversation-continuation.mjs']) {
+    for(const f of ['server-v0.3.mjs','transport-guard.mjs','full-access-http-quarantine.mjs','full-access-status.mjs','effective-power-mode.mjs','capability-profile.mjs','privilege-client.mjs','windows-admin-token.mjs','gui-universal-policy.mjs','gui-native-session-provider.mjs','gui-windows-native-provider.mjs','gui-linux-input-capture-provider.mjs','gui-tools-windows.mjs','gui-owner-delegation.mjs','owner-workspace-delegation.mjs','workspace-target-tools.mjs','workspace-accessibility-tools.mjs','owner-workspace-proxy.mjs','workspace-tools.mjs','workspace-routing.mjs','workspace-target-journal.mjs','gui-target-only-policy.mjs','gui-incident-store.mjs','gui-contract.mjs','gui-process.mjs','browser-tools.mjs','browser-contract.mjs','browser-process.mjs','browser-owned-processes.mjs','browser-lease-store.mjs','browser-existing-session-route.mjs','browser-owner-window-inventory.mjs','browser-profile-inventory.mjs','browser-file-transfer-guard.mjs','browser-companion-monitor.mjs','schema-validator.mjs','async-operations.mjs','retry-guard.mjs','agent-extensions.mjs','optional-event-hook.mjs','no-codex-policy.mjs','conversation-store.mjs','conversation-continuation.mjs']) {
       await fs.copyFile(new URL('../src/'+f,import.meta.url),path.join(root,'src',f));
     }
     await fs.writeFile(path.join(root,'src','security-v0.3.mjs'),'export const canonicalizeRoots = async x=>x;');
@@ -41,7 +42,8 @@ test('agent extension tools are exposed read-only and return validated manifests
     await fs.writeFile(path.join(root,'config.json'),JSON.stringify({
       host:'127.0.0.1',port,allowedRoots:[root],allowedPrograms:[],
       agentExtensions:{directories:[extensionRoot]},
-      powerMode:{enabled:true,fullFilesystem:true,guiControl:{enabled:false}}
+      capabilityProfile:{tier:'STANDARD'},
+      powerMode:{enabled:false,fullFilesystem:false,guiControl:{enabled:false}}
     }));
     child=spawn(process.execPath,[path.join(root,'src','server-v0.3.mjs')],{
       env:{...process.env,REMOTE_COMMANDER_CONFIG:path.join(root,'config.json')},stdio:['ignore','pipe','pipe']
@@ -50,6 +52,7 @@ test('agent extension tools are exposed read-only and return validated manifests
     let alive=false;
     for(let i=0;i<400;i++){try{if((await fetch(`http://127.0.0.1:${port}/health`)).ok){alive=true;break;}}catch{}await wait(25);}
     assert.equal(alive,true,stderr);
+    if(!(await requireNonElevatedLegacyHttp(t,port)))return;
     const call=async(name,args={})=>{
       const res=await fetch(`http://127.0.0.1:${port}/mcp`,{
         method:'POST',headers:{'Content-Type':'application/json'},
@@ -69,6 +72,10 @@ test('agent extension tools are exposed read-only and return validated manifests
     }
     const status=(await call('system_status')).result.structuredContent;
     assert.equal(status.configSchema.agentExtensions,1);
+    assert.equal(status.effectiveTier,'STANDARD');
+    assert.equal(status.powerMode.effective.enabled,false);
+    assert.equal(status.powerMode.enabled,false);
+    assert.equal(status.powerMode.configuredEnabled,false);
     assert.equal(status.agentExtensions.count,1);
     const extList=(await call('agent_extension_list')).result.structuredContent;
     assert.deepEqual(extList.items.map(x=>x.id),['fixture-extension']);
@@ -83,7 +90,19 @@ test('agent extension tools are exposed read-only and return validated manifests
     assert.match(skill.sha256,/^[0-9a-f]{64}$/);
     assert.match(skill.skill,/Fixture Extension/);
   } finally {
-    if(child){child.kill();await Promise.race([once(child,'close'),wait(5000)]);}
+    if(child){
+      child.kill();
+      // Keep the 5 s close deadline, but never retain its event-loop timer on fast exit.
+      let closeTimer;
+      try {
+        await Promise.race([
+          once(child,'close'),
+          new Promise(resolve=>{closeTimer=setTimeout(resolve,5000);})
+        ]);
+      } finally {
+        clearTimeout(closeTimer);
+      }
+    }
     await fs.rm(root,{recursive:true,force:true});
   }
 });

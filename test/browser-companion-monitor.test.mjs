@@ -77,6 +77,22 @@ test('linux monitor writer creates owner-private bounded snapshot',{skip:process
   }finally{await rm(base,{recursive:true,force:true});}
 });
 
+test('windows fresh user install creates missing monitor root',{skip:process.platform!=='win32'},async()=>{
+  const base=await mkdtemp(path.join(os.tmpdir(),'rc-monitor-new-win-'));
+  const root=path.join(base,'fresh','browser-companion');
+  try{
+    const receipt=await writeBrowserCompanionMonitor(root,{
+      identity:{deviceName:'host',profile:'default',version:'0.11.0-dev.105',platform:'win32'},
+      gui:{enabled:false,available:false},
+      browser:{enabled:false,available:false},
+      workflows:{enabled:false,engineEnabled:false,runCount:0},
+      extensions:{items:[]},
+      operations:{active:0,lockedKeys:0}
+    },{platform:'win32',now:()=>5000});
+    assert.equal((await stat(root)).isDirectory(),true);
+    assert.equal(JSON.parse(await readFile(receipt.target,'utf8')).observedAtEpochMs,5000);
+  }finally{await rm(base,{recursive:true,force:true});}
+});
 test('windows monitor writer uses a pre-created local root without POSIX mode assumptions',{skip:process.platform!=='win32'},async()=>{
   const base=await mkdtemp(path.join(os.tmpdir(),'rc-monitor-win-'));
   const root=path.join(base,'browser-companion');

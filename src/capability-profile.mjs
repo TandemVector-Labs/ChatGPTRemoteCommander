@@ -1,5 +1,13 @@
 import { createHash } from 'node:crypto';
 
+// Standalone enrollment policy: no dependency on native runtime/status modules.
+export function verifyPrivilegedBrokerProof(proof, platform = process.platform) {
+  if (proof?.ok !== true || proof.action !== 'os.probe') return false;
+  if (platform === 'linux') return proof.root === true && proof.effectiveUid === 0;
+  if (platform === 'win32') return proof.isSystem === true && proof.sid === 'S-1-5-18';
+  return false;
+}
+
 export const CAPABILITY_SCHEMA_VERSION = 4;
 export const CAPABILITY_PROFILE_REVISION = 'capability-profile-r4';
 
@@ -91,7 +99,7 @@ export function deriveCapabilitySet(config = {}) {
   if (bool(wf.executionProfile?.persist)) out.add('workflow.execution_profile_persistence');
   const profile = config.capabilityProfile ?? {};
   const disabled = new Set(Array.isArray(profile.disabledCapabilities) ? profile.disabledCapabilities : []);
-  if (profile.tier === 'FULL_POWER' && profile.explicitlyAuthorized === true && !disabled.has('workflow.project_engine')) out.add('workflow.project_engine');
+  if ((profile.tier === 'FULL_POWER' || profile.tier === 'FULL_ACCESS') && profile.explicitlyAuthorized === true && !disabled.has('workflow.project_engine')) out.add('workflow.project_engine');
   if (config.autoUpdate?.enabled === true) out.add('lifecycle.auto_update');
   if (config.autoUpdate?.zeroDowntime === true) out.add('lifecycle.zero_downtime_update');
   return [...out].sort();
@@ -104,7 +112,7 @@ export function normalizeCapabilityProfile(profile, config, { id = 'default', le
     schemaVersion: CAPABILITY_SCHEMA_VERSION,
     revision: CAPABILITY_PROFILE_REVISION,
     id: typeof current.id === 'string' && current.id ? current.id : id,
-    tier: current.tier === 'FULL_POWER' || (current.tier == null && inferredFull) ? 'FULL_POWER' : 'STANDARD',
+    tier: current.tier === 'FULL_ACCESS' ? 'FULL_ACCESS' : current.tier === 'FULL_POWER' || (current.tier == null && inferredFull) ? 'FULL_POWER' : 'STANDARD',
     explicitlyAuthorized: current.explicitlyAuthorized === true || (current.explicitlyAuthorized == null && legacyExplicit && inferredFull),
     persistAcrossUpdates: current.persistAcrossUpdates !== false,
     autoEnableNewCapabilities: current.autoEnableNewCapabilities === true || (current.autoEnableNewCapabilities == null && inferredFull),
@@ -136,6 +144,9 @@ export function migrateCapabilityConfig({
   existingConfig = null,
   profileId = 'default',
   requestPower = false,
+  requestFullAccess = false,
+  nativeBrokerProof = null,
+  nativeBrokerPlatform = process.platform,
   requestStandard = false,
   requestGui = undefined,
   continuationDefaults = true,
@@ -144,11 +155,14 @@ export function migrateCapabilityConfig({
   enableCapabilities = []
 }) {
   if (!defaultConfig || typeof defaultConfig !== 'object' || Array.isArray(defaultConfig)) throw new Error('CAPABILITY_DEFAULT_CONFIG_REQUIRED');
-  if (requestPower && requestStandard) throw new Error('CAPABILITY_MODE_CONFLICT');
+  if ([requestPower, requestStandard, requestFullAccess].filter(Boolean).length > 1) throw new Error('CAPABILITY_MODE_CONFLICT');
+  if (requestFullAccess && !verifyPrivilegedBrokerProof(nativeBrokerProof, nativeBrokerPlatform)) {
+    throw new Error('FULL_ACCESS_NATIVE_BROKER_PROOF_REQUIRED');
+  }
   const hadExisting = !!existingConfig;
   const existing = existingConfig ? clone(existingConfig) : {};
   const prior = normalizeCapabilityProfile(existing.capabilityProfile, existing, { id: profileId, legacyExplicit: hadExisting });
-  const preserveExplicit = hadExisting && prior.tier === 'FULL_POWER' && prior.explicitlyAuthorized === true && prior.persistAcrossUpdates === true && !requestStandard;
+  const preserveExplicit = hadExisting && (prior.tier === 'FULL_POWER' || prior.tier === 'FULL_ACCESS') && prior.explicitlyAuthorized === true && prior.persistAcrossUpdates === true && !requestStandard;
   // Standard authorization is a persisted restriction, never authority to
   // restore stale Power flags. Legacy partial profiles without an explicit tier
   // retain their existing scope; a new requestPower still takes precedence.
@@ -194,7 +208,7 @@ export function migrateCapabilityConfig({
   next.durableWorkflows.projectBrain ??= {};
   next.durableWorkflows.executionProfile ??= {};
 
-  const enableFull = requestPower || preserveExplicit;
+  const enableFull = requestPower || requestFullAccess || preserveExplicit;
   if (enableFull) {
     const on = cap => !disabled.has(cap);
     next.powerMode.enabled = true;
@@ -284,16 +298,16 @@ export function migrateCapabilityConfig({
     }
   }
 
-  const explicit = requestPower || requestStandard ? true : prior.explicitlyAuthorized;
+  const explicit = requestPower || requestStandard || requestFullAccess ? true : prior.explicitlyAuthorized;
   next.capabilityProfile = normalizeCapabilityProfile({
     ...prior,
     id: profileId,
-    tier: enableFull ? 'FULL_POWER' : 'STANDARD',
+    tier: requestFullAccess || (preserveExplicit && prior.tier === 'FULL_ACCESS' && !requestPower) ? 'FULL_ACCESS' : enableFull ? 'FULL_POWER' : 'STANDARD',
     explicitlyAuthorized: explicit,
     persistAcrossUpdates: true,
     autoEnableNewCapabilities: enableFull,
     disabledCapabilities: [...disabled].sort(),
-    source: requestPower || requestStandard ? 'explicit-user-authorization' : prior.source
+    source: requestFullAccess ? 'native-broker-verified-enrollment' : requestPower || requestStandard ? 'explicit-user-authorization' : prior.source
   }, next, { id: profileId, legacyExplicit: hadExisting });
 
   return {
@@ -312,10 +326,12 @@ export function compareCapabilityState(expectedConfig, actualConfig) {
   const actual = new Set(actualProfile.grantedCapabilities);
   const missing = [...expected].filter(x => !actual.has(x)).sort();
   const unexpected = [...actual].filter(x => !expected.has(x)).sort();
+  const tiers = { STANDARD: 0, FULL_POWER: 1, FULL_ACCESS: 2 };
+  const tierRegression = tiers[actualProfile.tier] < tiers[expectedProfile.tier];
   return {
-    ok: missing.length === 0,
-    regression: missing.length > 0,
-    code: missing.length ? 'CONFIG_REGRESSION' : 'OK',
+    ok: missing.length === 0 && !tierRegression,
+    regression: missing.length > 0 || tierRegression,
+    code: missing.length ? 'CONFIG_REGRESSION' : tierRegression ? 'ACCESS_TIER_REGRESSION' : 'OK',
     expectedTier: expectedProfile.tier,
     actualTier: actualProfile.tier,
     missing,

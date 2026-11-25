@@ -174,6 +174,8 @@ The local MCP target is:
 
 Do not expose port 47831 to the public internet. Secure MCP Tunnel is outbound-only and is intended to keep the MCP server private.
 
+**ChatGPT-first and per-account credential boundary:** ChatGPT is the conversation, reasoning and tool-invocation interface; **Codex is not required**. A ChatGPT login/subscription does **not** automatically supply a retrievable `OPENAI_API_KEY` to Commander. The separate **Platform Runtime API key for this user's Tunnel** must be enrolled with the hidden local prompt for **this device/profile**. When ChatGPT invokes the MCP tool, the registered app selects that Tunnel, whose local client uses the matching profile credential; it must not borrow another user's credential, an inherited shell `OPENAI_API_KEY`, or an account's ChatGPT session cookie. The Plugin ZIP and `.app.json` contain no Runtime key. Use a distinct Tunnel for every ChatGPT-account/device pair; enroll a separate Runtime API key by default, but permit intentional same-user reuse across their own devices. Never share a Runtime key between different users, and use separate OS security principals when trust levels differ. App/Tunnel access is subject to ChatGPT workspace and Platform RBAC; an active connection alone does not authenticate the calling ChatGPT human inside the MCP server. For supported full write/GUI features, check the account plan, enabled tools, host capabilities and action confirmations rather than promising unrestricted access.
+
 ## 3. One-time persistent enrollment
 
 ### Windows
@@ -206,24 +208,31 @@ Linux registers a user-level systemd service when available, otherwise a crontab
 
 After enrollment, later logins do not require re-entering the Tunnel ID, MCP address, health port, or Runtime API key.
 
-## 4. Create the ChatGPT custom MCP app
+## 4. Connect the adopter's own ChatGPT account and workspace
 
-This app is the connection ChatGPT uses to reach the tunnel.
+This MCP app connects **that user's account** to **that user's computer** through their own approved Secure MCP Tunnel. Installing the public program does **not** connect the maintainer's account, copy a maintainer's Runtime API key, or install a usable account-bound Plugin automatically.
 
-Current OpenAI flow:
-1. Enable Developer Mode if your plan/workspace permits it.
-2. Open **Settings / Workspace settings → Apps → Create**.
-3. Create a custom app named **ChatGPT Remote Commander**.
-4. For **Connection**, choose **Tunnel**.
-5. Select the tunnel you created, or provide its valid `tunnel_id` if the UI requests it.
-6. Use **No authentication / None** for this server. The Remote Commander MCP does not advertise OAuth.
-7. If the UI requests an icon/logo, use `assets/plugin-icon.png` or `assets/plugin-logo.png` from this repository.
-8. Select **Scan Tools** and wait for the scan to finish.
-9. Review the detected tools and permissions.
-10. Select **Create**.
-11. In a managed workspace, publish/enable the app for the intended roles if required by workspace policy.
+**One simple setup per account and computer:** Create exactly one dedicated ChatGPT Plugin/App for **this account + this computer**, bind it to exactly one unique Secure MCP Tunnel, then enroll the Runtime API key through the local hidden prompt. Normally issue a different key per pair; optionally, the **same user** may reuse their own key for their other computers while keeping each Plugin/App and Tunnel distinct. On each host, all Core, Shell, GUI/Desktop, Browser, Work/Plugin, and authorized Full Access tools are exposed by the existing single Commander runtime through that same per-pair connection. Do not create separate tunnels for Core, desktop, browser, or plugins. Do not require a second OAuth/Keycloak/Auth0 login for a private tunnel unless a separately approved public/multi-principal mode needs one. Review Full Access and OS/GUI consent independently.
 
-Plan note: Full MCP write/modify actions are currently rolling out for Business and Enterprise/Edu. Pro users can currently connect custom MCPs for read/fetch in Developer Mode, but not full write/modify.
+- Each new adopter signs in to their **own supported ChatGPT account/workspace**, uses an authorized OpenAI Platform organization, and provisions a separate Tunnel/Runtime API credential locally. Never ask them to copy another person's `tunnel_id`, key, local profile, `.app.json`, or App ID.
+- For **one account controlling multiple computers**, create a **different Plugin/App AND a different Tunnel for every computer**. Reuse that account's Runtime API key across those computers only if the owner explicitly chooses to; separate keys are the recommended default.
+- For **multiple independent accounts on the same computer**, use isolated MCP/profile instances first; read [multi-account isolation](#v07-durable-workflows-and-multi-account-isolation). A tunnel profile alone is not an OS security boundary.
+
+### Current ChatGPT Plugins experience (preferred when available)
+
+1. In the adopter's own eligible ChatGPT web workspace, confirm they have permission to **Create plugins with MCPs**.
+2. Open **Plugins → + → Add custom MCP server**. Developer Mode is **not required** by this current Plugins flow.
+3. Name it **ChatGPT Remote Commander** (or distinguish the user's own device). For **Connection**, choose **Tunnel**.
+4. Select the tunnel registered to **this computer and account**, or enter its private `tunnel_id` in the UI if required. Do not reuse a tunnel belonging to the maintainer or another user.
+5. Configure authentication as appropriate to the server. Use **No authentication / None** for this Remote Commander MCP endpoint because it does not advertise OAuth; the separately managed Secure MCP Tunnel has its own Runtime API credential.
+6. Review the risk warning, select **I understand and want to continue**, then choose **Create as a plugin**. Review scanned/discovered tools, metadata, and granted action permissions. Enable only actions intended for this workspace.
+7. Run the real read-only `system_status` test in [step 5](#5-test-from-chatgpt). A newly created Plugin or ZIP alone is not a verified connection.
+
+### Legacy Apps → Create flow (only if shown by the account UI)
+
+If the workspace still uses the older **Settings / Workspace settings → Apps → Create** screen, use that screen to name the app, choose the same **Connection**, choose **Tunnel**, select this user's tunnel, set **No authentication / None**, then **Scan Tools**, review actions and **Create**. Publish/enable for the intended workspace members only if the account/workspace role allows it. Do not try to bypass workspace eligibility by switching UI flows.
+
+Current product guidance: [Connecting custom MCP servers in ChatGPT](https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt). Full MCP write/modify capabilities depend on plan, workspace role and tool permissions; avoid promising write access to every user.
 
 ## 5. Test from ChatGPT
 

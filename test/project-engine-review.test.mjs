@@ -49,8 +49,12 @@ test('read observations survive restart by rereading current scoped bytes withou
   const first='observation_'+randomUUID(),latest='observation_'+randomUUID();let observed;
   const f=fixture(t,async context=>{
     if(context.currentStep.id==='read')return proposal('read_text',{path:'source.txt'});
-    observed=context.observations.find(x=>x.tool==='read_text')?.result.text;
+    const result=context.observations.find(x=>x.tool==='read_text')?.result;
+    observed=result?.preview;
     assert.equal(observed,latest);
+    assert.equal(result.bytes,Buffer.byteLength(latest,'utf8'));
+    assert.equal(result.previewTruncated,false);
+    assert.equal(Object.hasOwn(result,'text'),false);
     return proposal('write_text',{path:'project.txt',content:'verified output: '+observed});
   });
   fs.writeFileSync(path.join(f.root,'source.txt'),first);
@@ -79,10 +83,59 @@ test('directory observations supply filenames to the next proposal',async t=>{
   await f.tick();assert.equal((await f.tick()).status,'QUEUED');assert.equal(seen,true);
 });
 
+test('large read observations expose a bounded preview and full-file digest metadata',async t=>{
+  const content='x'.repeat(20000);let observed;
+  const f=fixture(t,async context=>{
+    if(context.currentStep.id==='read')return proposal('read_text',{path:'large.txt'});
+    observed=context.observations.find(o=>o.tool==='read_text')?.result;
+    assert.equal(observed.bytes,Buffer.byteLength(content,'utf8'));
+    assert.equal(observed.preview,content.slice(0,1024));
+    assert.equal(observed.previewTruncated,true);
+    assert.equal(Object.hasOwn(observed,'text'),false);
+    assert.ok(Buffer.byteLength(JSON.stringify(context.observations),'utf8')<=4096);
+    assert.equal(context.observationsOmitted,0);
+    const completed=context.steps.find(s=>s.id==='read');
+    assert.equal(completed?.status,'verified');
+    assert.deepEqual(Object.keys(completed).sort(),['dependsOn','id','status','title']);
+    assert.equal('receipt' in completed,false);
+    assert.equal('idempotencyKey' in completed,false);
+    return {action:'block',tool:'',argumentsJson:'{}',summary:'Bounded observation assertions passed'};
+  });
+  fs.writeFileSync(path.join(f.root,'large.txt'),content);
+  await f.create('project',{steps:[{id:'read',title:'Read large source'},{id:'inspect',title:'Inspect bounded observation'}]});
+  await f.start();
+  assert.equal((await f.tick()).status,'QUEUED');
+  const result=await f.tick();
+  assert.equal(result.status,'BLOCKED');
+  assert.equal(result.lastCode,'PROJECT_PLANNER_BLOCKED');
+});
+
+test('large directory observations retain a bounded filename sample',async t=>{
+  let observed;
+  const f=fixture(t,async context=>{
+    if(context.currentStep.id==='list')return proposal('list_directory',{path:'input'});
+    observed=context.observations.find(o=>o.tool==='list_directory')?.result;
+    assert.equal(observed.entries.length,24);
+    assert.equal(observed.returnedEntries,24);
+    assert.equal(observed.truncated,true);
+    assert.equal(observed.entries.every(e=>Object.keys(e).sort().join(',')==='path,type'),true);
+    assert.ok(Buffer.byteLength(JSON.stringify(context.observations),'utf8')<=4096);
+    return {action:'block',tool:'',argumentsJson:'{}',summary:'Bounded directory assertions passed'};
+  });
+  fs.mkdirSync(path.join(f.root,'input'));
+  for(let i=0;i<40;i++)fs.writeFileSync(path.join(f.root,'input',`entry-${String(i).padStart(2,'0')}.txt`),'x');
+  await f.create('project',{steps:[{id:'list',title:'List source directory'},{id:'inspect',title:'Inspect bounded listing'}]});
+  await f.start();
+  assert.equal((await f.tick()).status,'QUEUED');
+  const result=await f.tick();
+  assert.equal(result.status,'BLOCKED');
+  assert.equal(result.lastCode,'PROJECT_PLANNER_BLOCKED');
+});
+
 test('crash after a durable read receipt retains the reference needed by the next planner',async t=>{
   const marker='crash_observation_'+randomUUID();let observed;
   const f=fixture(t,async context=>{
-    observed=context.observations.find(o=>o.tool==='read_text')?.result.text;
+    observed=context.observations.find(o=>o.tool==='read_text')?.result.preview;
     assert.equal(observed,marker);
     return proposal('write_text',{path:'project.txt',content:'verified output'});
   });
@@ -174,10 +227,52 @@ test('exact model mismatch fails enrollment without reserving a run or invoking 
   await assert.rejects(f.start(),/PROJECT_MODEL_PROFILE_UNAVAILABLE/);
   assert.equal((await f.api.execute('workflow_run_status',{})).runs.length,0);assert.equal(f.plans,0);
 });
-test('exact matching model profile and explicitly permissive fallback are usable',async t=>{
-  const f=fixture(t,async context=>proposal('write_text',{path:context.workflowId+'.txt',content:'verified output'}));
-  await f.create('a',{executionProfile:{modelVariant:'model-a',reasoningEffort:'high',fallbackPolicy:'exact-only'}});await f.start('a');
+test('model-family mismatch fails even when the model variant string matches',async t=>{
+  const f=fixture(t,async()=>{throw Error('Wrong model family');});
+  await f.create('project',{executionProfile:{modelFamily:'gemma4',modelVariant:'model-a'}});
+  await assert.rejects(f.start(),/PROJECT_MODEL_PROFILE_UNAVAILABLE/);
+  assert.equal(f.plans,0);
+});
+test('execution mode and profile version are enforced against the provider descriptor',async t=>{
+  const f=fixture(t,async()=>{throw Error('Wrong execution profile');});
+  await f.create('project',{executionProfile:{modelVariant:'model-a',executionMode:'remote-agent',profileVersion:'2'}});
+  await assert.rejects(f.start(),/PROJECT_MODEL_PROFILE_UNAVAILABLE/);
+  assert.equal(f.plans,0);
+});
+test('equivalent-or-better fails closed without a qualified provider equivalence',async t=>{
+  const f=fixture(t,async()=>{throw Error('Unqualified fallback');});
+  await f.create('project',{executionProfile:{modelVariant:'model-b',fallbackPolicy:'equivalent-or-better'}});
+  await assert.rejects(f.start(),/PROJECT_MODEL_PROFILE_UNAVAILABLE/);
+  assert.equal(f.plans,0);
+});
+test('exact matching full model profile and explicitly permissive fallback are usable',async t=>{
+  const f=fixture(t,async context=>proposal('write_text',{path:context.workflowId+'.txt',content:'verified output'}),{provider:{modelFamily:'fixture'}});
+  await f.create('a',{executionProfile:{modelFamily:'fixture',modelVariant:'model-a',reasoningEffort:'high',
+    executionMode:'project-agent',profileVersion:'1',fallbackPolicy:'exact-only'}});await f.start('a');
   assert.equal((await f.tick('a')).status,'QUEUED');
   await f.create('b',{executionProfile:{modelVariant:'different-model',fallbackPolicy:'allow-any'}});await f.start('b');
   assert.equal((await f.tick('b')).status,'QUEUED');
+});
+
+
+test('provider model-family drift after enrollment blocks before the next planner call or effect',async t=>{
+  const provider={modelFamily:'fixture'};
+  const f=fixture(t,async context=>context.currentStep.id==='read'
+    ?proposal('read_text',{path:'source.txt'})
+    :proposal('write_text',{path:'project.txt',content:'verified output'}),{provider});
+  fs.writeFileSync(path.join(f.root,'source.txt'),'approved source');
+  await f.create('project',{
+    executionProfile:{modelFamily:'fixture',modelVariant:'model-a',fallbackPolicy:'exact-only'},
+    steps:[{id:'read',title:'Read the approved source'},{id:'write',title:'Write the verified artifact',dependsOn:['read']}]
+  });
+  await f.start();
+  assert.equal((await f.tick()).status,'QUEUED');
+  assert.equal(f.plans,1);
+  provider.modelFamily='unqualified-family';
+  const blocked=await f.tick();
+  assert.equal(blocked.status,'BLOCKED');
+  assert.equal(blocked.lastCode,'PROJECT_MODEL_PROFILE_UNAVAILABLE');
+  assert.equal(f.plans,1,'the drifted provider must not be called');
+  assert.deepEqual(f.dispatches.map(x=>x.tool),['read_text']);
+  assert.equal(fs.existsSync(path.join(f.root,'project.txt')),false);
 });

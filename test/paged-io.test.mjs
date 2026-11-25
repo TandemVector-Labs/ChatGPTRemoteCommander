@@ -5,12 +5,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { readText, writeText } from '../src/tools-v0.3.mjs';
 import { readAnyFile, writeAnyFile, searchFiles } from '../src/power-tools-v0.3.mjs';
+import { withFullPowerAccess } from './helpers/access-mode-fixtures.mjs';
 
 function fixture(){
   const root=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'rc-paged-io-')));
   const config={allowedRoots:[root],maxReadBytes:8*1024*1024,maxWriteBytes:8*1024*1024,auditLog:path.join(root,'audit.jsonl'),
     powerMode:{enabled:true,fullFilesystem:true,maxFileBytes:8*1024*1024,allowShell:true,allowProcessControl:true,allowPermanentDelete:false,backupRoot:path.join(root,'backups')}};
-  return {root,ctx:{config,roots:[root],auditLog:config.auditLog},dispose(){fs.rmSync(root,{recursive:true,force:true});}};
+  const ctx=withFullPowerAccess({config,roots:[root],auditLog:config.auditLog});
+  return {root,ctx,dispose(){fs.rmSync(root,{recursive:true,force:true});}};
 }
 
 test('large text reads require paging and remain bounded',async()=>{

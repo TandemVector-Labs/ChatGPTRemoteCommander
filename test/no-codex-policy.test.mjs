@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import {
   assertNoCodexCommand,
   assertNoCodexDelegatingScript,
@@ -103,6 +104,28 @@ test('run-project preflight rejects scripts that launch Codex', async t => {
   await assert.doesNotReject(assertNoCodexDelegatingScript(process.platform==='win32'?'python.exe':'python',[good],dir));
 });
 
+test('script alias detection uses bounded literal identifiers without dynamic regex', async t => {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'rc-static-codex-alias-'));
+  t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+  const script=path.join(dir,'indirect.py');
+  const prefix='import subprocess\nRUNNER="codex.exe"\n';
+  const check=async (line, shouldDeny) => {
+    fs.writeFileSync(script,prefix+line+'\n');
+    const promise=assertNoCodexDelegatingScript(
+      process.platform==='win32'?'python.exe':'python',[script],dir);
+    if (shouldDeny) await assert.rejects(promise,error=>error?.code===POLICY_CODE);
+    else await assert.doesNotReject(promise);
+  };
+  await check('subprocess.Popen([RUNNER,"exec"])',true);
+  await check('subprocess.Popen([runner,"exec"])',true);
+  await check('spawn(other); subprocess.Popen([RUNNER])',true);
+  await check('subprocess.Popen(['+' '.repeat(699)+'RUNNER])',true);
+  await check('subprocess.Popen(['+' '.repeat(700)+'RUNNER])',false);
+  await check('subprocess.Popen(['+' '.repeat(699)+'RUNNER_EXTRA])',false);
+  await check('subprocess.Popen([RUNNER_EXTRA])',false);
+  await check('subprocess.Popen([\nRUNNER])',false);
+});
+
 test('shell preflight rejects script-mediated and package-manager Codex launches', async t => {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'rc-no-codex-shell-'));
   t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
@@ -137,4 +160,25 @@ test('all Commander child environments strip OpenAI/Codex credentials', () => {
     assert.equal(env.REMOTE_COMMANDER_NO_CODEX,'1');
     assert.ok(env.CODEX_HOME.includes('chatgpt-remote-commander-no-codex'));
   }
+});
+
+
+test('Commander child PATH retains its own portable Linux Node runtime, without inheriting model credentials', () => {
+  const source = { PATH: '/nonexistent/commander-test-bin', OPENAI_API_KEY: 'test-secret' };
+  const env = commanderChildEnv(source);
+  assert.equal(source.PATH, '/nonexistent/commander-test-bin');
+  assert.equal(env.OPENAI_API_KEY, undefined);
+  if (process.platform !== 'linux' || path.basename(process.execPath) !== 'node') {
+    assert.equal(env.PATH, source.PATH);
+    return;
+  }
+  const runtimeDir = path.dirname(process.execPath);
+  assert.equal(env.PATH.split(path.delimiter)[0], runtimeDir);
+  const child = spawnSync('node', ['-p', 'process.execPath'], {
+    env, encoding: 'utf8', timeout: 8000, windowsHide: true
+  });
+  assert.equal(child.status, 0, child.error?.message || child.stderr);
+  assert.equal(fs.realpathSync(child.stdout.trim()), fs.realpathSync(process.execPath));
+  const repeated = commanderChildEnv({ PATH: env.PATH });
+  assert.equal(repeated.PATH, env.PATH);
 });

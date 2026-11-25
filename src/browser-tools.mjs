@@ -1,4 +1,5 @@
 import os from 'node:os';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
@@ -6,6 +7,10 @@ import { performance } from 'node:perf_hooks';
 import { BROWSER_RULES, browserError, browserToolDefinitions, validateBrowserInput } from './browser-contract.mjs';
 import { createBrowserProcessClient } from './browser-process.mjs';
 import { writeBrowserLeaseMarker, removeBrowserLeaseMarker, reapOrphanedIsolatedBrowserProfiles } from './browser-lease-store.mjs';
+import { planOwnerBrowserRoute } from './browser-existing-session-route.mjs';
+import { summarizeOwnerBrowserWindows } from './browser-owner-window-inventory.mjs';
+import { discoverBrowserProfileMetadata } from './browser-profile-inventory.mjs';
+import { requireBrowserTransferGrant } from './browser-file-transfer-guard.mjs';
 export { browserToolDefinitions };
 
 const project=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
@@ -26,15 +31,24 @@ const defaultInvoke=async req=>{
  finally{if(req.action==='end')defaultBrowserBackend=null;}
 };
 const defaultClose=()=>{defaultBrowserBackend=null;chromiumClient.close();firefoxClient.close();};
+const defaultOwnerWindowObserver=async ctx=>{
+ const {executeWorkspaceTool}=await import('./workspace-tools.mjs');
+ const r=await executeWorkspaceTool(ctx,'workspace_list_windows',{});
+ return r?.value?.windows??[];
+};
 const sameToken=(a,b)=>typeof a==='string'&&typeof b==='string'&&Buffer.byteLength(a)===Buffer.byteLength(b)&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
 const safeSegment=value=>typeof value==='string'&&/^[a-z][a-z0-9_-]{0,31}$/.test(value)?value:'default';
 const instanceSegment=value=>{const raw=typeof value==='string'&&value?value:'default';return raw==='default'?'default':'instance-'+Buffer.from(raw,'utf8').toString('hex');};
-function defaultProfileRoot(){
+function defaultProfileRoot(browserExecutable){
  if(process.platform==='win32')return path.join(process.env.LOCALAPPDATA||os.homedir(),'ChatGPTRemoteCommander','browser-profiles');
+ if(process.platform==='linux'&&isFirefoxExecutable(browserExecutable)){
+  const snapCommon=path.join(os.homedir(),'snap','firefox','common');
+  if(fs.existsSync(snapCommon))return path.join(snapCommon,'chatgpt-remote-commander','browser-profiles');
+ }
  return path.join(os.homedir(),'.local','state','chatgpt-remote-commander','browser-profiles');
 }
 function resolveProfileRoot(cfg){
- const raw=typeof cfg.profileRoot==='string'&&cfg.profileRoot.trim()?cfg.profileRoot.trim():defaultProfileRoot();
+ const raw=typeof cfg.profileRoot==='string'&&cfg.profileRoot.trim()?cfg.profileRoot.trim():defaultProfileRoot(cfg.executable);
  return path.resolve(raw.replace(/%([^%]+)%/g,(_,k)=>process.env[k]??process.env[k.toUpperCase()]??''));
 }
 export function reapBrowserOrphans(ctx){
@@ -42,8 +56,8 @@ export function reapBrowserOrphans(ctx){
  const root=resolveProfileRoot(cfg),instance=instanceSegment(ctx.config?.instance?.profile??'default');
  return reapOrphanedIsolatedBrowserProfiles({instanceRoot:path.join(root,instance)});
 }
-export function createBrowserController({invoke=defaultInvoke,closeInvoke=defaultClose,now=()=>performance.now(),wallNow=()=>Date.now(),token=()=>randomBytes(24).toString('hex'),scheduleTimeout=setTimeout,cancelTimeout=clearTimeout}={}){
- let session=null,uncertain=false,timer=null,busy=false,expiryRequested=false,expiredProfile=null;
+export function createBrowserController({invoke=defaultInvoke,closeInvoke=defaultClose,ownerWindowObserver=defaultOwnerWindowObserver,ownerRouteAttestation=async()=>null,trustedTransferContext=async()=>null,now=()=>performance.now(),wallNow=()=>Date.now(),token=()=>randomBytes(24).toString('hex'),scheduleTimeout=setTimeout,cancelTimeout=clearTimeout}={}){
+ let session=null,uncertain=false,chatMutationUncertain=false,timer=null,busy=false,expiryRequested=false,expiredProfile=null;
  const clearTimer=()=>{if(timer)cancelTimeout(timer);timer=null;};
  const cleanupExpired=async()=>{
   if(!expiryRequested||busy)return;
@@ -55,7 +69,7 @@ export function createBrowserController({invoke=defaultInvoke,closeInvoke=defaul
  const expireSession=()=>{
   if(!session)return;
   expiredProfile=session.profileDir;
-  session=null;uncertain=false;timer=null;expiryRequested=true;
+  session=null;uncertain=false;chatMutationUncertain=false;timer=null;expiryRequested=true;
   if(!busy)queueMicrotask(()=>cleanupExpired().catch(()=>{}));
  };
  const current=()=>{
@@ -79,19 +93,53 @@ export function createBrowserController({invoke=defaultInvoke,closeInvoke=defaul
    let native={ok:true,available:false,backend:null,active:false};
    try{native=await invoke({action:'status',executable:cfg.executable});}catch(error){native={ok:false,available:false,backend:null,active:false,reason:error.browserCode??'BROWSER_HELPER_UNAVAILABLE'};}
    current();
-   return {...native,enabled,busy,leased:!!session,uncertain,policy:{
+   const ownerInventory=enabled&&['win32','linux'].includes(process.platform)?discoverBrowserProfileMetadata():null;
+   const browserCandidates=ownerInventory?.browsers.map(entry=>({browser:entry.browser,family:entry.family,profileCount:entry.profileCount,scanStatus:entry.scanStatus,authenticationState:'UNVERIFIED'}))??[];
+   return {...native,enabled,busy,leased:!!session,uncertain,sessionResetRequired:chatMutationUncertain,
+    ownerBrowserCandidates:browserCandidates,
+    ownerBrowserSelection:{preferredBrowser:null,existingSessionFirst:true,ownerSessionProofRequired:true,profileConsentRequired:true,currentBackendIsOnlyCommanderOwnedBrowser:true,secretsInspected:false},policy:{
     backgroundFirst:true,headlessOwnedProfileOnly:true,userDesktopTouchedByDefault:false,
     savedPasswordExtraction:false,userBrowserProfileReuse:false,
     foregroundFallback:'explicit-current-request-only',workflowBrowserAllowed:false,
     allowForegroundFallback:cfg.allowForegroundFallback===true,
+    requireExplicitOwnedMode:cfg.requireExplicitOwnedMode===true,
     allowNavigate:cfg.allowNavigate===true,allowInput:cfg.allowInput===true,allowScreenshot:cfg.allowScreenshot===true
    }};
   }
   if(!enabled)throw browserError('BROWSER_DISABLED');
+  if(name==='browser_owner_route_plan'){
+   const origin=new URL(input.targetUrl).origin;
+   const profileInventory=discoverBrowserProfileMetadata();
+   let observed=[];let windowsAvailable=false;let windowFailure='NONE';
+   const activeOwnerObserver=typeof ctx?.ownerWindowObserver==='function'?ctx.ownerWindowObserver:ownerWindowObserver;
+   try{observed=await activeOwnerObserver(ctx);windowsAvailable=Array.isArray(observed);}
+   catch(error){windowFailure=String(error?.code??error?.message??'OWNER_WINDOW_UNAVAILABLE').slice(0,90);}
+   const nativeWindows=summarizeOwnerBrowserWindows(windowsAvailable?observed:[]);
+   let route={status:'BLOCKED',code:'EXISTING_OWNER_SESSION_NOT_ATTESTED',provider:null,defaultBrowser:null,credentialsRead:false,ownedBrowserStarted:false};
+   try{
+    const evidence=await ownerRouteAttestation(ctx,origin);
+    if(evidence?.ownerSession===true&&typeof evidence.ownerPrincipal==='string')
+      route=await planOwnerBrowserRoute({...evidence,requestedOrigin:origin,nowMs:Date.now()});
+   }catch{/* fail closed when trusted native broker is absent */}
+   return {ok:true,status:route.status,code:route.code,targetOrigin:origin,
+    provider:route.provider??null,selectedTabRef:route.status==='READY'?route.tabRef:null,
+    ownerWindowDiscovery:windowsAvailable?'OWNER_NATIVE_OBSERVED':'UNAVAILABLE',
+    ...(windowFailure==='NONE'?{}:{windowFailure}),
+    ownerWindows:nativeWindows.windows,windowCount:nativeWindows.windowCount,
+    windowsTruncated:nativeWindows.truncated,
+    browserProfiles:profileInventory.browsers.map(x=>({browser:x.browser,profileCount:x.profileCount,scanStatus:x.scanStatus,authenticationState:'UNVERIFIED'})),
+    preferredBrowser:null,existingSessionRequired:true,noImplicitOwnedBrowserFallback:true,
+    credentialsRead:false,userDesktopTouched:false,
+    nativeOwnerConsentAndAccountVerificationRequired:route.status!=='READY',
+    requiresExecutionReverification:route.status==='READY',
+    next:route.status==='READY'?'Use exact authorized owner tab; reverify before effect':
+     'Inspect exact owner window, request native browser consent, verify signed-in account; do not silently open Chromium'};
+  }
   if(busy)throw browserError('BROWSER_BUSY');
   busy=true;
   try{
    if(name==='browser_session_begin'){
+    if(cfg.requireExplicitOwnedMode===true&&input.mode===undefined)throw browserError('BROWSER_EXPLICIT_OWNED_MODE_REQUIRED');
     if(current())throw browserError('BROWSER_LEASE_BUSY');
     const ttl=input.ttlSeconds??300,mode=input.mode??'persistent',profile=input.profile??'default';
     const root=resolveProfileRoot(cfg),instance=instanceSegment(ctx.config?.instance?.profile??'default');
@@ -108,11 +156,15 @@ export function createBrowserController({invoke=defaultInvoke,closeInvoke=defaul
     }
     session={id:token(),expires:now()+ttl*1000,ttl,mode,profile,profileDir:dir,isolated:mode==='isolated',
       executable:cfg.executable,foreground:false,createdAtEpochMs:createdAt,expiresAtEpochMs:expiresAt};
-    uncertain=false;expiryRequested=false;arm(ttl);
+    uncertain=false;chatMutationUncertain=false;expiryRequested=false;arm(ttl);
     return {ok:true,lease:session.id,ttlSeconds:ttl,profile,mode,background:true,headless:true,
       userDesktopTouched:false,savedPasswordStoreAccess:false,browserProduct:native.browserProduct??null,backend:native.backend??'browser-headless'};
    }
    owns(input.lease);
+   if(name==='browser_chat_tabs'){
+     const native=await invoke({action:'chat_tabs'});
+     return {...native,sessionResetRequired:chatMutationUncertain,background:true,userDesktopTouched:false};
+   }
    if(name==='browser_session_renew'){
     const ttl=input.ttlSeconds??300,expiresAt=wallNow()+ttl*1000;
     writeBrowserLeaseMarker({profileDir:session.profileDir,instance:ctx.config?.instance?.profile??'default',isolated:session.isolated,createdAt:session.createdAtEpochMs,expiresAt,ownerPid:process.pid});
@@ -120,9 +172,10 @@ export function createBrowserController({invoke=defaultInvoke,closeInvoke=defaul
    }
    if(name==='browser_session_end'){
     const profileDir=session.profileDir;
-    clearTimer();session=null;uncertain=false;expiryRequested=false;expiredProfile=null;
+    clearTimer();session=null;uncertain=false;chatMutationUncertain=false;expiryRequested=false;expiredProfile=null;
     const r=await invoke({action:'end'});removeBrowserLeaseMarker(profileDir);return {ok:true,closed:r.closed===true};
    }
+   if(chatMutationUncertain&&name==='browser_foreground_begin')throw browserError('BROWSER_CHAT_OUTCOME_UNCERTAIN_SESSION_RESET_REQUIRED');
    if(name==='browser_foreground_requirement'){
     return {ok:true,approvalRequired:true,reason:input.reason,targetHost:input.targetHost??null,detail:input.detail??null,
       backgroundSessionPreserved:true,desktopTakenOver:false,
@@ -147,26 +200,52 @@ export function createBrowserController({invoke=defaultInvoke,closeInvoke=defaul
     return {ok:true,foreground:false,headless:true,userDesktopTouched:false,sameOwnedProfile:true,
       browserProduct:native.browserProduct??null,backgroundResumed:true,resumeNavigationFailed:native.resumeNavigationFailed===true};
    }
-   if(uncertain&&['browser_navigate','browser_fill','browser_click'].includes(name))throw browserError('BROWSER_OUTCOME_UNCERTAIN_SNAPSHOT_REQUIRED');
+   if(uncertain&&['browser_navigate','browser_fill','browser_click','browser_upload_file','browser_download_file','browser_chat_tab_open','browser_chat_tab_close'].includes(name))throw browserError(chatMutationUncertain?'BROWSER_CHAT_OUTCOME_UNCERTAIN_SESSION_RESET_REQUIRED':'BROWSER_OUTCOME_UNCERTAIN_SNAPSHOT_REQUIRED');
    const rule=BROWSER_RULES.get(name);
-   if(name==='browser_navigate'&&cfg.allowNavigate!==true)throw browserError('BROWSER_NAVIGATION_DISABLED');
-   if(['browser_fill','browser_click'].includes(name)&&cfg.allowInput!==true)throw browserError('BROWSER_INPUT_DISABLED');
+   if(['browser_navigate','browser_chat_tab_open','browser_chat_tab_close'].includes(name)&&cfg.allowNavigate!==true)throw browserError('BROWSER_NAVIGATION_DISABLED');
+   if(['browser_fill','browser_click','browser_upload_file','browser_download_file'].includes(name)&&cfg.allowInput!==true)throw browserError('BROWSER_INPUT_DISABLED');
    if(name==='browser_screenshot'&&cfg.allowScreenshot!==true)throw browserError('BROWSER_SCREENSHOT_DISABLED');
-   const mutation=['browser_navigate','browser_fill','browser_click'].includes(name);
+   const transfer=['browser_upload_file','browser_download_file'].includes(name);
+   let transferOrigin=null;
+   if(transfer){
+     // The production verifier must be injected from a trusted host boundary.
+     // No public MCP argument or FULL_POWER flag is by itself an owner grant.
+     const observed=await invoke({action:'snapshot',maxTextChars:1000,maxElements:1});
+     try{transferOrigin=new URL(observed.url).origin;}catch{throw browserError('BROWSER_TRANSFER_PAGE_ORIGIN_INVALID');}
+     if(!['http:','https:'].includes(new URL(transferOrigin).protocol))
+       throw browserError('BROWSER_TRANSFER_PAGE_ORIGIN_INVALID');
+     const operation=name==='browser_upload_file'?'upload':'download';
+     let trusted;try{
+       trusted=await trustedTransferContext(ctx,{operation,origin:transferOrigin,filename:input.filename,grantRef:input.grantRef});
+     }catch{/* absence or failed host verification denies */}
+     if(!trusted||!trusted.principal||!trusted.profile||typeof trusted.verifyGrant!=='function'||
+        trusted.profile!==(ctx.config?.instance?.profile??'default'))
+       throw browserError('BROWSER_TRANSFER_AUTH_CONTEXT_REQUIRED');
+     try{
+       await requireBrowserTransferGrant({verifyGrant:trusted.verifyGrant,operation,
+         principal:trusted.principal,profile:trusted.profile,origin:transferOrigin,
+         filename:input.filename,grant:input.grantRef});
+     }catch{throw browserError('BROWSER_TRANSFER_GRANT_REQUIRED');}
+   }
+   const mutation=['browser_navigate','browser_fill','browser_click','browser_upload_file','browser_download_file','browser_chat_tab_open','browser_chat_tab_close'].includes(name);
    const foregroundAtDispatch=session.foreground===true;
    const activity={background:!foregroundAtDispatch,userDesktopTouched:foregroundAtDispatch};
    try{
     let result;
-    if(name==='browser_navigate')result=await invoke({action:'navigate',url:input.url,timeoutMs:input.timeoutMs??30000});
+    if(name==='browser_chat_tab_open')result=await invoke({action:'chat_tab_open',url:input.url});
+    else if(name==='browser_chat_tab_close')result=await invoke({action:'chat_tab_close',tabRef:input.tabRef});
+    else if(name==='browser_navigate')result=await invoke({action:'navigate',url:input.url,timeoutMs:input.timeoutMs??30000});
     else if(name==='browser_snapshot')result=await invoke({action:'snapshot',maxTextChars:input.maxTextChars??20000,maxElements:input.maxElements??120});
     else if(name==='browser_screenshot')result=await invoke({action:'screenshot',format:input.format??'jpeg',quality:input.quality??70,maxBytes:input.maxBytes??2097152});
     else if(name==='browser_fill')result=await invoke({action:'fill',selector:input.selector,text:input.text});
     else if(name==='browser_click')result=await invoke({action:'click',selector:input.selector});
+    else if(name==='browser_upload_file')result=await invoke({action:'transfer_upload',origin:transferOrigin,selector:input.selector,filename:input.filename,sha256:input.expectedSha256});
+    else if(name==='browser_download_file')result=await invoke({action:'transfer_download',origin:transferOrigin,selector:input.selector,filename:input.filename,maxBytes:input.maxBytes??1048576});
     else if(name==='browser_wait')result=await invoke({action:'wait',selector:input.selector,textIncludes:input.textIncludes,urlIncludes:input.urlIncludes,timeoutMs:input.timeoutMs??5000});
     else throw browserError('BROWSER_UNKNOWN_TOOL');
     if(name==='browser_snapshot'){
-      uncertain=false;
-      result={...result,passwordValuesReturned:false,cookiesReturned:false,savedPasswordStoreAccess:false};
+      if(!chatMutationUncertain)uncertain=false;
+      result={...result,sessionResetRequired:chatMutationUncertain,passwordValuesReturned:false,cookiesReturned:false,savedPasswordStoreAccess:false};
     }
     if(name==='browser_screenshot'){
       const {data,mimeType,...meta}=result;
@@ -177,9 +256,9 @@ export function createBrowserController({invoke=defaultInvoke,closeInvoke=defaul
       const structured={...meta,bytes:bytes.length,mimeType,...activity};
       return {__mcpContent:[{type:'image',mimeType,data},{type:'text',text:JSON.stringify(structured)}],__structuredContent:structured};
     }
-    return {...result,...activity,...(['browser_fill','browser_click'].includes(name)?{verificationRecommended:true}:{})};
+    return {...result,...activity,...(['browser_fill','browser_click','browser_upload_file','browser_download_file'].includes(name)?{verificationRecommended:true}:{})};
    }catch(error){
-    if(mutation)uncertain=true;
+    if(mutation){uncertain=true;if(name==='browser_chat_tab_open'||name==='browser_chat_tab_close')chatMutationUncertain=true;}
     throw error;
    }
   }finally{
@@ -187,9 +266,21 @@ export function createBrowserController({invoke=defaultInvoke,closeInvoke=defaul
    if(expiryRequested)await cleanupExpired();
   }
  };
- const close=()=>{clearTimer();session=null;uncertain=false;expiryRequested=false;closeInvoke();};
- return {execute,close};
+ // Pure in-memory metadata: do not spawn the browser helper, expire a lease, or touch profiles.
+ const readinessSnapshot=(ctx)=>{
+   const cfg=ctx?.config?.powerMode?.browserControl??{};
+   const enabled=ctx?.config?.powerMode?.enabled===true&&cfg.enabled===true;
+   const leased=!!session&&session.expires>now()&&!expiryRequested;
+   return Object.freeze({ok:true,source:'CONTROLLER_MEMORY',enabled,
+     available:enabled&&leased,active:leased,leased,
+     backgroundOnly:!leased||session.foreground!==true,
+     userDesktopTouched:leased&&session.foreground===true,
+     uncertain,sessionResetRequired:chatMutationUncertain});
+ };
+ const close=()=>{clearTimer();session=null;uncertain=false;chatMutationUncertain=false;expiryRequested=false;closeInvoke();};
+ return {execute,close,readinessSnapshot,planExistingSession:planOwnerBrowserRoute};
 }
 const controller=createBrowserController();
 export async function executeBrowserTool(ctx,name,input){return controller.execute(ctx,name,input);}
+export function getBrowserReadinessSnapshot(ctx){return controller.readinessSnapshot(ctx);}
 export function closeBrowserController(){controller.close();}

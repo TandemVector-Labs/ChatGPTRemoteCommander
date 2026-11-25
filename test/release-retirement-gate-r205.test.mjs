@@ -64,6 +64,9 @@ check('refuses corrupt route',f=>{fs.writeFileSync(f.routePath,'{corrupt');fs.wr
 check('refuses protected retained backend',f=>{fs.writeFileSync(path.join(f.stateRoot,'retained-backends.json'),JSON.stringify({schema:1,items:[{projectDir:f.candidate}]}));fs.writeFileSync(f.approvalPath,JSON.stringify(f.approve));},'REFERENCED_BY_RETAINED_BACKEND');
 check('refuses local modifications in candidate',f=>{fs.appendFileSync(path.join(f.candidate,'package.json'),' ');fs.writeFileSync(f.approvalPath,JSON.stringify(f.approve));},'RELEASE_TREE_HAS_LOCAL_DATA_OR_CHANGES');
 check('refuses ignored runtime or personal files hidden by Git status',f=>{
+ // Git versions may omit the optional .git/info directory in fresh fixtures.
+ // Create only the fixture metadata directory; do not relax retirement checks.
+ fs.mkdirSync(path.join(f.candidate,'.git','info'),{recursive:true});
  fs.appendFileSync(path.join(f.candidate,'.git','info','exclude'),'\nprivate-state\n');
  fs.writeFileSync(path.join(f.candidate,'private-state'),'DO_NOT_DELETE');
  fs.writeFileSync(f.approvalPath,JSON.stringify(f.approve));

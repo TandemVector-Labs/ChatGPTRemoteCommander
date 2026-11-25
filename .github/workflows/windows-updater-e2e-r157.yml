@@ -6,6 +6,9 @@ on:
       - '.github/workflows/windows-updater-e2e-r157.yml'
       - 'auto-update-windows.ps1'
       - 'tools/run-owned-process-tree-windows.ps1'
+      - 'tools/run-r157-standard-user.ps1'
+      - 'tools/r157-standard-token-probe.mjs'
+      - 'tools/diagnose-updater-gate-r470.ps1'
       - 'src/**'
       - 'test/**'
       - 'package.json'
@@ -33,6 +36,15 @@ jobs:
         with:
           node-version: '24'
 
+      # Reuse the pinned native build and SHA verification from CI.
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '8.0.427'
+
+      - name: Build and verify the pinned native Job Object runner for the isolated updater
+        shell: pwsh
+        run: ./tools/windows-job-runner/verify-windows-job-runner.ps1 -Ensure
+
       - name: Exact-head preflight and private disposable state
         shell: pwsh
         run: |
@@ -44,12 +56,12 @@ jobs:
           $root=Join-Path $env:RUNNER_TEMP 'remote-commander-updater-r157'
           if(Test-Path $root){throw 'R157_NO_BLIND_RERUN'}
           if(Test-Path (Join-Path $env:LOCALAPPDATA 'ChatGPTRemoteCommander')){throw 'R157_EXISTING_USER_INSTALL'}
-          foreach($area in @('INSTALL','STATE','ROAMING')){
+          foreach($area in @('INSTALL','STATE','ROAMING','TEMP')){
             New-Item -ItemType Directory -Path (Join-Path $root $area) -ErrorAction Stop | Out-Null
           }
           $c=Get-Content 'config.json' -Raw -Encoding UTF8|ConvertFrom-Json
           if($null -eq $c.autoUpdate -or $null -eq $c.powerMode){throw 'R157_CONFIG_SCHEMA'}
-          $c.allowedRoots=@($root)
+          $c.allowedRoots=@((Join-Path $root 'INSTALL'))
           $c.autoUpdate.enabled=$true
           $c.powerMode.enabled=$false
           $c.powerMode.guiControl.enabled=$false
@@ -62,10 +74,24 @@ jobs:
           $path=Join-Path $root 'INSTALL\config.json'
           [IO.File]::WriteAllText($path,(ConvertTo-Json -InputObject $c -Depth 30)+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
           $r=Get-Content $path -Raw|ConvertFrom-Json
-          if(@($r.allowedRoots).Count -ne 1 -or $r.allowedRoots[0] -ne $root -or $r.powerMode.enabled -ne $false){throw 'R157_CONFIG_ISOLATION'}
+          if(@($r.allowedRoots).Count -ne 1 -or $r.allowedRoots[0] -ne (Join-Path $root 'INSTALL') -or $r.powerMode.enabled -ne $false){throw 'R157_CONFIG_ISOLATION'}
+          # Delivery and live state are siblings of INSTALL, never writable project roots.
+          $privateHome=Join-Path $root 'USERPROFILE'
+          $state=Join-Path $root 'STATE'
+          $allowedWithSep=[IO.Path]::GetFullPath($r.allowedRoots[0]).TrimEnd([char[]]@([IO.Path]::DirectorySeparatorChar)) + [IO.Path]::DirectorySeparatorChar
+          if($privateHome.StartsWith($allowedWithSep,[StringComparison]::OrdinalIgnoreCase) -or
+             $state.StartsWith($allowedWithSep,[StringComparison]::OrdinalIgnoreCase)){
+            throw 'R157_DELIVERY_STATE_INSIDE_ALLOWED_ROOT'
+          }
           $tokens=$null;$errors=$null
           [Management.Automation.Language.Parser]::ParseFile((Join-Path $env:GITHUB_WORKSPACE 'auto-update-windows.ps1'),[ref]$tokens,[ref]$errors)|Out-Null
           if(@($errors).Count -ne 0){throw 'R157_UPDATER_PARSER'}
+          [Management.Automation.Language.Parser]::ParseFile((Join-Path $env:GITHUB_WORKSPACE 'tools\run-r157-standard-user.ps1'),[ref]$tokens,[ref]$errors)|Out-Null
+          if(@($errors).Count -ne 0){throw 'R157_STANDARD_USER_HELPER_PARSER'}
+          [Management.Automation.Language.Parser]::ParseFile((Join-Path $env:GITHUB_WORKSPACE 'tools\diagnose-updater-gate-r470.ps1'),[ref]$tokens,[ref]$errors)|Out-Null
+          if(@($errors).Count -ne 0){throw 'R470_DIAGNOSTIC_PARSER'}
+          & node.exe --check (Join-Path $env:GITHUB_WORKSPACE 'tools\r157-standard-token-probe.mjs')
+          if($LASTEXITCODE -ne 0){throw 'R157_NODE_TOKEN_PROBE_PARSER'}
           Add-Content -LiteralPath $env:GITHUB_ENV -Value "RC_E2E_ROOT=$root"
           Add-Content -LiteralPath $env:GITHUB_ENV -Value "RC_E2E_SHA=$expected"
           Write-Output ('R157_PREFLIGHT_PASS_HEAD='+$head)
@@ -79,11 +105,14 @@ jobs:
           $root=[string]$env:RC_E2E_ROOT
           $sha=[string]$env:RC_E2E_SHA
           if(-not $root -or $sha -notmatch '^[0-9a-f]{40}$'){throw 'R157_MISSING_PRESTATE'}
-          $env:LOCALAPPDATA=Join-Path $root 'STATE'
-          $env:APPDATA=Join-Path $root 'ROAMING'
           $install=Join-Path $root 'INSTALL'
-          & pwsh.exe -NoLogo -NoProfile -NonInteractive -File .\auto-update-windows.ps1 -InstallDir $install -SourceRef $sha -ExpectedCommit $sha -TargetProfile default -NoPromote
-          if($LASTEXITCODE -ne 0){throw ('R157_UPDATER_FAILED_'+$LASTEXITCODE)}
+          # The exact-head updater independently verifies the native source hash.
+          # Run the STANDARD candidate under a real non-elevated token; the server
+          # correctly quarantines legacy MCP when its process token is elevated or unknown.
+          $runner=Join-Path $env:GITHUB_WORKSPACE 'tools\windows-job-runner\dist\win-x64\CommanderWindowsJobRunner.exe'
+          if(-not(Test-Path -LiteralPath $runner -PathType Leaf)){throw 'R157_PINNED_JOB_RUNNER_MISSING'}
+          & pwsh.exe -NoLogo -NoProfile -NonInteractive -File .\tools\run-r157-standard-user.ps1 -Root $root -Workspace $env:GITHUB_WORKSPACE -ExpectedCommit $sha -InstallDir $install -WindowsJobRunnerPath $runner
+          if($LASTEXITCODE -ne 0){throw ('R157_STANDARD_USER_UPDATER_FAILED_'+$LASTEXITCODE)}
 
       - name: Independently verify exact Job receipts and no promotion
         if: ${{ always() }}
@@ -94,6 +123,10 @@ jobs:
           $root=[string]$env:RC_E2E_ROOT
           $sha=[string]$env:RC_E2E_SHA
           if(-not $root -or $sha -notmatch '^[0-9a-f]{40}$'){throw 'R157_VERIFY_PRESTATE_MISSING'}
+          $cleanupPath=Join-Path $root 'R157_STANDARD_USER_CLEANUP.json'
+          if(-not(Test-Path -LiteralPath $cleanupPath -PathType Leaf)){throw 'R157_STANDARD_USER_CLEANUP_RECEIPT_MISSING'}
+          $cleanup=Get-Content -LiteralPath $cleanupPath -Raw -Encoding UTF8|ConvertFrom-Json
+          if($cleanup.schema -ne 1 -or $cleanup.revision -ne 'R157_STANDARD_USER_CLEANUP' -or $cleanup.status -notin @('PASS','NOT_REQUIRED_STANDARD_PARENT') -or $cleanup.ownedProcesses -ne 0 -or ($cleanup.accountCreated -and -not $cleanup.userRemoved) -or (-not $cleanup.accountCreated -and $cleanup.userRemoved)){throw 'R157_STANDARD_USER_CLEANUP_NOT_ACCEPTED'}
           $state=Join-Path $root 'STATE\ChatGPTRemoteCommander'
           $marker=Join-Path $state 'tools\codex-cli\R161-PRESERVE.txt'
           if(-not(Test-Path -LiteralPath $marker -PathType Leaf) -or [IO.File]::ReadAllText($marker) -cne 'R161-NO-PROMOTE-PRESERVE'){throw 'R161_LEGACY_PROVIDER_MUTATED_IN_NOPROMOTE'}
@@ -116,16 +149,23 @@ jobs:
           }
           $leftover=@(Get-CimInstance Win32_Process -Filter "Name='node.exe'"|Where-Object {([string]$_.CommandLine).Contains($root)})
           if($leftover.Count -gt 0){throw ('R157_ORPHANS_'+$leftover.Count)}
-          $stage=Join-Path $state ('releases\v0.10.23-'+$sha.Substring(0,12))
+          $manifest=Join-Path $env:GITHUB_WORKSPACE 'package.json'
+          if(-not(Test-Path -LiteralPath $manifest -PathType Leaf)){throw 'R157_SOURCE_PACKAGE_MISSING'}
+          $sourceVersion=[string]((Get-Content -LiteralPath $manifest -Raw -Encoding UTF8|ConvertFrom-Json).version)
+          if($sourceVersion -notmatch '^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:dev|rc)\.[1-9]\d*)?$'){throw 'R157_SOURCE_VERSION_INVALID'}
+          & node.exe (Join-Path $env:GITHUB_WORKSPACE 'tools/isolated-qa-policy.mjs')
+          if($LASTEXITCODE -ne 0){throw 'R157_SOURCE_NOPROMOTE_POLICY_INVALID'}
+          $stage=Join-Path $state ('releases\v'+$sourceVersion+'-'+$sha.Substring(0,12))
           if(-not(Test-Path $stage) -or (git -C $stage rev-parse HEAD).Trim() -ne $sha){throw 'R157_EXACT_STAGE_MISSING'}
-          $receipt=[ordered]@{schema=1;revision='R157';status='PASS_HOSTED_WINDOWS_UPDATER_NOPROMOTE'
+          $receipt=[ordered]@{schema=1;revision='R157';status='PASS_HOSTED_WINDOWS_STANDARD_NOPROMOTE'
             exactCommit=$sha;qualifierReceipts=3;doctor='PASS';shadowStore='PASS'
-            liveStoreCompatibility='PASS';ownedChildren=0;promoted=$false;stableBrowserUntouched=$true
+            standardUserCleanup=$cleanup.status;standardUserAccountRemoved=[bool]$cleanup.userRemoved;standardUserOwnedProcesses=[int]$cleanup.ownedProcesses
+            liveStoreCompatibility='PASS';g1Authorization='BLOCKED_NOT_CONFIGURED';ownedChildren=0;promoted=$false;stableBrowserUntouched=$true
             verifiedUtc=[DateTime]::UtcNow.ToString('o')}
           $dest=Join-Path $root 'RETURN_R157.json'
           [IO.File]::WriteAllText($dest,(ConvertTo-Json -InputObject $receipt -Depth 5)+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
           Write-Output ('R157_PASS source='+$sha+' receiptSha='+(Get-FileHash $dest -Algorithm SHA256).Hash)
-          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value '**R157 PASS:** Exact-head Windows candidate-first NoPromote E2E, 3 owned qualification suites, Doctor/Store PASS, no route promotion or owned child leaks.'
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value '**R157 STANDARD CANARY PASS:** exact-head isolated Windows NoPromote, 3 qualification suites, positive Standard MCP Doctor and state checks, no route promotion or owned child leaks. G1 protected FULL_POWER/FULL_ACCESS authentication remains NOT VERIFIED; this is NOT Stable release acceptance.'
       - name: R470 derive a bounded, allowlisted failure diagnostic (no raw logs)
         if: ${{ failure() }}
         shell: pwsh

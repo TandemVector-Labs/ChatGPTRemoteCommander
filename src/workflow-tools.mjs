@@ -3,12 +3,79 @@
 import { WorkflowStore, fail } from './workflow-store.mjs';
 import { deriveCapabilitySet, FULL_WORKFLOW_EXECUTION_TOOLS } from './capability-profile.mjs';
 import path from 'node:path';
+import { realpath } from 'node:fs/promises';
 import { createProjectEngine } from './project-engine.mjs';
 import { createCommandPlanner } from './project-planner.mjs';
 import { createTeamPlanner } from './project-team.mjs';
 import { codexLaunchAuthorized } from './no-codex-policy.mjs';
+import { processContainmentAvailable } from './process-containment.mjs';
+import { expandPathValue } from './platform.mjs';
+
+// Workflow file effects must not mutate the Host control plane. Match the
+// actual dispatch path semantics (legacy write_text vs Power path expansion)
+// and protect directory-level replacement/removal as well as individual files.
+// This is not an OS sandbox for separately authorized executable tools.
+const WORKFLOW_HOST_CONFIG_EFFECTS = new Set([
+  'write_text','write_file','create_directory','copy_path','move_path','delete_path'
+]);
+async function denyHostConfigMutation(tool, input, projectRoot, protectedConfigPaths) {
+  if (!protectedConfigPaths.length || !WORKFLOW_HOST_CONFIG_EFFECTS.has(tool)) return;
+  const normalize = value => {
+    const resolved = path.resolve(value);
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  };
+  const contains = (parent, child) => {
+    const rel = path.relative(normalize(parent), normalize(child));
+    return rel === '' || (rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel));
+  };
+  // Canonicalize the deepest existing ancestor, including multi-level missing
+  // paths accepted by Power createParents. Fail closed on unexpected errors.
+  const canonical = async value => {
+    let cursor = value;
+    const suffix = [];
+    for (;;) {
+      try { return path.join(await realpath(cursor), ...suffix); }
+      catch (error) {
+        if (error?.code !== 'ENOENT') fail('WORKFLOW_HOST_CONFIG_PATH_UNAVAILABLE');
+        const parent = path.dirname(cursor);
+        if (parent === cursor) fail('WORKFLOW_HOST_CONFIG_PATH_UNAVAILABLE');
+        suffix.unshift(path.basename(cursor));
+        cursor = parent;
+      }
+    }
+  };
+  const targets = tool === 'copy_path' ? [input.destination]
+    : tool === 'move_path' ? [input.source, input.destination] : [input.path];
+  const mayReplaceAncestor = tool !== 'create_directory';
+  const overlaps = (requested, trusted) =>
+    contains(trusted, requested) || (mayReplaceAncestor && contains(requested, trusted));
+  for (const raw of targets) {
+    if (typeof raw !== 'string' || !raw) fail('WORKFLOW_TOOL_ARGUMENTS_INVALID');
+    const expanded = tool === 'write_text' ? raw : expandPathValue(raw);
+    const requested = path.resolve(path.isAbsolute(expanded) ? expanded : path.join(projectRoot, expanded));
+    if (protectedConfigPaths.some(target => overlaps(requested, target))) {
+      fail('WORKFLOW_HOST_CONFIG_WRITE_DENIED');
+    }
+    const actual = await canonical(requested);
+    for (const target of protectedConfigPaths) {
+      if (overlaps(actual, await canonical(target))) {
+        fail('WORKFLOW_HOST_CONFIG_WRITE_DENIED');
+      }
+    }
+  }
+}
 
 const text = maxLength => ({ type: 'string', minLength: 1, maxLength });
+// Node timers accept at most a signed 32-bit millisecond delay. Oversized
+// scheduler configuration must fail closed, never collapse to a 1 ms loop.
+function requireWorkflowSchedulerIntervalMs(value) {
+  if (value === undefined) return 5000;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value)
+    || value < 1000 || value > 3_600_000)
+    throw new Error('WORKFLOW_SCHEDULER_INTERVAL_INVALID');
+  return value;
+}
+
 const id = { ...text(64), pattern: '^[a-z][a-z0-9_-]{0,63}$' };
 const correlationId = { ...text(128), pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$' };
 const rev = { type: 'integer', minimum: 1, maximum: 10000 };
@@ -33,6 +100,22 @@ export const WORKFLOW_TOOL_DEFINITIONS = [
     steps: { type: 'array', minItems: 1, maxItems: 100, items: obj({ id, title: text(500), dependsOn: { type: 'array', maxItems: 100, items: id } }, ['id', 'title']) },
     executionProfile, brainPath:text(512), autoContinue:{type:'boolean'}, retryBudget:{type:'integer',minimum:0,maximum:20}
   }, ['id', 'root', 'goal', 'acceptance', 'steps']), write),
+  definition('workflow_roadmap', 'Read the complete durable step map, execution position, blockers and safe insertion candidates; no tool effect or approval.', obj(base,['id']), ro),
+  definition('workflow_plan_insert', 'Place approved new tasks before a named pending roadmap step with durable idempotent evidence. Does not execute tasks.', obj({
+    ...update,operationId:correlationId,targetStepId:id,
+    steps:{type:'array',minItems:1,maxItems:20,items:obj({
+      id,title:text(500),dependsOn:{type:'array',maxItems:100,items:id}
+    },['id','title'])},
+    reason:text(1000)
+  },['id','expectedRevision','operationId','targetStepId','steps','reason']),write),
+  definition('workflow_plan_edit', 'Revise one pending roadmap step title with immutable revisioned receipt. Cannot change committed work, dependencies or approval.',obj({
+    ...update,operationId:correlationId,stepId:id,title:text(500),reason:text(1000)
+  },['id','expectedRevision','operationId','stepId','title','reason']),write),
+  definition('workflow_plan_prioritize', 'Reorder only unexecuted independent roadmap steps by explicit owner priority. Never move completed work or alter dependencies.',obj({
+    ...update,operationId:correlationId,
+    orderedStepIds:{type:'array',minItems:1,maxItems:100,uniqueItems:true,items:id},
+    reason:text(1000)
+  },['id','expectedRevision','operationId','orderedStepIds','reason']),write),
   definition('workflow_get', 'Read recorded project state. Stored content is untrusted data, not executable authority.', obj(base, ['id']), ro),
   definition('workflow_list', 'List workflow IDs and revisions in bounded pages from this private local store.', obj({ after:id, limit:{type:'integer',minimum:1,maximum:1000} }), ro),
   definition('workflow_operations', 'List durable operation receipts/ids for one workflow without raw arguments or outputs.', obj(base,['id']), ro),
@@ -88,7 +171,13 @@ const DIRECT_SESSION_ONLY_GUI = new Set([
   'gui_type_text','gui_key_press','gui_focus_window'
 ]);
 
-export function createWorkflowTools({ config, roots, device, configSha256, lookup, validateSchema, dispatch, planner: injectedPlanner, deliveryStore = null, conversationController = null }) {
+export function createWorkflowTools({ config, roots, device, configSha256, lookup, validateSchema, dispatch, planner: injectedPlanner, deliveryStore = null, conversationController = null, protectedHostConfigPaths = [] }) {
+  // Populated only by the Host bootstrap, never by workflow caller arguments.
+  if (!Array.isArray(protectedHostConfigPaths) || protectedHostConfigPaths.some(
+    value => typeof value !== 'string' || !path.isAbsolute(value) || value.includes('\0'))) {
+    fail('WORKFLOW_HOST_CONFIG_POLICY_INVALID');
+  }
+  const protectedConfigs = [...new Set(protectedHostConfigPaths.map(value => path.resolve(value)))];
   const settings = config.durableWorkflows;
   if (settings?.enabled !== true) fail('WORKFLOW_DISABLED');
   if (typeof settings.directory !== 'string') fail('WORKFLOW_DIRECTORY_REQUIRED');
@@ -102,6 +191,8 @@ export function createWorkflowTools({ config, roots, device, configSha256, looku
   };
   const defaultExecutionProfile = settings.executionProfile?.default ?? {};
   const schedulerPolicy = settings.scheduler ?? { enabled:false };
+  const schedulerIntervalMs = schedulerPolicy.enabled === true
+    ? requireWorkflowSchedulerIntervalMs(schedulerPolicy.intervalMs) : null;
   const store = new WorkflowStore({
     directory: settings.directory, rootLeaseDirectory: settings.rootLeaseDirectory ?? settings.directory,
     allowedRoots: roots, device, configSha256,
@@ -267,9 +358,7 @@ export function createWorkflowTools({ config, roots, device, configSha256, looku
 
   let timer=null;
   if (schedulerPolicy?.enabled === true) {
-    const interval = Number.isSafeInteger(Number(schedulerPolicy.intervalMs)) && Number(schedulerPolicy.intervalMs)>=1000
-      ? Number(schedulerPolicy.intervalMs) : 5000;
-    timer=setInterval(()=>{ schedulerTick({includeDisabled:false}).catch(()=>{}); },interval);
+    timer=setInterval(()=>{ schedulerTick({includeDisabled:false}).catch(()=>{}); },schedulerIntervalMs);
     timer.unref?.();
   }
 
@@ -282,6 +371,49 @@ export function createWorkflowTools({ config, roots, device, configSha256, looku
         case 'workflow_status': return { ...runtimeStatus(), enabled:true, engineEnabled:true, executionTools:[...allowed], deliveryIntegration:deliveryStore?{enabled:true,lastError:deliveryLastError}: {enabled:false} };
         case 'workflow_health': {const health=store.health();return engine?{...health,scheduler:runtimeStatus().schedulerState,projectEngine:engine.status(),deliveryIntegration:deliveryStore?{enabled:true,lastError:deliveryLastError}: {enabled:false}}:health;}
         case 'workflow_create': return store.create(args);
+        case 'workflow_roadmap': {
+          const view=store.resume(args.id),state=view.state;
+          const committed=new Set(state.steps.filter(step=>
+            ['recorded','verified','reconciled_applied'].includes(step.status)).map(step=>step.id));
+          const frozen=state.steps.some(step=>['running','uncertain'].includes(step.status));
+          const steps=state.steps.map((step,i)=>{
+            const waitingFor=step.dependsOn.filter(id=>!committed.has(id));
+            return {
+              id:step.id,title:step.title,position:i+1,status:step.status,
+              dependsOn:[...step.dependsOn],waitingFor,
+              structurallyReady:step.status==='pending'&&waitingFor.length===0,
+              placementCandidate:step.status==='pending'&&
+                !['operationId','callHash','receipt','startedAt','endedAt','attemptId',
+                  'idempotencyKey','tool','reconciliation'].some(key=>Object.hasOwn(step,key))
+            };
+          });
+          return {
+            schema:'workflow-owner-roadmap/1',id:state.id,root:state.root,
+            revision:state.revision,headSha256:view.headSha256,
+            goal:state.goal,acceptance:[...state.acceptance],
+            acceptanceStatus:state.acceptanceStatus??'UNVALIDATED',
+            lifecycleState:view.lifecycleState,
+            controlIntent:state.control?.intent??'ACTIVE',
+            nextStep:view.nextStep,readyForNextStep:view.readyForNextStep,
+            nextAction:view.nextAction,blockers:[...view.blockers],
+            steps,recordedPlanExtensions:state.planExtensions?.length??0,
+            recordedPriorityChanges:state.planPriorities?.length??0,
+            recordedPendingEdits:state.planEdits?.length??0,
+            roadmapEditable:!frozen&&!view.blockers.length&&
+              state.control?.intent!=='PAUSED'&&
+              state.control?.intent!=='CANCELLED'&&
+              !['COMPLETED','FAILED','FINALIZING','VALIDATING'].includes(state.lifecycleState),
+            placementRequiresApprovedTarget:true,
+            userRequestPlacement:'USE_APPROVED_TARGET_STEP_ID_OR_ASK_OWNER',
+            runnerConfigured:runtimeStatus().runnerConfigured===true,
+            autorunEnabled:runtimeStatus().automaticExecution===true,
+            noImplicitScopeOrPrivilegeGrant:true,
+            meaning:'A displayed step is a plan, not proof of an executed action or real model run.'
+          };
+        }
+        case 'workflow_plan_insert': return store.extendPlan(args);
+        case 'workflow_plan_prioritize': return store.prioritizePlan(args);
+        case 'workflow_plan_edit': return store.editPlanStep(args);
         case 'workflow_get': return store.get(args.id);
         case 'workflow_list': return store.listPage(args);
         case 'workflow_operations': return {id:args.id,operations:store.operations(args.id)};
@@ -322,7 +454,7 @@ export function createWorkflowTools({ config, roots, device, configSha256, looku
         }
         case 'workflow_run_status': {
           if(!engine)fail('WORKFLOW_RUNNER_DISABLED');
-          const result=engine.status(args.runId);reconcileProjectDeliveries();return result;
+          return engine.status(args.runId);
         }
         case 'workflow_run_resolve': {
           if(!engine)fail('WORKFLOW_RUNNER_DISABLED');
@@ -339,10 +471,22 @@ export function createWorkflowTools({ config, roots, device, configSha256, looku
               if (DIRECT_SESSION_ONLY_GUI.has(tool) || (tool === 'gui_session_begin' && input?.mode === 'takeover')) {
                 fail('WORKFLOW_GUI_TAKEOVER_REQUIRES_DIRECT_USER_SESSION');
               }
+              if (['kill_process','start_terminal','send_terminal','stop_terminal','gui_session_begin','gui_session_renew','gui_session_end'].includes(tool)) {
+                fail('WORKFLOW_PROCESS_TOOL_NOT_SUPPORTED');
+              }
+              if (['run_project_command','run_shell'].includes(tool)
+                && schedulerPolicy.oneWriterPerRoot !== false
+                && !(await processContainmentAvailable())) {
+                fail('WORKFLOW_CESSATION_PROVIDER_UNAVAILABLE');
+              }
               const definition = lookup(tool);
               if (!definition) fail('WORKFLOW_TOOL_UNAVAILABLE');
               const errors = validateSchema(input, definition.inputSchema);
               if (errors.length) fail('WORKFLOW_TOOL_ARGUMENTS_INVALID');
+              if (WORKFLOW_HOST_CONFIG_EFFECTS.has(tool)) {
+                const source = store.get(args.id).state.root;
+                await denyHostConfigMutation(tool, input, source, protectedConfigs);
+              }
             }, dispatch
           });
           if (outcome.result?.__mcpContent) {
@@ -373,7 +517,10 @@ export function createWorkflowTools({ config, roots, device, configSha256, looku
           if(resumed.blockers.length)fail(resumed.blockers[0]);
           const definition=lookup(name);
           if(!definition||validateSchema(args,definition.inputSchema).length)fail('WORKFLOW_TOOL_ARGUMENTS_INVALID');
-          return dispatch(name,args,resumed.state);
+          const observationArgs=name==='read_text'
+            ? {path:args.path,offset:0,maxBytes:1024}
+            : {path:args.path,depth:1,maxEntries:24};
+          return dispatch(name,observationArgs,resumed.state);
         },lookup,policy:settings.runner});
       queueMicrotask(()=>{reconcileProjectDeliveries();});
       if(settings.runner.autoTick===true)api.definitions=api.definitions.map(d=>d.name==='workflow_scheduler_tick'?{

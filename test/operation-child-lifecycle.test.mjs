@@ -132,8 +132,9 @@ test('changed child identity fails closed without using another PID', async () =
 test('source wiring installs lifecycle synchronously post-spawn and preserves receipt-before-state', () => {
   const source = readFileSync(new URL('../tools/operation-worker.mjs', import.meta.url), 'utf8');
   const main = source.slice(source.indexOf('async function main()'));
-  const spawn = main.indexOf('currentChild = spawn('), observer = main.indexOf('const observed = observeOperationChild(');
-  const persistence = main.indexOf('await atomicJson(spec.statePath, {');
+  const spawn = main.indexOf('currentChild = spawn(');
+  const observer = main.indexOf('observed = observeOperationChild(currentChild, {');
+  const persistence = main.indexOf('await atomicJson(spec.statePath, {', observer);
   assert.ok(spawn >= 0 && observer > spawn && persistence > observer);
   assert.equal(main.slice(spawn, observer).includes('await '), false);
   assert.ok(main.includes('outcome = await observed.outcome;'));

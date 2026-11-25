@@ -18,7 +18,11 @@ export function defaultBrowserCompanionRoot({ platform = process.platform, env =
 async function provePrivateRoot(root, { platform = process.platform } = {}) {
   const flavor = platform === 'win32' ? path.win32 : path.posix;
   if (!root || !flavor.isAbsolute(root)) throw new Error('BROWSER_COMPANION_ROOT_INVALID');
-  if (platform !== 'win32') {
+  if (platform === 'win32') {
+    // A new user-local installation may have no browser companion directory.
+    // Preserve the existing root validation: symbolic links still fail closed.
+    await mkdir(root, { recursive: true });
+  } else {
     await mkdir(root, { recursive: true, mode: 0o700 });
     await chmod(root, 0o700);
   }

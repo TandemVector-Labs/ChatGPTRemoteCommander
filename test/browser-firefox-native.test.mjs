@@ -7,6 +7,26 @@ import http from 'node:http';
 import { once } from 'node:events';
 import { spawnSync } from 'node:child_process';
 import { createBrowserController } from '../src/browser-tools.mjs';
+test('Firefox WebDriver helper ignores an untrusted geckodriver injected into PATH',
+ {skip:process.platform!=='linux'},()=>{
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'rc-firefox-driver-path-'));
+  try{
+    const fake=path.join(dir,'geckodriver');
+    fs.writeFileSync(fake,'#!/bin/sh\nexit 31\n',{mode:0o755});
+    const helper=path.join(path.resolve(import.meta.dirname,'..'),'tools','browser-control-firefox.mjs');
+    const probe=spawnSync(process.execPath,[helper],{
+      input:JSON.stringify({action:'status'}),encoding:'utf8',timeout:10000,
+      env:{...process.env,PATH:dir+path.delimiter+(process.env.PATH??'')},
+      windowsHide:true,shell:false
+    });
+    assert.equal(probe.status,0,probe.stderr||probe.stdout);
+    const state=JSON.parse(probe.stdout);
+    assert.equal(state.ok,true);
+    assert.notEqual(state.driverExecutable,fake,
+      'ambient PATH must not select a browser helper executable');
+  }finally{fs.rmSync(dir,{recursive:true,force:true});}
+});
+
 
 function which(name){
  const r=spawnSync(process.platform==='win32'?'where.exe':'sh',process.platform==='win32'?[name]:['-lc','command -v '+name+' 2>/dev/null || true'],{encoding:'utf8'});

@@ -10,6 +10,7 @@ import { createProjectEngine } from '../src/project-engine.mjs';
 import { validateJsonSchema } from '../src/schema-validator.mjs';
 import { listDirectory, readText, writeText } from '../src/tools-v0.3.mjs';
 import { writeAnyFile } from '../src/power-tools-v0.3.mjs';
+import { withFullPowerAccess } from './helpers/access-mode-fixtures.mjs';
 
 const proposal = (tool, args) => ({ action: 'call', tool, argumentsJson: JSON.stringify(args), summary: 'Perform one approved project step' });
 const delegate = (artifact = 'worker-draft.txt', brief = 'Create one bounded artifact') => ({ action: 'delegate', tool: '', argumentsJson: JSON.stringify({ artifact, brief }), summary: 'Delegate one bounded artifact worker' });
@@ -47,7 +48,7 @@ function makeFixture({ root, planner, scheduler = false, runner = {}, afterDispa
     dispatch: async (name, args, workflow) => {
       calls++;
       // The same project-root restriction as the real server dispatch adapter.
-      const ctx = { roots: [workflow.root], auditLog: config.auditLog, config: { ...config, allowedRoots: [workflow.root], powerMode: { fullFilesystem: false } } };
+      const ctx = withFullPowerAccess({ roots: [workflow.root], auditLog: config.auditLog, config: { ...config, allowedRoots: [workflow.root], powerMode: { enabled: true, fullFilesystem: false } } });
       const result = name === 'write_text' ? await writeText(ctx, args)
         : name === 'read_text' ? await readText(ctx, args) : await listDirectory(ctx, args);
       if (afterDispatch) await afterDispatch(name, args, result);
@@ -69,6 +70,8 @@ function makeFixture({ root, planner, scheduler = false, runner = {}, afterDispa
 }
 
 async function claimWorker(root) {
+  // Simulate a loaded Windows runner delaying the worker's first IPC message.
+  if (process.argv[4] === '--qa-slow-start') await new Promise(resolve => setTimeout(resolve, 8500));
   const release = deferred();
   process.on('message', message => { if (message?.kind === 'release') release.resolve(); });
   const fixture = makeFixture({ root, planner: async () => {
@@ -84,17 +87,24 @@ async function claimWorker(root) {
 if (process.argv[2] === '--claim-worker') {
   await claimWorker(process.argv[3]);
 } else {
-  test('automatic scheduler never plans an unenrolled workflow and completes only after explicit enrollment', { timeout: 9000 }, async () => {
+  // Keep the real timer cycle and all assertions; allow loaded Windows CI more scheduler time.
+  // Linux retains the original 9s outer / 6s completion bounds.
+  const SCHEDULER_CI_TEST_MS = process.platform === 'win32' ? 30000 : 9000;
+  const SCHEDULER_CI_POLL_MS = process.platform === 'win32' ? 22000 : 6000;
+  test('automatic scheduler never plans an unenrolled workflow and completes only after explicit enrollment', { timeout: SCHEDULER_CI_TEST_MS }, async t => {
     const fixture = makeFixture({ scheduler: true, runner: { autoTick: true }, planner: async () => proposal('write_text', { path: 'result.txt', content: 'verified output' }) });
     try {
       await fixture.create();
+      t.diagnostic('SCHEDULER_PHASE=created_before_real_timer_cycle');
       await sleep(1200); // An actual timer cycle, not just the manual scheduler API.
       assert.equal(fixture.plans, 0);
       assert.equal(fixture.calls, 0);
       assert.equal(fs.existsSync(path.join(fixture.root, 'result.txt')), false);
       assert.deepEqual((await fixture.api.execute('workflow_run_status', {})).runs, []);
+      t.diagnostic('SCHEDULER_PHASE=unenrolled_not_planned');
       await fixture.start();
-      const final = await until(async () => { const current = await fixture.status(); return current.status === 'COMPLETED' ? current : null; });
+      t.diagnostic('SCHEDULER_PHASE=enrolled_waiting_for_completion');
+      const final = await until(async () => { const current = await fixture.status(); return current.status === 'COMPLETED' ? current : null; }, SCHEDULER_CI_POLL_MS);
       assert.equal(final.actions, 1);
       assert.equal(fixture.plans, 1);
       assert.equal(fixture.calls, 1);
@@ -102,7 +112,7 @@ if (process.argv[2] === '--claim-worker') {
     } finally { await fixture.dispose(); }
   });
 
-  for (const earlyWake of [false,true]) test(`deadline aborts an abort-aware planner before any filesystem effect (early wake=${earlyWake})`, { timeout: 6000 }, async t => {
+  for (const earlyWake of [false,true]) test(`deadline aborts an abort-aware planner before any filesystem effect (early wake=${earlyWake})`, { timeout: 12000 }, async t => {
     let aborted = false;
     const fixture = makeFixture({ planner: async (_, { signal }) => new Promise((resolve, reject) => {
       const stop = () => { aborted = true; reject(Object.assign(new Error('Planner interrupted'), { code: 'PLANNER_ABORTED' })); };
@@ -115,7 +125,9 @@ if (process.argv[2] === '--claim-worker') {
         const nativeTimeout=globalThis.setTimeout;
         t.mock.method(globalThis,'setTimeout',(callback,delay,...args)=>{
           timerCalls++;
-          return nativeTimeout(callback,Math.min(delay,5),...args);
+          // Advance only long deadline waits. Accelerating short backoff/
+          // SQLite timers into a 5 ms storm starves slow Windows CI workers.
+          return nativeTimeout(callback,delay>=250?5:delay,...args);
         });
       }
       const result = await fixture.tick();
@@ -142,12 +154,17 @@ if (process.argv[2] === '--claim-worker') {
     } finally { await fixture.dispose(); }
   });
 
-  test('pre-expired deadline refuses planner and all filesystem effects', { timeout: 6000 }, async () => {
+  test('pre-expired deadline refuses planner and all filesystem effects', { timeout: 6000 }, async t => {
     const fixture = makeFixture({ planner: async () => { throw Error('Expired run must not plan'); } });
     try {
       await fixture.create();
       const started = await fixture.start({ durationMs: 1000 });
-      await sleep(Math.max(0, started.deadline - Date.now() + 25));
+      // Advance only the process clock, not production state or the planner.
+      // A wall-clock sleep made this bounded no-effect test dependent on
+      // scheduling delays during the long Windows qualification job. The two
+      // preceding deadline tests still exercise actual abort timers.
+      const expiredAt = Math.max(Date.now(), started.deadline + 25);
+      t.mock.method(Date, 'now', () => expiredAt);
       const result = await fixture.tick();
       assert.equal(result.status, 'EXHAUSTED');
       assert.equal(result.lastCode, 'PROJECT_DEADLINE_EXHAUSTED');
@@ -155,7 +172,7 @@ if (process.argv[2] === '--claim-worker') {
       assert.equal(fixture.plans, 0);
       assert.equal(fixture.calls, 0);
       assert.equal(fs.existsSync(path.join(fixture.root, 'result.txt')), false);
-    } finally { await fixture.dispose(); }
+    } finally { t.mock.restoreAll(); await fixture.dispose(); }
   });
 
   test('cancel during an effect preserves its root lease and cancellation after the receipt', { timeout: 6000 }, async () => {
@@ -164,7 +181,17 @@ if (process.argv[2] === '--claim-worker') {
     let pending;
     try {
       await fixture.create(); await fixture.create('other'); await fixture.start();
-      pending = fixture.tick(); await entered.promise;
+      pending = fixture.tick();
+      // An already-ended tick cannot enter the effect callback. Record its
+      // terminal phase rather than waiting forever; keep the 6000ms deadline.
+      const first = await Promise.race([
+        entered.promise.then(() => ({ phase: 'effect-entered' })),
+        pending.then(
+          state => ({ phase: 'tick-ended-before-effect', status: state.status, code: state.lastCode }),
+          error => ({ phase: 'tick-error-before-effect', code: error?.code || error?.message || 'unknown' })
+        )
+      ]);
+      assert.equal(first.phase, 'effect-entered', JSON.stringify(first));
       const running = await fixture.state();
       await fixture.api.execute('workflow_control', { id: 'project', expectedRevision: running.revision, action: 'cancel', reason: 'User cancelled during the pending effect receipt' });
       const other = await fixture.state('other');
@@ -257,7 +284,7 @@ if (process.argv[2] === '--claim-worker') {
       const protectedFile = path.join(external, 'protected.txt');
       const backupRoot = path.join(root, 'power-backups');
       const auditLog = path.join(root, 'audit.jsonl');
-      const ctx = { roots: [root], auditLog, config: { maxWriteBytes: 524288, powerMode: { enabled: true, fullFilesystem, backupRoot, maxFileBytes: 524288 } } };
+      const ctx = withFullPowerAccess({ roots: [root], auditLog, config: { maxWriteBytes: 524288, powerMode: { enabled: true, fullFilesystem, backupRoot, maxFileBytes: 524288 } } });
       try {
         fs.writeFileSync(protectedFile, 'untouched');
         fs.linkSync(protectedFile, path.join(root, 'alias.txt'));
@@ -270,7 +297,9 @@ if (process.argv[2] === '--claim-worker') {
     });
   }
 
-  test('separate Node processes cannot claim the same project run concurrently', { timeout: 12000 }, async () => {
+  // Windows hosted runners can delay Node child IPC startup; keep a bounded, real cross-process claim check.
+  const claimWinCI = process.platform === 'win32';
+  test('separate Node processes cannot claim the same project run concurrently', { timeout: claimWinCI ? 30000 : 12000 }, async () => {
     const fixture = makeFixture({ planner: async () => { throw new Error('Competing parent must not plan'); } });
     const entered = deferred(), completed = deferred();
     // Attach rejection handlers immediately; a worker startup failure must not
@@ -279,8 +308,8 @@ if (process.argv[2] === '--claim-worker') {
     let child, exited, workerTimer;
     try {
       await fixture.create(); await fixture.start();
-      child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--claim-worker', fixture.root], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: true });
-      workerTimer = setTimeout(() => child.kill(), 8000);
+      child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--claim-worker', fixture.root, ...(process.platform === 'win32' ? ['--qa-slow-start'] : [])], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: true });
+      workerTimer = setTimeout(() => child.kill(), claimWinCI ? 22000 : 8000);
       let stderr = '';
       child.stderr.on('data', chunk => { stderr += chunk.toString(); });
       child.on('message', message => {

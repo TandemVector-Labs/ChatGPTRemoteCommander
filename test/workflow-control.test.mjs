@@ -64,7 +64,8 @@ for (const action of ['pause','cancel']) for (const success of [true,false]) {
       assert.equal(f.store.list().find(x=>x.id==='sample').lifecycle,state.lifecycleState);
       assert.equal(f.store.resume('sample').readyForNextStep,false);
       await assert.rejects(f.call('sample','second'),action==='pause'?/WORKFLOW_PAUSED/:/WORKFLOW_CANCELLED/);
-      assert.equal(f.store.schedulerStatus().currentLeases,0);
+      assert.equal(f.store.schedulerStatus().currentLeases,success?0:1);
+      if(!success) assert.equal(f.store.get('sample').state.steps[0].status,'uncertain');
     } finally { finish.resolve();await pending;other.close(); }
   });
 }

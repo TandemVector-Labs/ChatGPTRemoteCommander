@@ -88,6 +88,31 @@ test('explicit non-Codex command runner may be preserved but is never auto-creat
   } finally { fs.rmSync(root,{recursive:true,force:true}); }
 });
 
+test('owner command provider rejects a working-directory-relative executable even if the file exists', () => {
+  const root=temp();
+  const previousCwd=process.cwd();
+  try {
+    const executable=makeCommand(root,process.platform);
+    // Hosted Windows checks out on D: while os.tmpdir() can be C:.
+    // Reproduce a real, existing relative file without relying on drive layout.
+    const relative=path.relative(root,executable);
+    assert.ok(relative && !path.isAbsolute(relative));
+    process.chdir(root);
+    assert.equal(fs.statSync(relative).isFile(),true);
+    const cfg=base({runner:{enabled:true,autoTick:true,
+      provider:{kind:'command',executable:relative}}});
+    const rejected=applyProjectRunnerConfig(cfg,{platform:process.platform});
+    assert.equal(rejected.status,'PROVIDER_MISSING_OR_UNSUPPORTED');
+    assert.equal(rejected.config.durableWorkflows.runner.enabled,false);
+    cfg.durableWorkflows.runner.provider.executable=executable;
+    const authorized=applyProjectRunnerConfig(cfg,{platform:process.platform});
+    assert.equal(authorized.status,'PRESERVED_EXPLICIT_NON_CODEX_PROVIDER');
+    assert.equal(authorized.config.durableWorkflows.runner.provider.executable,executable);
+  } finally {
+    process.chdir(previousCwd);
+    fs.rmSync(root,{recursive:true,force:true});
+  }
+});
 test('Standard authority disables an inherited runner', () => {
   const cfg=base({runner:{enabled:true,autoTick:true,provider:{kind:'command',executable:'C:/old/planner.exe',timeoutMs:30000}}});
   cfg.capabilityProfile.tier='STANDARD';
@@ -184,4 +209,53 @@ test('primary policy merge refuses unauthorized canonical runner and non-histori
     assert.equal(preserved.status,'ACTIVE_POLICY_PRESERVED');
     assert.equal(preserved.config.durableWorkflows.runner.provider.reason,'EXPLICITLY_DISABLED');
   } finally { fs.rmSync(root,{recursive:true,force:true}); }
+});
+
+test('explicit single-planner runner stays single-planner across update normalization', () => {
+  const root=temp();
+  try {
+    const executable=makeCommand(root,'linux');
+    const original={
+      enabled:true, autoTick:false,
+      provider:{kind:'command',executable,timeoutMs:30000,maxOutputBytes:4096},
+      allowedTools:['read_text'],maxActions:2,maxPlannerCalls:2,maxDurationMs:120000,
+      adaptive:{enabled:false,maxExtensions:0},worker:{enabled:false,maxArtifactBytes:4096}
+    };
+    const result=applyProjectRunnerConfig(base({runner:original}),{platform:'linux'});
+    assert.equal(result.status,'PRESERVED_EXPLICIT_NON_CODEX_PROVIDER');
+    const actual=result.config.durableWorkflows.runner;
+    assert.equal(Object.hasOwn(actual,'team'),false,'normalization must not opt in a two-worker planner');
+    assert.equal(actual.autoTick,false);
+    assert.deepEqual(actual.allowedTools,['read_text']);
+    assert.equal(actual.maxPlannerCalls,2);
+    assert.deepEqual(actual.worker,original.worker);
+  } finally { fs.rmSync(root,{recursive:true,force:true}); }
+});
+test('explicitly authorized valid team stays unchanged', () => {
+  const root=temp();
+  try {
+    const team={workers:[{id:'reviewer',role:'Review before proposing'}],maxParallel:1};
+    const config=base({runner:{enabled:true,autoTick:false,provider:{
+      kind:'command',executable:makeCommand(root,'linux')
+    },team}});
+    const result=applyProjectRunnerConfig(config,{platform:'linux'});
+    assert.deepEqual(result.config.durableWorkflows.runner.team,team);
+  } finally {fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('explicit runner without optional worker maxArtifactBytes preserves omission across upgrade',()=>{
+ const root=temp();
+ try{
+  const executable=makeCommand(root,'linux');
+  const first=base({runner:{
+    enabled:true,autoTick:false,provider:{kind:'command',executable,timeoutMs:30000,maxOutputBytes:4096},
+    allowedTools:['read_text'],maxActions:2,maxPlannerCalls:2,maxDurationMs:120000,
+    adaptive:{enabled:false,maxExtensions:0},worker:{enabled:true}
+  }});
+  const result=applyProjectRunnerConfig(first,{platform:'linux'});
+  assert.equal(result.status,'PRESERVED_EXPLICIT_NON_CODEX_PROVIDER');
+  assert.deepEqual(result.config.durableWorkflows.runner.worker,{enabled:true});
+  const second=applyProjectRunnerConfig(result.config,{platform:'linux'});
+  assert.deepEqual(second.config.durableWorkflows.runner,result.config.durableWorkflows.runner);
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
 });

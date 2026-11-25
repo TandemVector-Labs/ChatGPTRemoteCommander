@@ -9,7 +9,7 @@ const root=path.resolve(process.env.COMMANDER_TRANSFER_HOME || (process.platform
  :path.join(os.homedir(),'.local','share','commander-transfer-pilot')));
 const args=process.argv.slice(2),cmd=args.shift();
 const arg=(k,fallback)=>{const i=args.indexOf('--'+k);if(i<0)return fallback;if(i===args.length-1)throw Error('Missing value '+k);return args[i+1];};
-const validAlias=/^(PC|Linux|EmadServer|Amirreza)$/;
+const validAlias=/^(PC|Linux|MMZ|EmadServer|Amirreza)$/;
 const validId=/^[A-Za-z0-9][A-Za-z0-9._-]{2,90}$/;
 const fail=(m)=>{throw Error(m);};
 const json=(o)=>process.stdout.write(JSON.stringify(o)+'\n');

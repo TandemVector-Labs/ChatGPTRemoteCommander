@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SOURCE_REF="${REMOTE_COMMANDER_SOURCE_REF:-v0.10.23}"
+SOURCE_REF="${REMOTE_COMMANDER_SOURCE_REF:-v0.12.0}"
 EXPECTED_COMMIT="${REMOTE_COMMANDER_EXPECTED_COMMIT:-}"
 INSTALL_DIR=""
 ENABLE_GUI=0
@@ -11,7 +11,7 @@ REPO_URL="${REMOTE_COMMANDER_REPO_URL:-https://github.com/GOD13emad/ChatGPTRemot
 usage() {
   cat <<'USAGE'
 Usage: server-install-linux.sh [options]
-  --source-ref REF          Git ref to install (default: v0.10.23)
+  --source-ref REF          Git ref to install (default: v0.12.0)
   --expected-commit SHA     Require the fetched ref to resolve to this exact commit
   --install-dir PATH        Override the normal per-user install directory
   --enable-gui              Keep GUI capabilities enabled (desktop Linux only)
@@ -48,8 +48,23 @@ as_root() {
 
 install_bootstrap_packages() {
   if need apt-get; then
-    as_root apt-get update
-    as_root apt-get install -y git curl unzip tar xz-utils ca-certificates python3
+    # Ubuntu archive/security mirrors can publish a newer package index while a
+    # runner is fetching packages. Retry the complete update+install transaction
+    # so a transient index/package 404 cannot strand a fresh server bootstrap.
+    local attempt=1
+    while (( attempt <= 3 )); do
+      if as_root apt-get -o Acquire::Retries=3 update &&
+         as_root apt-get -o Acquire::Retries=3 install -y git curl unzip tar xz-utils ca-certificates python3; then
+        return 0
+      fi
+      if (( attempt == 3 )); then
+        echo 'APT_BOOTSTRAP_PREREQUISITES_FAILED_AFTER_3_ATTEMPTS' >&2
+        return 1
+      fi
+      echo "APT_BOOTSTRAP_RETRY attempt=$attempt/3" >&2
+      sleep "$((attempt * 4))"
+      attempt=$((attempt + 1))
+    done
   elif need dnf; then
     as_root dnf install -y git curl unzip tar xz ca-certificates python3
   elif need yum; then
@@ -94,7 +109,35 @@ if [[ -n "$EXPECTED_COMMIT" && "${resolved,,}" != "${EXPECTED_COMMIT,,}" ]]; the
 fi
 git -C "$stage" checkout --detach "$resolved" >/dev/null
 expected_version="$(sed -nE 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$stage/package.json" | head -n1)"
-[[ "$expected_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Staged package version is invalid.' >&2; exit 1; }
+if ! [[ "$expected_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  # Development source requires a matching local, non-promotable release train.
+  # Do not accept an arbitrary tag or mark the development source as Stable.
+  dev_minor=''
+  if [[ "$expected_version" =~ ^0\.(11|12)\.0-dev\.[1-9][0-9]*$ ]]; then
+    dev_minor="${BASH_REMATCH[1]}"
+  else
+    echo 'Unknown development source version.' >&2
+    exit 1
+  fi
+  if ! python3 - "$stage/docs/release-train-0.${dev_minor}.json" "$expected_version" "0.${dev_minor}" <<'PY'
+import json,sys
+try:
+    with open(sys.argv[1],encoding='utf-8') as f: train=json.load(f)
+    assert train['train']==sys.argv[3]
+    assert train['sourceVersion']==sys.argv[2]
+    assert train['status']=='INTEGRATION_CANDIDATE_NOT_FINAL'
+    assert train['channel']=='development'
+    for key in ('isStable','publishApproved','autoupdateApproved','installedPromotionApproved'):
+        assert train[key] is False
+    assert train['releaseTag'] is None
+except (OSError, ValueError, KeyError, AssertionError):
+    sys.exit(1)
+PY
+  then
+    echo 'Staged package version is invalid.' >&2
+    exit 1
+  fi
+fi
 
 installer="$stage/install.sh"
 [[ -f "$installer" ]] || { echo 'Staged install.sh is missing.' >&2; exit 1; }

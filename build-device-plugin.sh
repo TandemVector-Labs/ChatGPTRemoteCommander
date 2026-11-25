@@ -3,18 +3,25 @@ set -euo pipefail
 APP_ID=""
 DEVICE_NAME="${HOSTNAME:-$(hostname 2>/dev/null || echo device)}"
 PROFILE="chatgpt-remote-commander"
+IDENTITY_MAP=""
+HOST_ID=""
+ACCOUNT_ID=""
+DEVICE_NAME_EXPLICIT=0
 OUTPUT_DIR=""
 KEEP_DIR=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --app-id) APP_ID="$2"; shift 2 ;;
-    --device-name) DEVICE_NAME="$2"; shift 2 ;;
+    --device-name) DEVICE_NAME="$2"; DEVICE_NAME_EXPLICIT=1; shift 2 ;;
     --profile) PROFILE="$2"; shift 2 ;;
+    --identity-map) IDENTITY_MAP="$2"; shift 2 ;;
+    --host-id) HOST_ID="$2"; shift 2 ;;
+    --account-id) ACCOUNT_ID="$2"; shift 2 ;;
     --output-directory) OUTPUT_DIR="$2"; shift 2 ;;
     --keep-directory) KEEP_DIR=1; shift ;;
     -h|--help)
-      echo "Usage: $0 --app-id ID [--device-name NAME] [--profile NAME] [--output-directory DIR] [--keep-directory]"
+      echo "Usage: $0 --app-id ID [--device-name NAME] [--profile NAME] [--identity-map FILE --host-id ID --account-id ID] [--output-directory DIR] [--keep-directory]"
       exit 0 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -34,13 +41,25 @@ OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd -P)"
 MACHINE_ID=""
 [[ -r /etc/machine-id ]] && MACHINE_ID="$(tr -d '\r\n' </etc/machine-id)"
 [[ -n "$MACHINE_ID" ]] || MACHINE_ID="$(hostname 2>/dev/null || echo unknown)-$(uname -m 2>/dev/null || echo arch)"
-FINGERPRINT="$(printf '%s\0%s' "$MACHINE_ID" "$PROFILE" | sha256sum | awk '{print substr($1,1,10)}')"
+FINGERPRINT_SEED="$PROFILE"
+[[ -z "$IDENTITY_MAP" ]] || FINGERPRINT_SEED="$ACCOUNT_ID"
+FINGERPRINT="$(printf '%s\0%s' "$MACHINE_ID" "$FINGERPRINT_SEED" | sha256sum | awk '{print substr($1,1,10)}')"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 STAGE="$TMP/plugin"
 PREZIP="$TMP/device-plugin.zip"
-JSON="$(node "$GENERATOR" --template "$TEMPLATE" --output "$STAGE" --zip "$PREZIP" --app-id "$APP_ID" --device-name "$DEVICE_NAME" --profile "$PROFILE" --fingerprint "$FINGERPRINT")"
+set -- --template "$TEMPLATE" --output "$STAGE" --zip "$PREZIP" --app-id "$APP_ID" --profile "$PROFILE" --fingerprint "$FINGERPRINT"
+if [[ -n "$IDENTITY_MAP" || -n "$HOST_ID" || -n "$ACCOUNT_ID" ]]; then
+  [[ -n "$IDENTITY_MAP" && -n "$HOST_ID" && -n "$ACCOUNT_ID" ]] || {
+    echo 'identity-map, host-id and account-id are required together' >&2; exit 2;
+  }
+  set -- "$@" --identity-map "$IDENTITY_MAP" --host-id "$HOST_ID" --account-id "$ACCOUNT_ID"
+  [[ "$DEVICE_NAME_EXPLICIT" == 0 ]] || set -- "$@" --device-name "$DEVICE_NAME"
+else
+  set -- "$@" --device-name "$DEVICE_NAME"
+fi
+JSON="$(node "$GENERATOR" "$@")"
 PLUGIN_NAME="$(PLUGIN_JSON="$JSON" node --input-type=module <<'NODE'
 const j=JSON.parse(process.env.PLUGIN_JSON);
 if(!j.ok || !/^[a-z0-9][a-z0-9-]{1,62}$/.test(j.pluginName)) process.exit(2);

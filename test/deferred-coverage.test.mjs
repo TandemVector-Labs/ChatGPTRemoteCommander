@@ -53,7 +53,9 @@ test('uncertain-duration direct work is deferred or hard-bounded',()=>{
 
   assert.equal(max(def(browserToolDefinitions,'browser_navigate'),'timeoutMs'),30000);
   assert.equal(max(def(browserToolDefinitions,'browser_wait'),'timeoutMs'),30000);
-  assert.match(browserProcess,/timeoutMs=15000,startupTimeoutMs=15000/);
+  assert.match(browserProcess,/timeoutMs=15000/);
+  assert.match(browserProcess,/startupTimeoutMs=15000/);
+  assert.match(browserProcess,/Math\.min\(35000,slowActionTimeoutMs\)/);
   assert.match(guiProcess,/timeoutMs = 15000/);
   assert.match(guiProcess,/startupTimeoutMs = 15000/);
 

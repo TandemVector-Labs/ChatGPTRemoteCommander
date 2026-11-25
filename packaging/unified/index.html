@@ -1,0 +1,13 @@
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Remote Commander — Unified Pilot</title>
+<style>:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#141923;color:#edf0f6}body{max-width:760px;margin:5rem auto;padding:0 1.4rem}h1{font-size:1.8rem;margin-bottom:.3rem}.sub{color:#a7b4c5}section{background:#212a38;border:1px solid #344153;border-radius:12px;padding:1.4rem;margin-top:1.5rem}button{border:0;border-radius:8px;padding:.8rem 1.1rem;font-weight:600;cursor:pointer;background:#a6d4ff;color:#102235;margin-right:.6rem}button:disabled{opacity:.5;cursor:default}pre{white-space:pre-wrap;word-break:break-word;line-height:1.55}#result{min-height:2rem}small{color:#a7b4c5}</style></head><body>
+<h1>Remote Commander</h1><p class="sub">Unified Windows/Linux installer • source-pinned engineering pilot</p>
+<section><strong>Installation state</strong><pre id="status">Inspecting package…</pre></section>
+<section><strong>Live migration readiness (read-only)</strong><p>No install or access changes are triggered by this check.</p><pre id="migration" role="status">Inspecting active installation…</pre></section>
+<section><strong>Isolated Core preview</strong><p>Preview uses loopback-only transport, a temporary data root, and no privileged tools. It does not replace your active Commander.</p>
+<button id="start" type="button">Start isolated preview</button><button id="stop" type="button" disabled>Stop preview</button><pre id="result" role="status" aria-live="polite"></pre></section>
+<p><small>Not a signed Stable release. Privileged access, ChatGPT account enrollment, MeshCentral and Playwright browser integration require separate acceptance.</small></p>
+<script src="./renderer.js" defer></script></body></html>

@@ -12,7 +12,7 @@ The bootstrap:
 - does not depend on WinGet;
 - supports x64 and ARM64;
 - installs the pinned PowerShell 7.6.6 MSI only after SHA-256 and Authenticode validation;
-- installs the pinned Node.js 22.23.3 LTS-line MSI only after matching its SHA-256 against the upstream `SHASUMS256.txt` and validating Authenticode;
+- installs the pinned Node.js 22.23.4 LTS-line security-patched MSI only after matching its SHA-256 against the upstream `SHASUMS256.txt` and validating Authenticode;
 - resolves the latest stable Git for Windows installer from the official GitHub release API and requires both the release-asset SHA-256 digest and a valid Authenticode signature;
 - stages the requested Remote Commander ref with Git, resolves it to one exact commit, and passes that exact commit into the normal candidate-first installer;
 - automatically disables GUI control on Windows Server Core. On Desktop Experience, `-GuiControl Auto` enables GUI control; use `-GuiControl Off` to keep it disabled;

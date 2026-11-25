@@ -26,6 +26,9 @@ test('Linux setup wizard preserves secret boundary and produces device plugin co
     'rebootPerformed:false'
   ]) assert.equal(t.includes(required),true,'missing '+required);
   assert.equal(/--runtime-api-key|CONTROL_PLANE_API_KEY=/u.test(t),false,'wizard must not accept/persist Runtime API key');
+  for(const marker of ['--display-name','PROFILE_DISPLAY_NAME_SAVED',
+                       'PROFILE_DISPLAY_LABEL_COLLISION','TUNNEL_READY']) assert.ok(t.includes(marker));
+
 });
 
 test('device builders use stable local machine identity and require app id',()=>{
@@ -43,4 +46,11 @@ test('manual bind helpers bind both portable and native plugin manifests',()=>{
     assert.equal(t.includes("./.app.json")||t.includes("'./.app.json'"),true);
     assert.equal(t.includes('plugin_'),true);
   }
+});
+
+test('installer ZIP includes identity map module used by the Plugin generator',()=>{
+  const source=fs.readFileSync(path.join(root,'tools/build-release-assets.sh'),'utf8');
+  assert.match(source,/src\/profile-identity-registry\.mjs/u);
+  assert.match(source,/\$installer_stage\/src\/profile-identity-registry\.mjs/u);
+  assert.match(source,/SHA256SUMS-INSTALLER\.txt/u);
 });

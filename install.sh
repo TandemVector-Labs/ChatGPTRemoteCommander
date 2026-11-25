@@ -12,7 +12,7 @@ BROWSER_PROFILE_ROOT=""
 START_SERVER=0
 INSTALL_PREREQS=0
 SKIP_TUNNEL_CLIENT=0
-SOURCE_REF="${REMOTE_COMMANDER_SOURCE_REF:-v0.10.23}"
+SOURCE_REF="${REMOTE_COMMANDER_SOURCE_REF:-v0.12.0}"
 EXPECTED_COMMIT="${REMOTE_COMMANDER_EXPECTED_COMMIT:-}"
 CURL_CONNECT_TIMEOUT="${REMOTE_COMMANDER_CURL_CONNECT_TIMEOUT:-15}"
 CURL_MAX_TIME="${REMOTE_COMMANDER_CURL_MAX_TIME:-180}"
@@ -28,7 +28,7 @@ Usage: install.sh [options]
   --enable-capability CAP   Explicit capability opt-in (repeatable)
   --start-server            Start MCP server with nohup after validation
   --skip-tunnel-client      Skip tunnel-client download; reuse existing pinned client when present
-  --source-ref REF          Git ref to install (default: v0.10.23)
+  --source-ref REF          Git ref to install (default: v0.12.0)
   --expected-commit SHA     Require the fetched ref to peel to this exact 40-hex commit
   -h, --help                Show help
 USAGE
@@ -70,8 +70,22 @@ install_os_packages() {
     sudo_cmd="sudo"
   fi
   if need apt-get; then
-    $sudo_cmd apt-get update
-    $sudo_cmd apt-get install -y git curl unzip tar xz-utils ca-certificates python3
+    # Refresh package metadata between bounded retries when archive/security
+    # mirrors change package versions after the current index was fetched.
+    local attempt=1
+    while (( attempt <= 3 )); do
+      if $sudo_cmd apt-get -o Acquire::Retries=3 update &&
+         $sudo_cmd apt-get -o Acquire::Retries=3 install -y git curl unzip tar xz-utils ca-certificates python3; then
+        return 0
+      fi
+      if (( attempt == 3 )); then
+        echo 'APT_BOOTSTRAP_PREREQUISITES_FAILED_AFTER_3_ATTEMPTS' >&2
+        return 1
+      fi
+      echo "APT_BOOTSTRAP_RETRY attempt=$attempt/3" >&2
+      sleep "$((attempt * 4))"
+      attempt=$((attempt + 1))
+    done
   elif need dnf; then
     $sudo_cmd dnf install -y git curl unzip tar xz ca-certificates python3
   elif need yum; then
@@ -101,6 +115,13 @@ invoke_existing_safe_update() {
     return 1
   fi
   git -C "$temp" checkout --detach "$resolved" >/dev/null
+  candidate_version="$(node -e 'process.stdout.write(require(process.argv[1]).version || "")' "$temp/package.json")"
+  if [[ "$candidate_version" == 0.12.* ]] &&
+     ! (cd "$temp" && node tools/verify-v012-publish-readiness.mjs "$candidate_version" "$SOURCE_REF" >/dev/null 2>&1); then
+    rm -rf "$temp"
+    echo 'V012_INSTALL_RELEASE_TRAIN_NOT_APPROVED' >&2
+    return 1
+  fi
   updater="$temp/auto-update-linux.sh"
   [[ -f "$updater" ]] || { rm -rf "$temp"; echo 'Candidate auto-update-linux.sh is missing.' >&2; return 1; }
   chmod +x "$updater"
@@ -182,16 +203,25 @@ install_source() {
   echo "Source ref: $SOURCE_REF"
   echo "Source commit: $head"
 }
-node_major() {
-  node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0
+node_version_patched() {
+  local version="${1:-}"
+  if [[ -z "$version" ]]; then version="$(node --version 2>/dev/null)" || return 1; fi
+  [[ "$version" =~ ^v(22|24|26)\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+  local major="${BASH_REMATCH[1]}"
+  local minor=$((10#${BASH_REMATCH[2]}))
+  local patch=$((10#${BASH_REMATCH[3]}))
+  case "$major" in
+    22) (( minor > 23 || (minor == 23 && patch >= 4) )) ;;
+    24) (( minor > 22 || (minor == 22 && patch >= 1) )) ;;
+    26) (( minor > 12 || (minor == 12 && patch >= 1) )) ;;
+    *) return 1 ;;
+  esac
 }
 
 install_portable_node() {
-  local current=0
-  if need node; then current="$(node_major)"; fi
-  if [[ "$current" -ge 22 ]]; then return 0; fi
+  if need node && node_version_patched; then return 0; fi
   [[ "$INSTALL_PREREQS" == "1" ]] || {
-    echo "Node.js 22+ is required. Re-run with --install-prerequisites or install Node 22+." >&2
+    echo "Patched supported Node.js LTS is required (22.23.4+, 24.22.1+, 26.12.1+). Re-run with --install-prerequisites or update Node." >&2
     exit 1
   }
   local machine node_arch
@@ -205,6 +235,7 @@ install_portable_node() {
   index="$(curl_fetch https://nodejs.org/dist/index.json)"
   version="$(printf '%s' "$index" | grep -oE '"version"[[:space:]]*:[[:space:]]*"v22\.[^"]+"' | head -n1 | sed -E 's/.*"(v22\.[^"]+)"/\1/')"
   [[ -n "$version" ]] || { echo "Could not resolve latest Node 22 release" >&2; exit 1; }
+  node_version_patched "$version" || { echo "Upstream Node 22 release is below the minimum security patch" >&2; exit 1; }
   asset="node-${version}-linux-${node_arch}.tar.xz"
   base="https://nodejs.org/dist/${version}"
   tmp="$(mktemp -d)"
@@ -226,9 +257,7 @@ ensure_node_path() {
   if [[ -x "$INSTALL_DIR/.runtime/node-current/bin/node" ]]; then
     export PATH="$INSTALL_DIR/.runtime/node-current/bin:$PATH"
   fi
-  local major
-  major="$(node_major)"
-  [[ "$major" -ge 22 ]] || { echo "Node.js 22+ not available" >&2; exit 1; }
+  node_version_patched || { echo "Patched supported Node.js LTS is not available" >&2; exit 1; }
   need npm || { echo "npm is required" >&2; exit 1; }
 }
 ensure_project_provider() {
@@ -302,7 +331,8 @@ install_tunnel_client() {
       }
       echo "Reusing existing pinned tunnel-client while skip was requested: $dir/tunnel-client"
     else
-      echo "Skipping tunnel-client installation as requested; no pinned executable is present."
+      echo "TUNNEL_CLIENT_REQUIRED_MISSING: --skip-tunnel-client requires an existing verified pinned executable." >&2
+      return 1
     fi
     return 0
   fi
@@ -388,6 +418,29 @@ install_linux_gui_backend() {
 
 validate_installation() {
   cd "$INSTALL_DIR"
+  # The test suites start synthetic unauthenticated MCP servers. When the
+  # bootstrapper runs as root, those suites must run under a non-root OS token.
+  # Never loosen the authenticated-ingress quarantine to make root tests pass.
+  if [[ "$(id -u)" == 0 ]]; then
+    command -v runuser >/dev/null 2>&1 || { echo 'QUALIFICATION_UNPRIVILEGED_RUNNER_REQUIRED' >&2; return 1; }
+    id -u nobody >/dev/null 2>&1 || { echo 'QUALIFICATION_UNPRIVILEGED_USER_REQUIRED' >&2; return 1; }
+    local qa_home qa_user_uid qa_user_gid qa_rc=0 qa_script
+    qa_user_uid="$(id -u nobody)"
+    qa_user_gid="$(id -g nobody)"
+    qa_home="$(mktemp -d -t rc-install-qa-XXXXXXXX)" || return 1
+    chmod 0700 "$qa_home"
+    chown "$qa_user_uid:$qa_user_gid" "$qa_home"
+    for qa_script in check:qualification test:qualification audit; do
+      if ! runuser -u nobody -- env HOME="$qa_home" XDG_CACHE_HOME="$qa_home/.cache" PATH="$PATH" npm run "$qa_script"; then
+        echo "QUALIFICATION_UNPRIVILEGED_FAILED $qa_script" >&2
+        qa_rc=1
+        break
+      fi
+    done
+    # This per-run temporary home contains only synthetic QA artifacts.
+    rm -rf -- "$qa_home"
+    return "$qa_rc"
+  fi
   npm run check:qualification
   npm run test:qualification
   npm run audit
@@ -448,6 +501,36 @@ CANONICAL_INSTALL_DIR="$(readlink -m -- "$HOME/.local/share/ChatGPTRemoteCommand
 CUSTOM_NO_START=0
 [[ "$INSTALL_DIR" == "$CANONICAL_INSTALL_DIR" || "$START_SERVER" == 1 ]] || CUSTOM_NO_START=1
 
+# Track only a brand-new install committed by this invocation. Existing
+# installations, unknown data and running instances are never quarantined.
+FRESH_INSTALL_CANDIDATE=0
+[[ -e "$INSTALL_DIR" || -L "$INSTALL_DIR" ]] || FRESH_INSTALL_CANDIDATE=1
+FRESH_INSTALL_PREACTIVATION=0
+FRESH_INSTALL_INODE=""
+FRESH_INSTALL_COMMIT=""
+rollback_fresh_preactivation() {
+  local rc=$?
+  trap - EXIT
+  if [[ "$rc" -ne 0 && "$FRESH_INSTALL_PREACTIVATION" == 1 ]]; then
+    local current_inode current_commit failed_dir
+    current_inode="$(stat -c '%d:%i' -- "$INSTALL_DIR" 2>/dev/null || true)"
+    current_commit="$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null || true)"
+    if [[ -n "$FRESH_INSTALL_INODE" && "$current_inode" == "$FRESH_INSTALL_INODE" &&
+          "$current_commit" == "$FRESH_INSTALL_COMMIT" && -d "$INSTALL_DIR/.git" &&
+          ! -L "$INSTALL_DIR" ]]; then
+      failed_dir="${INSTALL_DIR}.failed-install-$(date -u +%Y%m%dT%H%M%SZ)-$"
+      if [[ ! -e "$failed_dir" && ! -L "$failed_dir" ]] && mv -- "$INSTALL_DIR" "$failed_dir"; then
+        echo "FRESH_INSTALL_QUARANTINED path=$failed_dir: source remains available for recovery" >&2
+      else
+        echo "FRESH_INSTALL_QUARANTINE_REVIEW_REQUIRED: preserving unknown installation state" >&2
+      fi
+    else
+      echo "FRESH_INSTALL_ROLLBACK_REVIEW_REQUIRED: target identity changed; preserving it" >&2
+    fi
+  fi
+  exit "$rc"
+}
+
 if [[ -d "$INSTALL_DIR/.git" && "$CUSTOM_NO_START" != 1 ]]; then
   ensure_node_path
   invoke_existing_safe_update
@@ -456,8 +539,24 @@ else
     echo "Updating isolated/custom checkout in place without global routing mutation: $INSTALL_DIR"
   fi
   install_source
+  if [[ "$FRESH_INSTALL_CANDIDATE" == 1 ]]; then
+    FRESH_INSTALL_INODE="$(stat -c '%d:%i' -- "$INSTALL_DIR")"
+    FRESH_INSTALL_COMMIT="$(git -C "$INSTALL_DIR" rev-parse HEAD)"
+    FRESH_INSTALL_PREACTIVATION=1
+    trap rollback_fresh_preactivation EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+  fi
   install_portable_node
   ensure_node_path
+  if [[ "$START_SERVER" == 1 ]]; then
+    candidate_version="$(node -e 'process.stdout.write(require(process.argv[1]).version || "")' "$INSTALL_DIR/package.json")"
+    if [[ "$candidate_version" == 0.12.* ]] &&
+       ! (cd "$INSTALL_DIR" && node tools/verify-v012-publish-readiness.mjs "$candidate_version" "$SOURCE_REF" >/dev/null 2>&1); then
+      echo 'V012_INSTALL_RELEASE_TRAIN_NOT_APPROVED' >&2
+      exit 1
+    fi
+  fi
   install_tunnel_client
   ensure_project_provider
   ensure_browser_backend
@@ -469,6 +568,10 @@ else
     "$INSTALL_DIR/tools/gui-control-linux.py" "$INSTALL_DIR/tools/install-gnome-gui-extension.sh"
   install_linux_gui_backend "$INSTALL_DIR" "$INSTALL_DIR/config.local.json"
   validate_installation
+  # Beyond this point a new runtime may be activated. Never relocate an
+  # installation that could have a running server or enrolled owner state.
+  FRESH_INSTALL_PREACTIVATION=0
+  trap - EXIT INT TERM
   start_server
   if [[ "$START_SERVER" == "1" ]]; then
     head="$(git -C "$INSTALL_DIR" rev-parse HEAD)"

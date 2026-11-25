@@ -14,8 +14,27 @@ export function canonicalToolSchema(tools){
 export function hashToolSchema(tools){
   return createHash('sha256').update(JSON.stringify(canonicalToolSchema(tools))).digest('hex');
 }
+export function validateLocalSchemaEndpoint(value,role=null){
+  if(typeof value!=='string'||value.length>256)throw new Error('SCHEMA_ENDPOINT_INVALID');
+  let u;
+  try{u=new URL(value);}catch{throw new Error('SCHEMA_ENDPOINT_INVALID');}
+  if(u.protocol!=='http:'||!['127.0.0.1','localhost','[::1]'].includes(u.hostname)
+    ||u.username||u.password||u.search||u.hash
+    ||!Number.isSafeInteger(Number(u.port))||Number(u.port)<1||Number(u.port)>65535
+    ||!['/mcp','/router/status'].includes(u.pathname)
+    ||(role==='mcp'&&u.pathname!=='/mcp')
+    ||(role==='router'&&u.pathname!=='/router/status'))
+    throw new Error('SCHEMA_ENDPOINT_LOOPBACK_REQUIRED');
+  // Rebuild the outbound URL using only enumerated host/path literals;
+  // do not forward an untrusted caller URL as the fetch destination.
+  const pinnedHost=u.hostname==='127.0.0.1'?'127.0.0.1'
+    :u.hostname==='localhost'?'localhost':'[::1]';
+  const pinnedPath=u.pathname==='/mcp'?'/mcp':'/router/status';
+  return `http://${pinnedHost}:${Number(u.port)}${pinnedPath}`;
+}
 async function fetchJson(url,options){
-  const r=await fetch(url,{...options,signal:AbortSignal.timeout(5000)});
+  const safeUrl=validateLocalSchemaEndpoint(url);
+  const r=await fetch(safeUrl,{...options,redirect:'error',signal:AbortSignal.timeout(5000)});
   if(!r.ok)throw new Error('SCHEMA_HTTP_'+r.status);
   return r.json();
 }
@@ -103,6 +122,9 @@ export function classifyToolSchemaCompatibility(oldTools,candidateTools){
   return {compatible:reasons.length===0,reasons:reasons.slice(0,64)};
 }
 export async function evaluateSchemaContinuity({oldUrl,candidateUrl,routerUrl}){
+  oldUrl=validateLocalSchemaEndpoint(oldUrl,'mcp');
+  candidateUrl=validateLocalSchemaEndpoint(candidateUrl,'mcp');
+  routerUrl=validateLocalSchemaEndpoint(routerUrl,'router');
   const [oldTools,candidateTools]=await Promise.all([fetchToolSchema(oldUrl),fetchToolSchema(candidateUrl)]);
   const oldHash=hashToolSchema(oldTools),candidateHash=hashToolSchema(candidateTools);
   if(oldHash===candidateHash)return {ok:true,changed:false,backwardCompatible:true,oldHash,candidateHash,decision:'UNCHANGED_SCHEMA'};

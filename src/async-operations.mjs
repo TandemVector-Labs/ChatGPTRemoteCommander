@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { watch as fsWatch } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { mkdir, open, readFile, readdir, realpath, rename, stat, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, readdir, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { expandPathValue } from './platform.mjs';
 
 const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'TIMED_OUT', 'CANCELLED', 'UNCERTAIN']);
@@ -147,9 +147,33 @@ export const asyncOperationDefinitions = [
   }
 ];
 
-export function createAsyncOperationTools({ config, prepare, workerPath, deliveryStore = null, onTerminal = null, validateContinuation = null }) {
+export function createAsyncOperationTools({ config, prepare, workerPath, deliveryStore = null, onTerminal = null, validateContinuation = null, protectedDeliveryOrigin = null }) {
+  // Only trusted Host bootstrap may supply these callbacks; operation_start
+  // inputs are never allowed to select an owner/chat/grant or signed receipt.
+  const declaredOriginRequirement=config.asyncOperations?.requireHostSignedOrigin;
+  // A mistyped opt-in (e.g. the string 'true') must not silently enable legacy.
+  if(declaredOriginRequirement!==undefined && typeof declaredOriginRequirement!=='boolean')
+    throw new Error('ASYNC_DELIVERY_SIGNED_ORIGIN_POLICY_INVALID');
+  const signedOriginRequired=declaredOriginRequirement===true;
+  // Explicit protected-mode enrollment may never silently downgrade to the
+  // legacy profile-scoped continuation path when no Host issuer is wired.
+  if(signedOriginRequired && protectedDeliveryOrigin === null)
+    throw new Error('ASYNC_DELIVERY_SIGNED_ORIGIN_HOST_REQUIRED');
+  if(protectedDeliveryOrigin !== null &&
+    (!deliveryStore || typeof protectedDeliveryOrigin?.admitOperation !== 'function'
+      || typeof protectedDeliveryOrigin?.authorizeReplay !== 'function'
+      || typeof protectedDeliveryOrigin?.authorizeAccess !== 'function'
+      || typeof protectedDeliveryOrigin?.authorizeHandoff !== 'function'
+      || typeof protectedDeliveryOrigin?.dispatchHandoff !== 'function'
+      || typeof protectedDeliveryOrigin?.verifyHandoffReceipt !== 'function'
+      || typeof protectedDeliveryOrigin?.receiptForTerminal !== 'function'
+      || typeof protectedDeliveryOrigin?.publisher?.publish !== 'function'))
+    throw new Error('ASYNC_DELIVERY_SIGNED_ORIGIN_HOST_REQUIRED');
   const policy = config.asyncOperations ?? {};
   const enabled = policy.enabled !== false;
+  // Native protected dispatch is self-sufficient. Legacy onTerminal must
+  // never be needed merely to activate protected continuation recovery.
+  const continuationEnabled=Boolean(onTerminal || protectedDeliveryOrigin);
   const root = policy.stateDir
     ? path.resolve(expandPathValue(policy.stateDir))
     : path.join(os.homedir(), '.chatgpt-remote-commander', 'operations', profileKey(config));
@@ -159,6 +183,14 @@ export function createAsyncOperationTools({ config, prepare, workerPath, deliver
   const requestsDir = path.join(root, 'requests');
   const deliveryIntervalMs = boundedInt(policy.deliveryReconcileMs, 5000, 1000, 60000);
   const deliveryBatchSize = boundedInt(policy.deliveryReconcileBatch, 100, 1, 500);
+  // A lost native enqueue receipt is retryable, but never forever. Limit
+  // autonomous attempts per runtime; preserve pending state for reconciliation.
+  const continuationRecoveryMaxAttempts=boundedInt(
+    policy.continuationRecoveryMaxAttempts,8,1,32);
+  const nativeHandoffHostTimeoutMs=boundedInt(
+    policy.nativeHandoffHostTimeoutMs,10000,50,60000);
+  const protectedOriginHostTimeoutMs=boundedInt(
+    policy.protectedOriginHostTimeoutMs,10000,50,60000);
   const deliveryTracked = new Set();
   let deliveryDiscovered = false;
   let deliveryTimer = null;
@@ -168,6 +200,18 @@ export function createAsyncOperationTools({ config, prepare, workerPath, deliver
   let reservationsLoaded = false;
   const continuationRecovery = new Set();
   const continuationRecoveryTimers = new Map();
+  const continuationRecoveryExhausted = new Set();
+  const nativeHandoffsInFlight = new Map();
+  const nonRetryableHandoffErrors = new Set([
+    'ASYNC_CONTINUATION_OWNER_GRANT_DENIED',
+    'ASYNC_CONTINUATION_ORIGIN_ADMISSION_MISMATCH',
+    'ASYNC_CONTINUATION_ORIGINAL_PAYLOAD_MISMATCH',
+    'ASYNC_CONTINUATION_NATIVE_RECEIPT_MISMATCH',
+    'ASYNC_CONTINUATION_NATIVE_LEDGER_MISMATCH',
+    'ASYNC_CONTINUATION_NATIVE_LEDGER_UNREADABLE',
+    'ASYNC_CONTINUATION_NATIVE_RECEIPT_NOT_VERIFIED',
+    'ASYNC_CONTINUATION_NATIVE_RETRY_EXHAUSTED'
+  ]);
   let continuationClosed = false;
 
   function normalizeContinuation(value) {
@@ -199,40 +243,59 @@ export function createAsyncOperationTools({ config, prepare, workerPath, deliver
     if(timer)clearTimeout(timer);
     continuationRecoveryTimers.delete(operationId);
     continuationRecovery.delete(operationId);
+    continuationRecoveryExhausted.delete(operationId);
   }
 
   function observeWorkerExit(worker, operationId) {
-    if (!onTerminal) return;
+    if (!continuationEnabled) return;
     worker.once('exit', () => {
       if (continuationClosed) return;
       queueMicrotask(() => {
         if (continuationClosed) return;
-        status(operationId, true)
-          .then(state => { if (!TERMINAL.has(state.status)) scheduleRestartRecovery(operationId); })
-          .catch(() => scheduleRestartRecovery(operationId));
+        status(operationId,true).then(state=>{
+          if(!TERMINAL.has(state.status) ||
+            (state.conversationHandoffPending && !state.conversationHandoffBlockedReason))
+            scheduleRestartRecovery(operationId);
+        }).catch(()=>scheduleRestartRecovery(operationId));
       });
     });
   }
 
   function scheduleRestartRecovery(operationId, attempt=0) {
-    if(!onTerminal||continuationClosed||continuationRecoveryTimers.has(operationId))return;
+    if(!continuationEnabled||continuationClosed
+      ||continuationRecoveryTimers.has(operationId)
+      ||continuationRecoveryExhausted.has(operationId))return;
+    if(attempt>=continuationRecoveryMaxAttempts){
+      continuationRecovery.delete(operationId);
+      continuationRecoveryExhausted.add(operationId);
+      return; // Do not convert unknown/lost ACK into proof of presentation.
+    }
     continuationRecovery.add(operationId);
     const delay=Math.min(5000,250*(2**Math.min(attempt,5)));
     const timer=setTimeout(async()=>{
       continuationRecoveryTimers.delete(operationId);
       if(continuationClosed)return;
+      let nextAttempt=attempt+1;
       try{
         const state=await status(operationId,true);
-        if(TERMINAL.has(state.status)){stopRecovery(operationId);return;}
+        if(TERMINAL.has(state.status)){
+          if(!state.conversationHandoffPending || state.conversationHandoffBlockedReason){
+            stopRecovery(operationId);return;
+          }
+        } else {
+          // Monitoring a long-running worker must not consume its entire
+          // retry budget before there is a terminal handoff to send.
+          nextAttempt=0;
+        }
       }catch{}
-      scheduleRestartRecovery(operationId,attempt+1);
+      scheduleRestartRecovery(operationId,nextAttempt);
     },delay);
     timer.unref?.();
     continuationRecoveryTimers.set(operationId,timer);
   }
 
   async function discoverContinuationOperations() {
-    if (!onTerminal) return 0;
+    if (!continuationEnabled) return 0;
     let entries = [];
     try { entries = await readdir(operationsDir, { withFileTypes: true }); }
     catch (error) { if (error?.code === 'ENOENT') return 0; throw error; }
@@ -243,7 +306,10 @@ export function createAsyncOperationTools({ config, prepare, workerPath, deliver
         const state = await readStateProjection(opPaths(entry.name));
         if (!state?.continuation) continue;
         if (TERMINAL.has(state.status)) {
-          await attachDelivery(state);
+          const delivered=await attachDelivery(state);
+          if(delivered.conversationHandoffPending
+            && !delivered.conversationHandoffBlockedReason)
+            scheduleRestartRecovery(entry.name);
           recovered += 1;
         } else {
           scheduleRestartRecovery(entry.name);
@@ -372,6 +438,7 @@ export function createAsyncOperationTools({ config, prepare, workerPath, deliver
       inputHash: receipt.inputHash,
       tool: receipt.tool,
       continuation: reservation.continuation ?? null,
+      ...(reservation.originAdmissionId ? {originAdmissionId:reservation.originAdmissionId} : {}),
       status: receipt.status,
       createdAt: reservation.createdAt ?? receipt.startedAt ?? finishedAt,
       updatedAt: finishedAt,
@@ -412,18 +479,207 @@ export function createAsyncOperationTools({ config, prepare, workerPath, deliver
     const kind = state.status === 'SUCCEEDED' ? 'COMPLETED'
       : state.status === 'CANCELLED' ? 'CANCELLED'
         : state.status === 'UNCERTAIN' ? 'UNCERTAIN' : 'FAILED';
-    const event = deliveryStore.publish({
+    const eventInput = Object.freeze({
       eventKey: 'operation:' + state.operationId + ':' + state.status,
-      correlationId,
       source: 'operation',
       sourceId: state.operationId,
       kind,
       code: state.failureCode ?? state.status,
-      artifact
+      artifact: Object.freeze({...artifact})
     });
+    let event;
+    if(protectedDeliveryOrigin){
+      // Validate admission against the original durable request reservation;
+      // a late/current-chat receipt may never substitute for missing admission.
+      const reservation=await reservationForOperation(state.operationId);
+      if(!reservation||!REQUEST_RE.test(state.originAdmissionId??'')
+        ||reservation.originAdmissionId!==state.originAdmissionId
+        ||reservation.requestId!==state.requestId
+        ||reservation.inputHash!==state.inputHash
+        ||(reservation.correlationId??reservation.requestId)!==correlationId)
+        throw new Error('ASYNC_DELIVERY_SIGNED_ORIGIN_ADMISSION_MISMATCH');
+      // The internal host issuer must independently establish the ORIGINAL
+      // inputHash/principal/chat/consent epoch. A failed issuer/verifier cannot
+      // fall back to legacy profile-scoped publication or synthesize an ACK.
+      const request=Object.freeze({
+        operationId:state.operationId,requestId:state.requestId,
+        correlationId,inputHash:state.inputHash,tool:state.tool,
+        originAdmissionId:reservation.originAdmissionId,
+        status:state.status,event:eventInput
+      });
+      const receiptId=await boundedTrustedHostCall(
+        'ASYNC_DELIVERY_SIGNED_ORIGIN_ISSUER_TIMEOUT',
+        ()=>protectedDeliveryOrigin.receiptForTerminal(request),
+        protectedOriginHostTimeoutMs);
+      if(typeof receiptId!=='string'||!REQUEST_RE.test(receiptId))
+        throw new Error('ASYNC_DELIVERY_SIGNED_ORIGIN_RECEIPT_REQUIRED');
+      event=await boundedTrustedHostCall(
+        'ASYNC_DELIVERY_SIGNED_ORIGIN_PUBLICATION_TIMEOUT',
+        ()=>protectedDeliveryOrigin.publisher.publish(
+          Object.freeze({...eventInput,receiptId}),
+          Object.freeze({inputHash:state.inputHash,correlationId,
+            originAdmissionId:reservation.originAdmissionId})),
+        protectedOriginHostTimeoutMs);
+    } else {
+      event=deliveryStore.publish({...eventInput,correlationId});
+    }
     deliveryTracked.delete(state.operationId);
     return event;
   }
+  async function boundedTrustedHostCall(code,callback,deadlineMs=nativeHandoffHostTimeoutMs){
+    // Do not leave a public status request waiting indefinitely on a native
+    // Host/issuer callback. A timed-out dispatch may still complete remotely;
+    // preserve its charged durable handoffKey and never fabricate an ACK.
+    let timer=null;
+    try{
+      return await Promise.race([
+        Promise.resolve().then(callback),
+        new Promise((_,reject)=>{
+          timer=setTimeout(()=>reject(new Error(code)),deadlineMs);
+        })
+      ]);
+    }finally{if(timer!==null)clearTimeout(timer);}
+  }
+
+  function validNativeHandoffReceipt(receipt,request){
+    return receipt && typeof receipt==='object' && !Array.isArray(receipt)
+      && typeof receipt.handoffId==='string'
+      && REQUEST_RE.test(receipt.handoffId)
+      && ['QUEUED','CLAIMED','DEFERRED','UNCERTAIN','SENT'].includes(receipt.state)
+      && receipt.handoffKey===request.handoffKey
+      && receipt.deliveryId===request.deliveryId
+      && receipt.originAdmissionId===request.originAdmissionId;
+  }
+
+  async function readNativeHandoffLedger(target,request){
+    let ledger;
+    try { ledger=await readJson(target); }
+    catch(error) {
+      if(error?.code==='ENOENT')return null;
+      throw new Error('ASYNC_CONTINUATION_NATIVE_LEDGER_UNREADABLE');
+    }
+    if(!ledger || typeof ledger!=='object' || Array.isArray(ledger)
+      || ledger.version!==1
+      || ledger.operationId!==request.operationId
+      || ledger.handoffKey!==request.handoffKey
+      || ledger.deliveryId!==request.deliveryId
+      || ledger.originAdmissionId!==request.originAdmissionId
+      || !Number.isSafeInteger(ledger.attempts) || ledger.attempts<0
+      || ledger.attempts>100000
+      || (ledger.receipt!==null && !validNativeHandoffReceipt(ledger.receipt,request))
+      || (ledger.blockedReason!==null
+        && ledger.blockedReason!=='ASYNC_CONTINUATION_NATIVE_RECEIPT_MISMATCH'))
+      throw new Error('ASYNC_CONTINUATION_NATIVE_LEDGER_MISMATCH');
+    return ledger;
+  }
+
+  function dispatchNativeHandoffSingleflight(request,payload){
+    // In-process single flight is NOT cross-process delivery permission or
+    // durable Host idempotency. The native receiver remains authoritative.
+    const key=request.handoffKey;
+    let task=nativeHandoffsInFlight.get(key);
+    if(!task){
+      task=(async()=>{
+        const target=path.join(opPaths(request.operationId).dir,'native-handoff.json');
+        const claimPath=path.join(opPaths(request.operationId).dir,'native-handoff.claim');
+        // Exclusive creation arbitrates TWO manager processes that share the
+        // same operation directory. Per-manager Promise singleflight alone
+        // cannot prevent concurrent ledger overwrites/duplicate Host calls.
+        // A claim surviving a crash is intentionally never auto-stolen.
+        let claim=null,claimOwned=false,retainUncertainClaim=false;
+        try{
+          try { claim=await open(claimPath,'wx',0o600);claimOwned=true; }
+          catch(error){
+            if(error?.code==='EEXIST')
+              throw new Error('ASYNC_CONTINUATION_NATIVE_IN_FLIGHT');
+            throw error;
+          }
+          await claim.writeFile(JSON.stringify({
+            schema:1,handoffKey:key,pid:process.pid,
+            claimedAt:new Date().toISOString()
+          })+'\n');
+          await claim.close();
+          claim=null;
+          const prior=await readNativeHandoffLedger(target,request);
+          if(prior?.receipt){
+            // The local JSON file is NOT evidence of issuer authenticity.
+            // Independently verify it against a Host-owned, authenticated
+            // durable enqueue record before accepting a cached receipt.
+            const verified=await boundedTrustedHostCall(
+              'ASYNC_CONTINUATION_NATIVE_VERIFY_TIMEOUT',
+              ()=>protectedDeliveryOrigin.verifyHandoffReceipt(
+                request,Object.freeze({...prior.receipt})));
+            if(verified!==true)
+              throw new Error('ASYNC_CONTINUATION_NATIVE_RECEIPT_NOT_VERIFIED');
+            return prior.receipt; // Verified queue receipt, not ChatGPT ACK.
+          }
+          if(prior?.blockedReason)
+            throw new Error(prior.blockedReason);
+          if((prior?.attempts??0)>=continuationRecoveryMaxAttempts)
+            throw new Error('ASYNC_CONTINUATION_NATIVE_RETRY_EXHAUSTED');
+          // Conservatively charge the attempt BEFORE the external Host effect.
+          // A crash between dispatch and response cannot restart the budget.
+          const record={
+            version:1,operationId:request.operationId,
+            originAdmissionId:request.originAdmissionId,
+            deliveryId:request.deliveryId,handoffKey:key,
+            attempts:(prior?.attempts??0)+1,
+            receipt:null,blockedReason:null
+          };
+          await atomicJson(target,record);
+          const raw=await boundedTrustedHostCall(
+            'ASYNC_CONTINUATION_NATIVE_DISPATCH_TIMEOUT',
+            ()=>protectedDeliveryOrigin.dispatchHandoff(request,payload));
+          if(raw===null || raw===undefined)
+            throw new Error('ASYNC_CONTINUATION_NATIVE_RECEIPT_UNAVAILABLE');
+          if(!validNativeHandoffReceipt(raw,request)){
+            await atomicJson(target,{
+              ...record,blockedReason:'ASYNC_CONTINUATION_NATIVE_RECEIPT_MISMATCH'
+            });
+            throw new Error('ASYNC_CONTINUATION_NATIVE_RECEIPT_MISMATCH');
+          }
+          // Persist only validated receipt fields, never caller-provided extras.
+          const receipt={
+            handoffId:raw.handoffId,state:raw.state,
+            handoffKey:key,deliveryId:request.deliveryId,
+            originAdmissionId:request.originAdmissionId
+          };
+          const verified=await boundedTrustedHostCall(
+            'ASYNC_CONTINUATION_NATIVE_VERIFY_TIMEOUT',
+            ()=>protectedDeliveryOrigin.verifyHandoffReceipt(
+              request,Object.freeze({...receipt})));
+          if(verified!==true){
+            // Host authenticity failure is not a transient lost transport ACK.
+            await atomicJson(target,{
+              ...record,blockedReason:'ASYNC_CONTINUATION_NATIVE_RECEIPT_MISMATCH'
+            });
+            throw new Error('ASYNC_CONTINUATION_NATIVE_RECEIPT_NOT_VERIFIED');
+          }
+          await atomicJson(target,{...record,receipt});
+          return receipt;
+        }catch(error){
+          // The callback may have committed remotely after our deadline.
+          // Retain a claim rather than start a second unverified send.
+          if(error?.message==='ASYNC_CONTINUATION_NATIVE_DISPATCH_TIMEOUT')
+            retainUncertainClaim=true;
+          throw error;
+        }finally{
+          if(claim)await claim.close();
+          if(claimOwned && !retainUncertainClaim){
+            try{await unlink(claimPath);}
+            catch(error){if(error?.code!=='ENOENT')throw error;}
+          }
+        }
+      })();
+      nativeHandoffsInFlight.set(key,task);
+      const clear=()=>{
+        if(nativeHandoffsInFlight.get(key)===task)nativeHandoffsInFlight.delete(key);
+      };
+      void task.then(clear,clear);
+    }
+    return task;
+  }
+
   async function attachDelivery(state) {
     if (!TERMINAL.has(state?.status)) return state;
     let result = state;
@@ -437,18 +693,99 @@ export function createAsyncOperationTools({ config, prepare, workerPath, deliver
       }
     }
     let continuationDelivered = true;
-    if (onTerminal && state.continuation) {
+    if (continuationEnabled && state.continuation) {
       try {
-        const handoff = await onTerminal(state);
+        let authorizedHandoff=null;
+        if(protectedDeliveryOrigin){
+          // Native chat signaling is another delivery channel: never bypass
+          // a failed or unsigned durable original result by using onTerminal.
+          if(!result.deliveryId || result.deliveryPending)
+            throw new Error('ASYNC_CONTINUATION_SIGNED_DELIVERY_REQUIRED');
+          const original=await reservationForOperation(state.operationId);
+          const correlationId=correlationOf(state);
+          if(!original || !REQUEST_RE.test(original.originAdmissionId??'')
+            || !correlationId || original.operationId!==state.operationId
+            || original.requestId!==state.requestId
+            || original.inputHash!==state.inputHash
+            || (original.correlationId??original.requestId)!==correlationId
+            || original.originAdmissionId!==state.originAdmissionId)
+            throw new Error('ASYNC_CONTINUATION_ORIGIN_ADMISSION_MISMATCH');
+          const continuationHash=hashJson(state.continuation);
+          // A state projection can be replaced independently of the original
+          // request reservation. Never signal a different event, project, root
+          // or message after execution or during restart recovery.
+          if(!original.continuation
+            || !/^[a-f0-9]{64}$/.test(original.continuationHash??'')
+            || original.continuationHash!==continuationHash
+            || hashJson(original.continuation)!==continuationHash)
+            throw new Error('ASYNC_CONTINUATION_ORIGINAL_PAYLOAD_MISMATCH');
+          // A deterministic key survives status polling, lost callback ACK,
+          // crash recovery and reopening the same signed original result.
+          const handoffKey=hashJson({
+            operationId:state.operationId,
+            originAdmissionId:original.originAdmissionId,
+            deliveryId:result.deliveryId,continuationHash
+          });
+          authorizedHandoff=Object.freeze({
+            operationId:state.operationId,
+            requestId:state.requestId,
+            correlationId,inputHash:state.inputHash,
+            originAdmissionId:original.originAdmissionId,
+            deliveryId:result.deliveryId,continuationHash,handoffKey
+          });
+          if(await boundedTrustedHostCall(
+            'ASYNC_CONTINUATION_NATIVE_AUTH_TIMEOUT',
+            ()=>protectedDeliveryOrigin.authorizeHandoff(authorizedHandoff))!==true)
+            throw new Error('ASYNC_CONTINUATION_OWNER_GRANT_DENIED');
+          // The native callback itself may revoke/regrant while awaited.
+          if(await boundedTrustedHostCall(
+            'ASYNC_CONTINUATION_NATIVE_AUTH_TIMEOUT',
+            ()=>protectedDeliveryOrigin.authorizeHandoff(authorizedHandoff))!==true)
+            throw new Error('ASYNC_CONTINUATION_OWNER_GRANT_DENIED');
+        }
+        // The native Host owns the final grant check AND actual chat delivery
+        // in one trusted operation. Do not call the legacy onTerminal handler
+        // after a separate permission check (time-of-check/time-of-use race).
+        const handoff=protectedDeliveryOrigin
+          ? await dispatchNativeHandoffSingleflight(
+            authorizedHandoff,Object.freeze({
+              status:state.status,
+              continuation:Object.freeze({
+                ...state.continuation,
+                evidencePaths:Object.freeze([...(state.continuation.evidencePaths??[])])
+              })
+            }))
+          : await onTerminal(state);
+        if(protectedDeliveryOrigin){
+          // A native invocation without an exact, durable enqueue receipt is
+          // indeterminate; keep recovery pending. Never treat HTTP 2xx or
+          // null as proof of originating-chat presentation.
+          if(handoff===null || handoff===undefined)
+            throw new Error('ASYNC_CONTINUATION_NATIVE_RECEIPT_UNAVAILABLE');
+          if(typeof handoff!=='object'
+            || typeof handoff.handoffId!=='string'
+            || !REQUEST_RE.test(handoff.handoffId)
+            || !['QUEUED','CLAIMED','DEFERRED','UNCERTAIN','SENT'].includes(handoff.state)
+            || handoff.handoffKey!==authorizedHandoff.handoffKey
+            || handoff.deliveryId!==authorizedHandoff.deliveryId
+            || handoff.originAdmissionId!==authorizedHandoff.originAdmissionId)
+            throw new Error('ASYNC_CONTINUATION_NATIVE_RECEIPT_MISMATCH');
+        }
         if (handoff?.handoffId) result = {
           ...result,
           conversationHandoffId: handoff.handoffId,
           conversationHandoffState: handoff.state
         };
-      } catch {
+      } catch(error) {
         continuationDelivered = false;
-        continuationRecovery.add(state.operationId);
-        result = { ...result, conversationHandoffPending: true };
+        const reason=error?.message;
+        const blocked=Boolean(protectedDeliveryOrigin
+          && nonRetryableHandoffErrors.has(reason));
+        if(blocked)stopRecovery(state.operationId);
+        else continuationRecovery.add(state.operationId);
+        result = { ...result, conversationHandoffPending: true,
+          ...(blocked ? {conversationHandoffBlockedReason:reason} : {})
+        };
       }
     }
     if (continuationDelivered) {
@@ -624,7 +961,8 @@ export function createAsyncOperationTools({ config, prepare, workerPath, deliver
         try { finish(await status(operationId)); }
         catch (error) { finish(null, error); }
       }, waitMs);
-      timer.unref?.();
+      // The caller awaits this timeout. Unlike autonomous background timers,
+      // it must keep Node alive when the worker and fs watcher are unref'ed.
     });
   }
 
@@ -636,11 +974,35 @@ export function createAsyncOperationTools({ config, prepare, workerPath, deliver
     const deliveryMode = input.__deliveryMode === 'transport-retry-only' ? 'transport-retry-only' : 'durable';
     const inputHash = hashJson({ tool: input.tool, arguments: input.arguments });
     const continuation = normalizeContinuation(input.continuation);
-    if (continuation && validateContinuation) await validateContinuation(continuation);
+    if (continuation && validateContinuation && !protectedDeliveryOrigin)
+      await validateContinuation(continuation);
     const continuationHash = continuation ? hashJson(continuation) : null;
     await mkdir(requestsDir, { recursive: true, mode: 0o700 });
     await mkdir(operationsDir, { recursive: true, mode: 0o700 });
     const requestPath = path.join(requestsDir, `${hashJson(input.requestId)}.json`);
+    const authorizeProtectedReplay = async (prior, validate = true) => {
+      if (!protectedDeliveryOrigin) return;
+      if (!REQUEST_RE.test(prior.originAdmissionId ?? '')
+        || !OP_RE.test(prior.operationId ?? ''))
+        throw new Error('ASYNC_DELIVERY_SIGNED_ORIGIN_REPLAY_DENIED');
+      const original=Object.freeze({
+        operationId:prior.operationId,requestId:prior.requestId,
+        correlationId:prior.correlationId??prior.requestId,
+        inputHash:prior.inputHash,originAdmissionId:prior.originAdmissionId
+      });
+      if(await boundedTrustedHostCall('ASYNC_DELIVERY_SIGNED_ORIGIN_REPLAY_TIMEOUT',
+          ()=>protectedDeliveryOrigin.authorizeReplay(original),
+          protectedOriginHostTimeoutMs)!==true)
+        throw new Error('ASYNC_DELIVERY_SIGNED_ORIGIN_REPLAY_DENIED');
+      if (validate && continuation && validateContinuation) {
+        await validateContinuation(continuation);
+        // The callback may revoke the consent that was valid on entry.
+        if(await boundedTrustedHostCall('ASYNC_DELIVERY_SIGNED_ORIGIN_REPLAY_TIMEOUT',
+          ()=>protectedDeliveryOrigin.authorizeReplay(original),
+          protectedOriginHostTimeoutMs)!==true)
+          throw new Error('ASYNC_DELIVERY_SIGNED_ORIGIN_REPLAY_DENIED');
+      }
+    };
     try {
       const prior = await readJson(requestPath);
       if (prior.requestId !== input.requestId || prior.inputHash !== inputHash ||
@@ -649,16 +1011,59 @@ export function createAsyncOperationTools({ config, prepare, workerPath, deliver
           (prior.deliveryMode !== undefined && prior.deliveryMode !== deliveryMode)) {
         throw new Error('REQUEST_ID_CONFLICT');
       }
+      await authorizeProtectedReplay(prior);
       let priorState;
       try { priorState = await status(prior.operationId); }
       catch (error) {
         if (error.message !== 'operation not found') throw error;
         priorState = { operationId: prior.operationId, status: 'UNCERTAIN', failureCode: 'RESERVED_WITHOUT_STATE' };
       }
+      // Status reconciliation may await receipt I/O and outlive the old grant.
+      await authorizeProtectedReplay(prior,false);
       return { operationId: prior.operationId, requestId: input.requestId, correlationId, duplicate: true, status: priorState.status, deliveryId: priorState.deliveryId ?? null };
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error;
     }
+    const operationId = randomUUID();
+    let originAdmissionId = null;
+    if(protectedDeliveryOrigin){
+      // Called before reserving or spawning any effect. It must independently
+      // verify the current authenticated issuer, chat and owner consent.
+      // Never derive the grant from MCP input fields or current chat at finish.
+      originAdmissionId=await boundedTrustedHostCall(
+        'ASYNC_DELIVERY_SIGNED_ORIGIN_ADMISSION_TIMEOUT',
+        ()=>protectedDeliveryOrigin.admitOperation(
+          Object.freeze({operationId,requestId:input.requestId,
+            correlationId,inputHash,tool:input.tool,continuationHash})),
+        protectedOriginHostTimeoutMs);
+      if(typeof originAdmissionId!=='string'||!REQUEST_RE.test(originAdmissionId))
+        throw new Error('ASYNC_DELIVERY_SIGNED_ORIGIN_ADMISSION_REQUIRED');
+      // Admission can itself await network/native consent. Require the same
+      // live grant before any preparatory Host callback can run.
+      const live=await boundedTrustedHostCall(
+        'ASYNC_DELIVERY_SIGNED_ORIGIN_REPLAY_TIMEOUT',
+        ()=>protectedDeliveryOrigin.authorizeReplay(Object.freeze({
+          operationId,requestId:input.requestId,correlationId,inputHash,
+          originAdmissionId
+        })),
+        protectedOriginHostTimeoutMs);
+      if(live!==true)
+        throw new Error('ASYNC_DELIVERY_SIGNED_ORIGIN_ADMISSION_REVOKED');
+    }
+    if(protectedDeliveryOrigin && continuation && validateContinuation) {
+      await validateContinuation(continuation);
+      const stillGranted=await boundedTrustedHostCall(
+        'ASYNC_DELIVERY_SIGNED_ORIGIN_REPLAY_TIMEOUT',
+        ()=>protectedDeliveryOrigin.authorizeReplay(Object.freeze({
+          operationId,requestId:input.requestId,correlationId,inputHash,
+          originAdmissionId
+        })),
+        protectedOriginHostTimeoutMs);
+      if(stillGranted!==true)
+        throw new Error('ASYNC_DELIVERY_SIGNED_ORIGIN_ADMISSION_REVOKED');
+    }
+    // The preparer is Host code and may do I/O; it must never run before
+    // independent owner/chat admission in the protected path.
     const prepared = await prepare(input.tool, input.arguments);
     const processPlan = prepared && (prepared.kind === undefined || prepared.kind === 'process')
       && typeof prepared.file === 'string' && Array.isArray(prepared.args) && typeof prepared.cwd === 'string';
@@ -666,12 +1071,11 @@ export function createAsyncOperationTools({ config, prepare, workerPath, deliver
       && typeof prepared.configPath === 'string'
       && /^[a-f0-9]{64}$/.test(prepared.configSha256 ?? '');
     if (!processPlan && !powerToolPlan) throw new Error('invalid async execution plan');
-    const operationId = randomUUID();
     let claimed = false;
     try {
       const handle = await open(requestPath, 'wx', 0o600);
       try {
-        await handle.writeFile(JSON.stringify({ requestId: input.requestId, correlationId, operationId, inputHash, continuationHash, continuation, deliveryMode, createdAt: new Date().toISOString() }) + '\n');
+        await handle.writeFile(JSON.stringify({ requestId: input.requestId, correlationId, operationId, inputHash, continuationHash, continuation, deliveryMode, ...(originAdmissionId ? {originAdmissionId} : {}), createdAt: new Date().toISOString() }) + '\n');
       } finally {
         await handle.close();
       }
@@ -687,12 +1091,15 @@ export function createAsyncOperationTools({ config, prepare, workerPath, deliver
           (prior.deliveryMode !== undefined && prior.deliveryMode !== deliveryMode)) {
         throw new Error('REQUEST_ID_CONFLICT');
       }
+      await authorizeProtectedReplay(prior);
       let priorState;
       try { priorState = await status(prior.operationId); }
       catch (error) {
         if (error.message !== 'operation not found') throw error;
         priorState = { operationId: prior.operationId, status: 'UNCERTAIN', failureCode: 'RESERVED_WITHOUT_STATE' };
       }
+      // Status reconciliation may await receipt I/O and outlive the old grant.
+      await authorizeProtectedReplay(prior,false);
       return { operationId: prior.operationId, requestId: input.requestId, correlationId, duplicate: true, status: priorState.status, deliveryId: priorState.deliveryId ?? null };
     }
 
@@ -716,7 +1123,8 @@ export function createAsyncOperationTools({ config, prepare, workerPath, deliver
       deadlineAt: new Date(Date.now() + operationTimeoutMs).toISOString(),
       workerPid: null,
       childPid: null,
-      continuation
+      continuation,
+      ...(originAdmissionId ? {originAdmissionId} : {})
     };
     await atomicJson(p.state, baseState);
     if (deliveryStore && deliveryMode === 'durable') deliveryTracked.add(operationId);
@@ -744,6 +1152,28 @@ export function createAsyncOperationTools({ config, prepare, workerPath, deliver
       stderrPath: p.stderr,
       cancelPath: p.cancel
     };
+    if(protectedDeliveryOrigin){
+      // The original admission was issued before durable request creation.
+      // Re-attest it after all awaited file writes and immediately before the
+      // first external worker effect. A revoked grant never launches a process.
+      let authorized=false;
+      try {
+        authorized=await boundedTrustedHostCall(
+          'ASYNC_DELIVERY_SIGNED_ORIGIN_REPLAY_TIMEOUT',
+          ()=>protectedDeliveryOrigin.authorizeReplay(Object.freeze({
+            operationId,requestId:input.requestId,correlationId,inputHash,
+            originAdmissionId
+          })),
+          protectedOriginHostTimeoutMs)===true;
+      } catch {}
+      if(!authorized){
+        await atomicJson(p.state,{
+          ...baseState,status:'FAILED',updatedAt:new Date().toISOString(),
+          failureCode:'OWNER_GRANT_REVOKED_BEFORE_EXECUTION'
+        });
+        throw new Error('ASYNC_DELIVERY_SIGNED_ORIGIN_ADMISSION_REVOKED');
+      }
+    }
     try {
       const worker = spawn(process.execPath, [resolvedWorker], {
         detached: true,
@@ -832,25 +1262,64 @@ export function createAsyncOperationTools({ config, prepare, workerPath, deliver
     deliveryTimer = setInterval(() => { reconcileDeliveries().catch(() => {}); }, deliveryIntervalMs);
     deliveryTimer.unref?.();
   }
-  if (onTerminal) queueMicrotask(() => { discoverContinuationOperations().catch(() => {}); });
+  if (continuationEnabled) queueMicrotask(() => { discoverContinuationOperations().catch(() => {}); });
 
-  async function cancel(input) {
+  async function cancel(input, recheck = null) {
     const state = await status(input.operationId);
+    // Even the already-terminal response exposes private status metadata.
+    if(recheck)await recheck();
     if (TERMINAL.has(state.status)) return { operationId: input.operationId, status: state.status, alreadyTerminal: true };
     const p = opPaths(input.operationId);
     await writeFile(p.cancel, new Date().toISOString() + '\n', { encoding: 'utf8', mode: 0o600 });
     return { operationId: input.operationId, status: state.status, cancelRequested: true };
   }
 
+  const authorizedOperationAccess=async(name,operationId)=>{
+    if(!protectedDeliveryOrigin)return;
+    // A UUID by itself is never permission to read or cancel a native result.
+    if(typeof operationId!=='string'||!OP_RE.test(operationId))
+      throw new Error('ASYNC_DELIVERY_SIGNED_ORIGIN_ACCESS_DENIED');
+    const original=await reservationForOperation(operationId);
+    if(!original||!REQUEST_RE.test(original.originAdmissionId??'')
+      ||original.operationId!==operationId)
+      throw new Error('ASYNC_DELIVERY_SIGNED_ORIGIN_ACCESS_DENIED');
+    const authorized=await boundedTrustedHostCall(
+      'ASYNC_DELIVERY_SIGNED_ORIGIN_ACCESS_TIMEOUT',
+      ()=>protectedDeliveryOrigin.authorizeAccess(Object.freeze({
+        name,operationId,originAdmissionId:original.originAdmissionId,
+        requestId:original.requestId,
+        inputHash:original.inputHash,
+        correlationId:original.correlationId??original.requestId
+      })),
+      protectedOriginHostTimeoutMs);
+    if(authorized!==true)
+      throw new Error('ASYNC_DELIVERY_SIGNED_ORIGIN_ACCESS_DENIED');
+  };
+
   return {
     definitions: asyncOperationDefinitions,
     status: () => ({
       enabled,
       backgroundFirst: policy.backgroundFirst !== false,
+      originHostIntegration: {
+        required: signedOriginRequired,
+        callbacksConfigured: protectedDeliveryOrigin !== null,
+        trustBoundary: protectedDeliveryOrigin !== null
+          ? 'HOST_CALLBACKS_NOT_PROOF_OF_CHAT_ACK'
+          : 'LEGACY_PROFILE_NOT_AUTHENTICATED_CHAT',
+        originatingChatAckVerified: false
+      },
       durable: true,
       requestIdempotency: true,
       rawArgumentsStored: false,
       maxOutputBytes,
+      continuationRecovery:{
+        scheduled:continuationRecoveryTimers.size,
+        exhausted:continuationRecoveryExhausted.size,
+        maxAttempts:continuationRecoveryMaxAttempts,
+        nativeHostTimeoutMs:nativeHandoffHostTimeoutMs,
+        originalHostTimeoutMs:protectedOriginHostTimeoutMs
+      },
       stateRoot: root,
       deliveryIntegration: deliveryStore ? {
         enabled: true,
@@ -863,6 +1332,7 @@ export function createAsyncOperationTools({ config, prepare, workerPath, deliver
     close: async () => {
       continuationClosed = true;
       for(const operationId of [...continuationRecoveryTimers.keys()])stopRecovery(operationId);
+      continuationRecoveryExhausted.clear();
       deliveryClosed = true;
       if (deliveryTimer) clearInterval(deliveryTimer);
       deliveryTimer = null;
@@ -870,9 +1340,22 @@ export function createAsyncOperationTools({ config, prepare, workerPath, deliver
     },
     execute: async (name, input) => {
       if (name === 'operation_start') return start(input);
-      if (name === 'operation_status') return statusWithWait(input.operationId, input.waitMs ?? 0);
-      if (name === 'operation_result') return result(input);
-      if (name === 'operation_cancel') return cancel(input);
+      if (name === 'operation_status') {
+        await authorizedOperationAccess(name,input.operationId);
+        const data=await statusWithWait(input.operationId,input.waitMs ?? 0);
+        await authorizedOperationAccess(name,input.operationId);
+        return data;
+      }
+      if (name === 'operation_result') {
+        await authorizedOperationAccess(name,input.operationId);
+        const data=await result(input);
+        await authorizedOperationAccess(name,input.operationId);
+        return data;
+      }
+      if (name === 'operation_cancel') {
+        await authorizedOperationAccess(name,input.operationId);
+        return cancel(input,()=>authorizedOperationAccess(name,input.operationId));
+      }
       throw new Error('unknown async operation tool');
     }
   };

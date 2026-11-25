@@ -1,10 +1,12 @@
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { canonicalizeRoots } from '../src/security-v0.3.mjs';
-import { expandPathValue } from '../src/platform.mjs';
+import { expandPathValue, terminateProcessTree } from '../src/platform.mjs';
 import { executePowerTool } from '../src/power-tools-v0.3.mjs';
+import { createAccessStatusReader } from '../src/full-access-status.mjs';
+import { loadV102WorkerExecutionAccess, v102PreparedPlanDigest } from '../src/execution-access-guard.mjs';
 import { observeOperationChild } from '../src/operation-child-lifecycle.mjs';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -44,13 +46,7 @@ async function readInput() {
 }
 function killTree(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return;
-  try {
-    if (process.platform === 'win32') {
-      spawnSync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 5000 });
-    } else {
-      try { process.kill(-pid, 'SIGTERM'); } catch { process.kill(pid, 'SIGTERM'); }
-    }
-  } catch {}
+  return terminateProcessTree(pid, { signal: 'SIGKILL' });
 }
 function collector(limit) {
   const chunks = [];
@@ -111,10 +107,17 @@ async function runPowerToolOperation(spec, prior) {
   config.allowedRoots = config.allowedRoots.map(expandPathValue);
   const roots = await canonicalizeRoots(config.allowedRoots);
   const projectDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const readAccessStatus = createAccessStatusReader({config});
+  const accessStatus = await readAccessStatus();
+  const loadedAccess = await loadV102WorkerExecutionAccess({ config, spec, projectDir, accessStatus, readAccessStatus });
   const ctx = {
     config,
     roots,
-    auditLog: path.resolve(projectDir, config.auditLog || 'var/audit.jsonl')
+    accessStatus,
+    auditLog: path.resolve(projectDir, config.auditLog || 'var/audit.jsonl'),
+    requestId: spec.requestId,
+    operationId: spec.operationId,
+    ...(loadedAccess ? { executionAccess: loadedAccess.executionAccess } : {})
   };
   const toolResult = await executePowerTool(ctx, spec.tool, spec.toolArguments);
   const encoded = JSON.stringify(toolResult);
@@ -152,33 +155,99 @@ async function main() {
   const startedAt = new Date().toISOString();
   const stdout = collector(spec.outputLimit);
   const stderr = collector(spec.outputLimit);
-  currentChild = spawn(spec.file, spec.args, {
-    cwd: spec.cwd,
-    windowsHide: true,
-    shell: false,
-    detached: process.platform !== 'win32',
-    stdio: ['ignore', 'pipe', 'pipe']
-  });
-  const observed = observeOperationChild(currentChild, {
-    stdout, stderr, timeoutMs: spec.timeoutMs,
-    cancellationRequested: () => existsSync(spec.cancelPath), killOwnedChild: killTree
-  });
+  const projectDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const localConfigPath = path.join(projectDir, 'config.local.json');
+  const defaultConfigPath = path.join(projectDir, 'config.json');
+  const configPath = path.resolve(spec.configPath || process.env.REMOTE_COMMANDER_CONFIG
+    || (existsSync(localConfigPath) ? localConfigPath : defaultConfigPath));
+  let executionAccess = null;
+  if (spec.executionAuthorization || existsSync(configPath)) {
+    const configRaw = await readFile(configPath, 'utf8');
+    const configSha256 = createHash('sha256').update(configRaw).digest('hex');
+    if (spec.configSha256 && configSha256 !== spec.configSha256) throw new Error('OPERATION_CONFIG_CHANGED');
+    const executionConfig = JSON.parse(configRaw);
+    const readAccessStatus = createAccessStatusReader({config:executionConfig});
+    const accessStatus = await readAccessStatus();
+    if (executionConfig?.executionAccess?.required === true && !spec.configSha256) {
+      throw new Error('V102_WORKER_CONFIG_HASH_REQUIRED');
+    }
+    const loaded = await loadV102WorkerExecutionAccess({ config: executionConfig, spec, projectDir, accessStatus, readAccessStatus });
+    executionAccess = loaded?.executionAccess ?? null;
+  }
+  const preparedPlan = {
+    file: spec.file, args: spec.args, cwd: spec.cwd,
+    timeoutMs: spec.timeoutMs, outputLimit: spec.outputLimit
+  };
+  const planDigest = executionAccess ? v102PreparedPlanDigest(spec.tool, preparedPlan) : null;
+  let observed = null;
+  let gateError = null;
+  const startChild = async () => {
+    currentChild = spawn(spec.file, spec.args, {
+      cwd: spec.cwd,
+      windowsHide: true,
+      shell: false,
+      detached: process.platform !== 'win32',
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    // Install observers synchronously before the first asynchronous boundary or receipt write.
+    observed = observeOperationChild(currentChild, {
+      stdout, stderr, timeoutMs: spec.timeoutMs,
+      cancellationRequested: () => existsSync(spec.cancelPath),
+      killOwnedChild: killTree
+    });
+    if (!Number.isSafeInteger(currentChild.pid) || currentChild.pid < 1) {
+      throw new Error('OPERATION_CHILD_START_FAILED');
+    }
+    try {
+      await atomicJson(spec.statePath, {
+        ...prior,
+        status: 'RUNNING',
+        workerPid: process.pid,
+        childPid: currentChild.pid,
+        startedAt,
+        updatedAt: startedAt
+      });
+    } catch (error) {
+      try { await killTree(currentChild.pid); } catch {}
+      await observed.outcome;
+      throw error;
+    }
+    // Keep the machine-global owner/resource lease until the child actually
+    // exits, times out or is cancelled; a successful spawn is not completion.
+    const childOutcome = await observed.outcome;
+    if (childOutcome.error) throw childOutcome.error;
+    return {
+      pid: currentChild.pid, exitCode: childOutcome.code, signal: childOutcome.signal,
+      timedOut: childOutcome.timedOut, cancelRequested: childOutcome.cancelRequested
+    };
+  };
+  if (executionAccess) {
+    if (spec.executionAuthorization?.planDigest !== planDigest) {
+      throw new Error('V102_WORKER_PLAN_AUTHORIZATION_MISMATCH');
+    }
+    try {
+      await executionAccess.run({
+        tool: spec.tool,
+        actionDigest: spec.executionAuthorization.actionDigest,
+        planDigest,
+        requestId: spec.requestId,
+        operationId: spec.operationId
+      }, startChild);
+    } catch (error) {
+      gateError = error;
+    }
+    if (!observed) throw gateError ?? new Error('V102_WORKER_EFFECT_NOT_STARTED');
+  } else {
+    await startChild();
+  }
   let outcome;
   try {
-    await atomicJson(spec.statePath, {
-      ...prior,
-      status: 'RUNNING',
-      workerPid: process.pid,
-      childPid: currentChild.pid,
-      startedAt,
-      updatedAt: startedAt
-    });
     outcome = await observed.outcome;
-    if (outcome.error) throw outcome.error;
     timedOut = outcome.timedOut;
     cancelRequested = outcome.cancelRequested;
+    if (outcome.error) throw outcome.error;
+    if (gateError) throw gateError;
   } finally {
-    // Even a failed RUNNING write must not abandon the owned child or its finite budget.
     await observed.outcome;
     observed.dispose();
   }

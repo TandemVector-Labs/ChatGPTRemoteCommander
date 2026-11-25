@@ -61,7 +61,9 @@ Where ZIP upload is available, eligible workspace owners/admins can use **Admin 
 
 ## 4. Prepare a private/workspace app-bound Plugin
 
-Preferred: use the latest-Release one-liner from `WORK_SETUP.md`; no repository checkout is required. The self-contained installer accepts either the ChatGPT technical `plugin_...` identifier or the underlying App ID, downloads `plugin-template.zip` from the latest Release when needed, creates a private per-user copy, binds it, adds a personal marketplace, installs the Plugin through Codex, and verifies the result. The repository-local `install-work-plugin.ps1/.sh` commands remain available for development/offline use with a local template.
+**ChatGPT-only default (no Codex required):** after the local Installer enrolls *this user's* Platform Tunnel Runtime API key and the user's own ChatGPT workspace creates the custom MCP app, install and test that app in ChatGPT. If the eligible workspace supports Plugin ZIP upload, use the device-specific package from step 3 and its bound App ID. Run `system_status` directly in a new ChatGPT conversation before enabling scoped write or GUI tools. A ChatGPT login is not an OpenAI API key; ChatGPT does not transfer its session token to the local Commander process. The local Tunnel client's profile credential supplies its Platform authentication. The MCP endpoint's `No authentication` setting refers only to the local MCP endpoint **behind the authorized Tunnel**, not to an anonymous public network endpoint or proof of the ChatGPT caller's identity.
+
+**Optional Codex/Work distribution only:** `WORK_SETUP.md` and the latest-Release `install-work-plugin.ps1/.sh` one-liners also support installing the private app-bound Plugin via Codex. That route creates a private per-user copy, references the already-registered App ID and verifies the result; it is **not** a prerequisite for using ChatGPT or its full supported MCP tool surface. Keep each user's local Runtime key and Tunnel profile separate from the Plugin ZIP and from other users' OS accounts.
 
 OpenAI's `.app.json` format requires the underlying App ID. If the UI/URL shows `plugin_asdk_app_example`, the App ID stored in `.app.json` is `asdk_app_example`.
 
@@ -144,3 +146,50 @@ Do not expose a personal Power Mode computer directly to the public internet to 
 ### Native Computer Use fallback
 
 Native Computer Use remains a fallback for graphical tasks when the Remote Commander GUI backend is unavailable, unsupported, or intentionally disabled. It is not a substitute for proving that the selected Remote Commander app reaches the intended computer.
+
+
+### Explicit account–host naming (v0.12, opt-in)
+
+Live identifiers such as default, MMZ, saeid-secondary and chatgpt-remote-commander
+are routing/transport names, not proof of an account's human-readable name.
+A single independently authenticated ChatGPT account+host pair retains its
+own Tunnel, Runtime key, private certificate and technical Core profile.
+
+The optional version-1 **local identity map** maps explicit technical
+(account, host, profile) identifiers to a distinct display label without
+renaming, copying, or re-enrolling any installed credentials. Never infer
+account membership from spelling similarity. Example **synthetic** map:
+
+    {
+      "schema": 1,
+      "hosts": [{
+        "hostId": "example-host",
+        "hostLabel": "Example Workstation",
+        "profiles": [{
+          "accountId": "account-one",
+          "profileId": "default",
+          "tunnelProfile": "chatgpt-remote-commander",
+          "displayName": "Remote Commander · Account One · Example Workstation",
+          "aliases": ["legacy-default"]
+        }]
+      }]
+    }
+
+Once owner/ChatGPT account bindings are independently verified, save the
+map in an owner-private local file. On Linux, use build-device-plugin.sh
+with --identity-map FILE --host-id example-host --account-id account-one
+--profile chatgpt-remote-commander --app-id YOUR_OWN_APP_ID. Windows uses
+build-device-plugin.ps1 with -IdentityMap FILE -HostId example-host
+-AccountId account-one -Profile chatgpt-remote-commander -AppId YOUR_OWN_APP_ID.
+
+With a map, the displayed name comes from its explicit displayName; the
+technical profile, existing Plugin App ID, Tunnel, and credential are not
+renamed. DeviceName is optional (defaults to the mapped hostLabel) or must
+equal hostLabel exactly. All hosts, accounts, aliases, and display labels
+must be collision-free; wrong account/profile/host combinations fail closed.
+The map is **owner-provided metadata, not authenticated conversation proof**.
+Generated Plugin ZIPs must still be imported or refreshed in the correct
+account separately, with authorized consent. For mapped builds, the per-host Plugin fingerprint is derived from the stable
+accountId rather than the legacy filename, so historical profile aliases do not
+create extra Plugin identities. Older builds without a map retain legacy
+behavior for compatibility; they are not implicitly renamed.

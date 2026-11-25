@@ -29,6 +29,13 @@ test('feature is hidden unless explicit enable and Power Mode', ()=>{
  assert.equal(transferMeshToolDefinitions.length,4);
  assert.deepEqual(transferMeshToolDefinitions.map(x=>x.name),['transfer_mesh_info','transfer_mesh_send','transfer_mesh_status','transfer_mesh_receive']);
 });
+test('legacy five-peer roster is retained in the unified native transfer API',()=>{
+ const peers=['PC','Linux','MMZ','EmadServer','Amirreza'];
+ for(const definition of transferMeshToolDefinitions){
+  if(!definition.inputSchema.properties.peer)continue;
+  assert.deepEqual(definition.inputSchema.properties.peer.enum,peers);
+ }
+});
 test('native adapter sends, reads status and receives safely without overwrite',async()=>{
  await fixture(async(a,b)=>{
   assert.equal(a.tools.enabled,true);

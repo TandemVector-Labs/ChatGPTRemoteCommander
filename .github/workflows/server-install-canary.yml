@@ -10,6 +10,8 @@ on:
       - 'server-install-linux.sh'
       - 'test/installer-check.mjs'
       - 'package.json'
+      - 'docs/release-train-0.11.json'
+      - 'docs/release-train-0.12.json'
       - '.github/workflows/server-install-canary.yml'
   workflow_dispatch:
 
@@ -17,7 +19,7 @@ permissions:
   contents: read
 
 env:
-  RC_SOURCE_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
+  RC_SOURCE_REF: ${{ github.event.pull_request.head.sha || github.sha }}
   RC_EXPECTED_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
 
 jobs:
@@ -31,6 +33,11 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
+      # The bootstrap must build a pinned native Job Object binary when
+      # no installed runner exists; Node/Git are the tools intentionally hidden.
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '8.0.427'
       - name: Exercise Windows Server bootstrap with Node/Git absent from PATH
         shell: pwsh
         env:
@@ -45,7 +52,7 @@ jobs:
           $oldMachine=[Environment]::GetEnvironmentVariable('Path','Machine')
           $oldUser=[Environment]::GetEnvironmentVariable('Path','User')
           try {
-            $minimal="$env:ProgramFiles\PowerShell\7;$env:windir\System32;$env:windir;$env:windir\System32\Wbem"
+            $minimal="$env:ProgramFiles\PowerShell\7;$env:ProgramFiles\dotnet;$env:windir\System32;$env:windir;$env:windir\System32\Wbem"
             [Environment]::SetEnvironmentVariable('Path',$minimal,'Machine')
             [Environment]::SetEnvironmentVariable('Path',$null,'User')
             $env:Path=$minimal
@@ -54,12 +61,35 @@ jobs:
             $installDir=Join-Path $env:RUNNER_TEMP 'rc-server-app'
             & $script -SourceRef $env:RC_SOURCE_REF -ExpectedCommit $env:RC_EXPECTED_COMMIT -InstallDir $installDir -NoStartServer -GuiControl Off
             $manifestPath=Join-Path $env:ProgramData 'ChatGPTRemoteCommander\server-install-allowlist.json'
-            $manifest=Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-            if($manifest.resolvedCommit -ne $env:RC_EXPECTED_COMMIT){throw 'MANIFEST_COMMIT_MISMATCH'}
-            if($manifest.antivirusExclusionsAdded -ne $false){throw 'ANTIVIRUS_EXCLUSION_POLICY_VIOLATION'}
-            $names=@($manifest.artifacts | ForEach-Object {$_.name})
-            if($names -notcontains 'Node.js'){throw 'NODE_BOOTSTRAP_NOT_EVIDENCED'}
-            if($names -notcontains 'Git for Windows'){throw 'GIT_BOOTSTRAP_NOT_EVIDENCED'}
+            $devMatch=[regex]::Match($expectedVersion,'^0\.(?<minor>11|12)\.0-dev\.[1-9][0-9]*$')
+            if($devMatch.Success){
+              if(Test-Path -LiteralPath $manifestPath){throw 'DEV_PRODUCTION_ALLOWLIST_MUST_NOT_EXIST'}
+              $trainVersion='0.'+$devMatch.Groups['minor'].Value
+              $trainPath=Join-Path $installDir ("docs/release-train-$trainVersion.json")
+              if(-not(Test-Path -LiteralPath $trainPath -PathType Leaf)){throw 'DEV_MANIFEST_MISSING'}
+              $train=Get-Content -LiteralPath $trainPath -Raw | ConvertFrom-Json
+              if($train.train -cne $trainVersion -or $train.sourceVersion -cne $expectedVersion -or
+                 $train.status -cne 'INTEGRATION_CANDIDATE_NOT_FINAL' -or
+                 $train.channel -cne 'development' -or
+                 $train.isStable -ne $false -or $train.publishApproved -ne $false -or
+                 $train.autoupdateApproved -ne $false -or $train.installedPromotionApproved -ne $false -or
+                 $null -ne $train.releaseTag -or
+                 @($train.components|Where-Object {$_.required -ne $true -or $_.verified -ne $false}).Count -ne 0 -or
+                 @($train.acceptance.PSObject.Properties|Where-Object {$_.Value -ne $false}).Count -ne 0){
+                   throw 'DEV_MANIFEST_NO_PROMOTION_POLICY_INVALID'
+              }
+              Write-Output 'WINDOWS_SERVER_DEV_NOPROMOTE_MANIFEST_PASS'
+            } elseif($expectedVersion -notmatch '^\d+\.\d+\.\d+$'){
+              throw 'SERVER_CANARY_UNKNOWN_VERSION_DENIED'
+            } else {
+              $manifest=Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+              if($manifest.resolvedCommit -ne $env:RC_EXPECTED_COMMIT){throw 'MANIFEST_COMMIT_MISMATCH'}
+              if($manifest.antivirusExclusionsAdded -ne $false){throw 'ANTIVIRUS_EXCLUSION_POLICY_VIOLATION'}
+              $names=@($manifest.artifacts | ForEach-Object {$_.name})
+              if($names -notcontains 'Node.js'){throw 'NODE_BOOTSTRAP_NOT_EVIDENCED'}
+              if($names -notcontains 'Git for Windows'){throw 'GIT_BOOTSTRAP_NOT_EVIDENCED'}
+            }
+
             $pkg=Get-Content -LiteralPath (Join-Path $installDir 'package.json') -Raw | ConvertFrom-Json
             if($pkg.version -ne $expectedVersion){throw 'INSTALLED_VERSION_MISMATCH'}
             Write-Output 'WINDOWS_DISPOSABLE_SERVER_CANARY_PASS'
@@ -80,8 +110,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker run --rm             -e RC_SOURCE_REF="$RC_SOURCE_REF"             -e RC_EXPECTED_COMMIT="$RC_EXPECTED_COMMIT"             -v "$GITHUB_WORKSPACE:/src:ro"             ubuntu:24.04 bash -lc '
+          dns_args=()
+          if ! docker run --rm ubuntu:24.04 bash -lc 'timeout 8s getent ahostsv4 archive.ubuntu.com >/dev/null && timeout 8s getent ahostsv4 security.ubuntu.com >/dev/null'; then
+            # Only GitHub-hosted ephemeral Ubuntu. HTTPS DNS bootstraps the
+            # public Ubuntu/github/nodejs hostnames; apt signatures remain on.
+            bash tools/ci-ubuntu-apt-dns-recover.sh
+            for hostname in archive.ubuntu.com security.ubuntu.com github.com nodejs.org; do
+              address="$(getent ahostsv4 "$hostname" | awk 'NR==1{print $1}')"
+              [[ "$address" =~ ^[0-9.]{7,15}$ ]] || exit 4
+              dns_args+=(--add-host "$hostname:$address")
+            done
+            docker run --rm "${dns_args[@]}" ubuntu:24.04 bash -lc 'timeout 8s getent ahostsv4 archive.ubuntu.com >/dev/null && timeout 8s getent ahostsv4 security.ubuntu.com >/dev/null'
+            echo RC_CI_DOCKER_DOH_UBUNTU_HOSTS_PASS
+          fi
+          docker run --rm "${dns_args[@]}"             -e RC_SOURCE_REF="$RC_SOURCE_REF"             -e RC_EXPECTED_COMMIT="$RC_EXPECTED_COMMIT"             -v "$GITHUB_WORKSPACE:/src:ro"             ubuntu:24.04 bash -lc '
               set -euo pipefail
+              # Mirror the Linux CI helper dependency used by the D-Bus/Portal
+              # contract tests. This is isolated QA-only setup, not a desktop
+              # permission grant or a production GUI activation.
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends python3-gi gir1.2-glib-2.0
+              python3 -c "import gi; from gi.repository import Gio, GLib; print(\"LINUX_PORTAL_GI_QA_PREREQUISITE_PASS\")"
               bash /src/server-install-linux.sh                 --source-ref "$RC_SOURCE_REF"                 --expected-commit "$RC_EXPECTED_COMMIT"                 --install-dir /opt/chatgpt-remote-commander/app                 --no-start
               test "$(git -C /opt/chatgpt-remote-commander/app rev-parse HEAD)" = "$RC_EXPECTED_COMMIT"
               command -v python3 >/dev/null

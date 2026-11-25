@@ -1,0 +1,107 @@
+{
+  "schema": "rc-unified-installer-v1",
+  "product": "ChatGPTRemoteCommander",
+  "sourceTrain": "0.12",
+  "platforms": {
+    "windows": {
+      "architecture": [
+        "x64",
+        "arm64"
+      ],
+      "runtime": "node",
+      "nativeService": "Windows owner-session"
+    },
+    "linux": {
+      "architecture": [
+        "x64",
+        "arm64"
+      ],
+      "runtime": "node",
+      "nativeService": "systemd --user"
+    }
+  },
+  "commonActions": [
+    "package",
+    "verify",
+    "install",
+    "upgrade",
+    "rollback",
+    "status"
+  ],
+  "commonComponents": [
+    "core",
+    "browser-commander",
+    "control-center",
+    "transfer-mesh",
+    "workflow-project-engine",
+    "local-ai-workers",
+    "gui-same-owner",
+    "multi-user-access",
+    "updater-installer"
+  ],
+  "profile": {
+    "technicalIdentityImmutable": true,
+    "ownerDisplayNameEditable": true,
+    "independentAccountTunnel": true,
+    "fullPowerIsNotOsElevation": true
+  },
+  "presentation": {
+    "commonSections": [
+      "Overview",
+      "Profiles",
+      "Permissions",
+      "Operations",
+      "Browser",
+      "Notion",
+      "Add-ons"
+    ],
+    "commonFields": [
+      "Display name",
+      "Profile ID",
+      "Version",
+      "Access",
+      "MCP port"
+    ],
+    "crossOsVisualParityAccepted": false
+  },
+  "releaseAdmission": {
+    "devPackagesQaOnly": true,
+    "nativeOsConsentSeparate": true,
+    "chatgptAccountBindingSeparate": true,
+    "stablePublished": false
+  },
+  "requiredSourceFiles": [
+    "package.json",
+    "install.ps1",
+    "install.sh",
+    "auto-update-windows.ps1",
+    "auto-update-linux.sh",
+    "setup-wizard.ps1",
+    "setup-wizard.sh",
+    "src/server-v0.3.mjs",
+    "src/stable-router.mjs",
+    "src/browser-tools.mjs",
+    "src/workflow-tools.mjs",
+    "src/transfer-tools.mjs",
+    "src/gui-contract.mjs",
+    "src/profile-identity-registry.mjs",
+    "desktop/RemoteCommanderDashboard/Program.cs",
+    "desktop/linux-control-center/dashboard_ui.py",
+    "desktop/profile-display-names.ps1",
+    "desktop/profile-manager-windows.ps1",
+    "installer/RemoteCommander.iss"
+  ],
+  "nativeCandidateRoot": "packaging/unified",
+  "qaTransactionHelper": "tools/universal-install/engine.mjs",
+  "requiredEmbeddedCoreFiles": [
+    "package.json",
+    "config.json",
+    "src/server-v0.3.mjs",
+    "src/stable-router.mjs",
+    "src/browser-tools.mjs",
+    "src/workflow-tools.mjs",
+    "src/transfer-tools.mjs",
+    "src/gui-contract.mjs",
+    "src/profile-identity-registry.mjs"
+  ]
+}

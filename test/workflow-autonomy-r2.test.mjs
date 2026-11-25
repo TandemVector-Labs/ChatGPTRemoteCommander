@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { WorkflowStore } from '../src/workflow-store.mjs';
+import { authorityCompatible, normalizeAuthority } from '../src/workflow-autonomy.mjs';
 import { createWorkflowTools } from '../src/workflow-tools.mjs';
 import { migrateCapabilityConfig, deriveCapabilitySet } from '../src/capability-profile.mjs';
 
@@ -86,6 +87,50 @@ test('C commander update config hash drift resumes when authority is preserved a
     try{const r=s.resume('sample');assert.equal(r.configDrift,true);assert.deepEqual(r.blockers,[]);}finally{s.close();}
     s=new WorkflowStore(options(root,{configSha256:'3'.repeat(64),authority:{profileId:'default',tier:'STANDARD',capabilities:['workflow.durable']}}));
     try{assert.ok(s.resume('sample').blockers.includes('WORKFLOW_AUTHORITY_REGRESSION'));}finally{s.close();}
+  }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('owner tier changes fail closed even when effective capability names stay identical',()=>{
+  for(const [originalTier,currentTier] of [['FULL_POWER','STANDARD'],['STANDARD','FULL_POWER']]){
+    const root=temp();
+    try{
+      const capabilities=['workflow.durable','workflow.scheduler'];
+      let s=new WorkflowStore(options(root,{
+        authority:{profileId:'default',tier:originalTier,capabilities}
+      }));
+      create(s,root);s.close();
+      s=new WorkflowStore(options(root,{
+        configSha256:'4'.repeat(64),
+        authority:{profileId:'default',tier:currentTier,capabilities:[...capabilities]}
+      }));
+      try{
+        const resumed=s.resume('sample');
+        assert.equal(resumed.readyForNextStep,false);
+        assert.ok(resumed.blockers.includes('WORKFLOW_AUTHORITY_TIER_CHANGED'),
+          originalTier+' -> '+currentTier+' must require fresh owner authorization');
+        assert.equal(s.get('sample').state.steps[0].status,'pending');
+      }finally{s.close();}
+    }finally{fs.rmSync(root,{recursive:true,force:true});}
+  }
+});
+
+test('unknown FULL_ACCESS owner tier is never silently coerced to STANDARD during workflow admission',()=>{
+  const capabilities=['workflow.durable'];
+  const valid={profileId:'default',tier:'STANDARD',capabilities};
+  const unsupported={...valid,tier:'FULL_ACCESS'};
+  assert.throws(()=>normalizeAuthority(unsupported),/WORKFLOW_AUTHORITY_TIER_UNSUPPORTED/);
+  assert.deepEqual(authorityCompatible(unsupported,valid),{
+    ok:false,code:'WORKFLOW_AUTHORITY_TIER_UNSUPPORTED',missing:[]
+  });
+  assert.deepEqual(authorityCompatible(valid,unsupported),{
+    ok:false,code:'WORKFLOW_AUTHORITY_TIER_UNSUPPORTED',missing:[]
+  });
+  assert.equal(normalizeAuthority({profileId:'default',capabilities}).tier,'STANDARD',
+    'legacy omitted tier retains explicit STANDARD fallback');
+  const root=temp();
+  try{
+    assert.throws(()=>new WorkflowStore(options(root,{authority:unsupported})),
+      /WORKFLOW_AUTHORITY_TIER_UNSUPPORTED/);
   }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
 
@@ -266,23 +311,49 @@ test('user revision override revises goal/acceptance and stale worker is rejecte
   }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
 
-test('same root-cause failures exceed retry budget and require reassessment',async()=>{
+test('verified NOT_APPLIED outcome cannot release an uncertain external-effect lease without cessation proof',async()=>{
   const root=temp();try{
     const s=new WorkflowStore(options(root));try{
-      s.create({id:'retry',root,goal:'budget',acceptance:['proof'],retryBudget:1,steps:[
+      s.create({id:'retry',root,goal:'no blind replay',acceptance:['proof'],retryBudget:1,steps:[
         {id:'a',title:'A',dependsOn:[]},{id:'b',title:'B',dependsOn:[]}
       ]});
       const failHost=host(async()=>{throw Object.assign(new Error('same'),{workflowCode:'SAME_ROOT'});});
-      await s.call({id:'retry',stepId:'a',expectedRevision:1,tool:'write_text',arguments:{path:'a.txt',content:'a'}},failHost);
-      let st=s.get('retry').state;
-      await s.reconcileAutomatically('retry',{verify:async()=>({status:'NOT_APPLIED',summary:'absent'})});
-      st=s.get('retry').state;
-      await s.call({id:'retry',stepId:'b',expectedRevision:st.revision,tool:'write_text',arguments:{path:'b.txt',content:'b'}},failHost);
-      st=s.get('retry').state;
-      assert.equal(st.scheduler.repeatedFailureCount,2);
-      assert.equal(st.scheduler.lastRootCauseCode,'SAME_ROOT');
-      assert.equal(st.scheduler.lastFailureCode,'BLOCKED_REQUIRES_REASSESSMENT');
-      assert.equal(st.lifecycleState,'BLOCKED');
+      const first=await s.call({id:'retry',stepId:'a',expectedRevision:1,tool:'write_text',arguments:{path:'a.txt',content:'a'}},failHost);
+      assert.equal(first.outcome,'UNCERTAIN');
+      assert.equal(s.get('retry').state.scheduler.repeatedFailureCount,1);
+      const outcome=await s.reconcileAutomatically('retry',{verify:async()=>({status:'NOT_APPLIED',summary:'absent'})});
+      assert.equal(outcome.status,'NOT_APPLIED');
+      const st=s.get('retry').state;
+      await assert.rejects(s.call({id:'retry',stepId:'b',expectedRevision:st.revision,tool:'write_text',arguments:{path:'b.txt',content:'b'}},failHost),
+        /WORKFLOW_ROOT_LEASED/);
+      const after=s.get('retry').state;
+      assert.equal(after.scheduler.repeatedFailureCount,1);
+      assert.equal(after.scheduler.lastRootCauseCode,'SAME_ROOT');
+      assert.equal(after.scheduler.lastFailureCode,'WORKFLOW_REPLAN_REQUIRED');
+      assert.equal(after.lifecycleState,'BLOCKED');
+    }finally{s.close();}
+  }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
+
+
+test('same root-cause failures still exceed retry budget when root leases are disabled',async()=>{
+  const root=temp();try{
+    const opts=options(root);opts.schedulerPolicy.oneWriterPerRoot=false;
+    const s=new WorkflowStore(opts);try{
+      s.create({id:'retry-budget',root,goal:'budget',acceptance:['proof'],retryBudget:1,steps:[
+        {id:'a',title:'A',dependsOn:[]},{id:'b',title:'B',dependsOn:[]}
+      ]});
+      const failHost=host(async()=>{throw Object.assign(new Error('same'),{workflowCode:'SAME_ROOT'});});
+      const first=await s.call({id:'retry-budget',stepId:'a',expectedRevision:1,tool:'write_text',arguments:{path:'a.txt',content:'a'}},failHost);
+      assert.equal(first.outcome,'UNCERTAIN');
+      await s.reconcileAutomatically('retry-budget',{verify:async()=>({status:'NOT_APPLIED',summary:'absent'})});
+      const st=s.get('retry-budget').state;
+      await s.call({id:'retry-budget',stepId:'b',expectedRevision:st.revision,tool:'write_text',arguments:{path:'b.txt',content:'b'}},failHost);
+      const after=s.get('retry-budget').state;
+      assert.equal(after.scheduler.repeatedFailureCount,2);
+      assert.equal(after.scheduler.lastRootCauseCode,'SAME_ROOT');
+      assert.equal(after.scheduler.lastFailureCode,'BLOCKED_REQUIRES_REASSESSMENT');
+      assert.equal(after.lifecycleState,'BLOCKED');
     }finally{s.close();}
   }finally{fs.rmSync(root,{recursive:true,force:true});}
 });

@@ -21,7 +21,7 @@ function readinessFunctions(){
   return source.slice(start,end);
 }
 
-function runScenario({ready='not-ready',health='live',metric='fresh',age=10}={}){
+function runScenario({ready='not-ready',health='live',metric='fresh',age=10,profile='fixture',targetPort=47831,privateTargets=''}={}){
   const bash=bashPath();
   if(!bash)return {skip:true};
   const id='tmp-tunnel-ready-'+process.pid+'-'+Math.random().toString(16).slice(2);
@@ -30,13 +30,13 @@ function runScenario({ready='not-ready',health='live',metric='fresh',age=10}={})
   const profiles=path.join(dir,'profiles');
   fs.mkdirSync(bin,{recursive:true});
   fs.mkdirSync(profiles,{recursive:true});
-  fs.writeFileSync(path.join(profiles,'fixture.yaml'),[
+  fs.writeFileSync(path.join(profiles,profile+'.yaml'),[
     'health:',
     '  listen_addr: 127.0.0.1:47991',
     'mcp:',
     '  server_urls:',
     '    - channel: main',
-    '      url: http://127.0.0.1:47831/mcp'
+    '      url: http://127.0.0.1:'+targetPort+'/mcp'
   ].join('\n')+'\n');
   const fakeCurl=path.join(bin,'curl');
   fs.writeFileSync(fakeCurl,`#!/usr/bin/env bash
@@ -68,7 +68,7 @@ esac
   ].join('\n');
   const result=spawnSync(bash,['-lc',script],{
     cwd:root,encoding:'utf8',
-    env:{...process.env,FAKE_READY:ready,FAKE_HEALTH:health,FAKE_METRIC:metric,FAKE_AGE:String(age)}
+    env:{...process.env,FAKE_READY:ready,FAKE_HEALTH:health,FAKE_METRIC:metric,FAKE_AGE:String(age),REMOTE_COMMANDER_TUNNEL_PRIVATE_TARGETS:privateTargets}
   });
   fs.rmSync(dir,{recursive:true,force:true});
   return result;
@@ -113,4 +113,23 @@ test('Linux updater tunnel fallback is fail-closed and precedes cutover commit',
   assert.match(source,/\[\[ "\$live" == live \]\]/);
   const cutover=source.lastIndexOf('CUTOVER_COMMITTED=1');
   assert.ok(source.indexOf('tunnels_ready',cutover)<cutover);
+});
+
+test('Linux updater accepts explicitly allowed private backend',t=>{
+  if(!bashPath()){t.skip('bash unavailable');return;}
+  const r=runScenario({ready:'ready',profile:'emad-mmz',targetPort:47921,
+    privateTargets:'emad-mmz:47921,saeid-mmz:47922'});
+  assert.equal(r.status,0,r.stderr||r.stdout);
+});
+test('Linux updater denies non-live allowlisted private tunnel',t=>{
+  if(!bashPath()){t.skip('bash unavailable');return;}
+  const r=runScenario({ready:'not-ready',health:'dead',profile:'saeid-mmz',targetPort:47922,
+    privateTargets:'emad-mmz:47921,saeid-mmz:47922'});
+  assert.notEqual(r.status,0);
+});
+test('Linux updater denies wrong private target despite readyz',t=>{
+  if(!bashPath()){t.skip('bash unavailable');return;}
+  const r=runScenario({ready:'ready',profile:'emad-mmz',targetPort:47922,
+    privateTargets:'emad-mmz:47921,saeid-mmz:47922'});
+  assert.notEqual(r.status,0);
 });

@@ -2,24 +2,40 @@ name: Release Sync
 
 on:
   push:
-    branches: [main]
+    branches: [main, integration/v012-unsigned-approval-20261110]
     tags: ['v*']
   pull_request:
     paths:
       - '.github/workflows/release-sync.yml'
       - 'package.json'
       - 'package-lock.json'
+      - 'docs/release-train-0.11.json'
+      - 'docs/release-train-0.12.json'
+      - 'tools/verify-v012-publish-readiness.mjs'
+      - 'test/release-sync-posttag-guard.test.mjs'
       - 'installer/**'
+      - 'setup-wizard.sh'
+      - 'install.sh'
+      - 'tools/build-linux-single-file.sh'
+      - 'tools/installer-product-plan.mjs'
+      - 'test/installer-product-plan.test.mjs'
+      - 'test/linux-single-file-installer.test.mjs'
       - 'scripts/fetch-browser-setup.ps1'
       - 'scripts/install-inno-setup.ps1'
       - 'desktop/**'
       - 'install.ps1'
+      - 'auto-update-windows.ps1'
+      - 'tools/windows-job-runner/**'
+      - 'test/workflow-http.test.mjs'
+      - 'test/single-installer-contract.test.mjs'
+      - 'test/auto-update-contract.test.mjs'
+      - '.github/workflows/ci.yml'
       - 'server-install-windows.ps1'
       - 'test/release-assets-contract.test.mjs'
       - 'test/unsigned-windows-release-policy.test.mjs'
       - 'tools/verify-windows-release-policy.mjs'
       - 'docs/UNSIGNED_WINDOWS_RELEASE_POLICY.*'
-      - 'docs/RELEASE_0.10.23.md'
+      - 'docs/RELEASE_0.10.24.md'
 
 permissions:
   contents: read
@@ -36,7 +52,9 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: |
+            8.0.427
+            10.0.x
       - name: Test exact-version unsigned release policy
         shell: pwsh
         run: node --test test/unsigned-windows-release-policy.test.mjs
@@ -58,12 +76,24 @@ jobs:
           $version = node -p "require('./package.json').version"
           $commit=(git rev-parse HEAD).Trim()
           $sourceRef=if('${{ github.event_name }}' -eq 'pull_request'){'${{ github.head_ref }}'}else{'${{ github.ref_name }}'}
+          if($sourceRef -notmatch '^[A-Za-z0-9._/-]{1,128}$'){throw 'CORE_BUNDLE_SOURCE_REF_INVALID'}
+          $bundle=Join-Path $env:RUNNER_TEMP 'remote-commander-core.bundle'
+          $bundleRef='refs/heads/'+$sourceRef
+          git check-ref-format $bundleRef
+          if($LASTEXITCODE -ne 0){throw 'CORE_BUNDLE_REF_FORMAT_INVALID'}
+          git update-ref $bundleRef $commit
+          if($LASTEXITCODE -ne 0){throw 'CORE_BUNDLE_REF_CREATE_FAILED'}
+          git bundle create $bundle $bundleRef
+          if($LASTEXITCODE -ne 0){throw 'CORE_BUNDLE_CREATE_FAILED'}
+          git bundle verify $bundle
+          if($LASTEXITCODE -ne 0){throw 'CORE_BUNDLE_VERIFY_FAILED'}
           $browser=Join-Path $env:RUNNER_TEMP 'Remote-Commander-Browser-Setup-v0.8.1.exe'
           pwsh.exe -NoLogo -NoProfile -File .\installer\build-setup.ps1 `
             -VersionOverride $version `
             -SourceRef $sourceRef `
             -ExpectedCommit $commit `
-            -BrowserInstaller $browser
+            -BrowserInstaller $browser `
+            -SourceBundle $bundle
       - name: Record final setup Authenticode verification
         id: verify_installer_signature
         shell: pwsh
@@ -77,14 +107,116 @@ jobs:
           "signed=$(([string]$valid).ToLowerInvariant())" >> $env:GITHUB_OUTPUT
           Write-Output ("FINAL_SETUP_AUTHENTICODE_STATUS=" + $signature.Status)
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: github.event_name != 'pull_request'
         with:
           name: remote-commander-windows-setup
           path: dist/installer/Remote-Commander-Setup-v*.exe
           if-no-files-found: error
+          retention-days: 7
+
+  build-linux-bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+      - name: Verify product catalog and self-extracting Linux installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n setup-wizard.sh tools/build-linux-single-file.sh
+          node --test test/installer-product-plan.test.mjs test/linux-single-file-installer.test.mjs
+      - name: Build verified Linux single-file bootstrap for QA
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tools/build-linux-single-file.sh dist/installer/Remote-Commander-Linux-Setup.run
+          bash dist/installer/Remote-Commander-Linux-Setup.run --plan-only --all |
+            grep -F 'changesApplied=false'
+          sha256sum dist/installer/Remote-Commander-Linux-Setup.run |
+            tee dist/installer/Remote-Commander-Linux-Setup.run.sha256
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: remote-commander-linux-onefile-QA
+          path: |
+            dist/installer/Remote-Commander-Linux-Setup.run
+            dist/installer/Remote-Commander-Linux-Setup.run.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  qa-provenance:
+    # Sign ONLY development QA artifacts built by this same trusted
+    # integration-branch push run, never arbitrary PR code or a public release.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/integration/v012-unsigned-approval-20261110'
+    needs: [build-windows-setup, build-linux-bootstrap]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: remote-commander-windows-setup
+          path: dist/qa-provenance/windows
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: remote-commander-linux-onefile-QA
+          path: dist/qa-provenance/linux
+      - name: Pin same-run QA artifacts and check Linux payload integrity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          version="$(node -p "require('./package.json').version")"
+          train_version="$(node -p "require('./docs/release-train-0.12.json').sourceVersion")"
+          test "$version" = "$train_version"
+          [[ "$version" =~ ^0\.12\.0-dev\.[1-9][0-9]*$ ]]
+          node tools/isolated-qa-policy.mjs > /dev/null
+          win="dist/qa-provenance/windows/Remote-Commander-Setup-v$version.exe"
+          linux="dist/qa-provenance/linux/Remote-Commander-Linux-Setup.run"
+          test -s "$win" && test -s "$linux" && test -s "$linux.sha256"
+          expected="$(awk 'NR==1{print $1}' "$linux.sha256")"
+          [[ "$expected" =~ ^[0-9a-f]{64}$ ]]
+          actual="$(sha256sum "$linux" | cut -d' ' -f1)"
+          test "$expected" = "$actual"
+          test "$(find dist/qa-provenance -type f | wc -l)" -eq 3
+          echo "V012_QA_ARTIFACTS_READY_NO_PROMOTE sha=$GITHUB_SHA"
+      - name: Attest exact immutable QA artifact bytes (not stable publication)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # official v4
+        with:
+          subject-path: 'dist/qa-provenance/*/*'
+          create-storage-record: false
+      - name: Verify attestation repository, signer workflow and exact commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          for subject in "dist/qa-provenance/windows/Remote-Commander-Setup-v$version.exe" \
+                         "dist/qa-provenance/linux/Remote-Commander-Linux-Setup.run"; do
+            gh attestation verify "$subject" --repo "$GH_REPO" \
+              --source-ref "$GITHUB_REF" --source-digest "$GITHUB_SHA" \
+              --signer-workflow "$GH_REPO/.github/workflows/release-sync.yml" >/dev/null
+          done
+          echo "V012_QA_GITHUB_ATTESTATION_VERIFIED_NO_PROMOTE sha=$GITHUB_SHA"
 
   publish:
-    if: github.event_name != 'pull_request'
-    needs: build-windows-setup
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [build-windows-setup, build-linux-bootstrap]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -117,7 +249,36 @@ jobs:
             LC_ALL=C sort -k2 -o SHA256SUMS.txt SHA256SUMS.txt
             sha256sum -c SHA256SUMS.txt
           )
-      - name: Validate matching annotated tag and exact 20-asset manifest
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: remote-commander-linux-onefile-QA
+          path: dist/linux-onefile
+      - name: Add verified Linux single-file setup for v0.10.26+
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          # Never change the fixed v0.10.25 release-manifest contract.
+          if ! node -e "const a=process.argv[1].split('.').map(Number);process.exit(a[0]>0||a[1]>10||a[1]===10&&a[2]>=26?0:1)" "$version"; then
+            echo "LINUX_ONEFILE_LEGACY_SKIP version=$version"
+            exit 0
+          fi
+          src='dist/linux-onefile/Remote-Commander-Linux-Setup.run'
+          manifest="$src.sha256"
+          test -s "$src" && test -s "$manifest"
+          expected="$(awk 'NR==1{print $1}' "$manifest")"
+          [[ "$expected" =~ ^[0-9a-fA-F]{64}$ ]]
+          actual="$(sha256sum "$src" | cut -d' ' -f1)"
+          test "$actual" = "$expected"
+          cp "$src" 'dist/release/Remote-Commander-Linux-Setup.run'
+          (
+            cd dist/release
+            sha256sum Remote-Commander-Linux-Setup.run >> SHA256SUMS.txt
+            LC_ALL=C sort -k2 -o SHA256SUMS.txt SHA256SUMS.txt
+            sha256sum -c SHA256SUMS.txt
+          )
+          echo "LINUX_ONEFILE_RELEASE_ASSET_VERIFIED sha256=$actual version=$version"
+      - name: Validate matching annotated tag and versioned 20/21-asset manifest
         id: release_identity
         shell: bash
         run: |
@@ -130,11 +291,28 @@ jobs:
             exit 0
           fi
           test "$(git cat-file -t "refs/tags/$tag")" = "tag"
-          test "$(git rev-parse "refs/tags/$tag^{commit}")" = "$(git rev-parse HEAD)"
+          tagged_commit="$(git rev-parse "refs/tags/$tag^{commit}")"
+          checked_out_commit="$(git rev-parse HEAD)"
+          if [ "$tagged_commit" != "$checked_out_commit" ]; then
+            if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF" = "refs/heads/main" ]; then
+              # A published annotated tag remains immutable while main advances.
+              # Later main commits must not try to republish this older tag.
+              echo "R171_POSTTAG_MAIN_SKIP tag=$tag tagged=$tagged_commit head=$checked_out_commit"
+              echo "accepted=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::R171_TAG_SOURCE_MISMATCH tag=$tag tagged=$tagged_commit head=$checked_out_commit"
+            exit 1
+          fi
+          if [[ "$version" == 0.12.* ]]; then
+            node tools/verify-v012-publish-readiness.mjs "$version" "$tag"
+          fi
           test -f "docs/RELEASE_$version.md"
           (cd dist/release && sha256sum -c SHA256SUMS.txt)
           count="$(find dist/release -mindepth 1 -maxdepth 1 -type f | wc -l)"
-          test "$count" -eq 20
+          expected_count=20
+          if node -e "const a=process.argv[1].split('.').map(Number);process.exit(a[0]>0||a[1]>10||a[1]===10&&a[2]>=26?0:1)" "$version"; then expected_count=21; fi
+          test "$count" -eq "$expected_count"
           echo "R171_IMMUTABLE_TAG_AND_ASSETS_PREATTEST_PASS tag=$tag"
           echo "accepted=true" >> "$GITHUB_OUTPUT"
 
@@ -187,6 +365,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          SETUP_SIGNED: ${{ needs.build-windows-setup.outputs.installer_signed }}
         shell: bash
         run: |
           set -euo pipefail
@@ -204,16 +383,28 @@ jobs:
           test -f "$notes"
           (cd dist/release && sha256sum -c SHA256SUMS.txt)
           mapfile -t assets < <(find dist/release -maxdepth 1 -type f -printf '%p\n' | LC_ALL=C sort)
-          test "${#assets[@]}" -eq 20
+          expected_count=20
+          if node -e "const a=process.argv[1].split('.').map(Number);process.exit(a[0]>0||a[1]>10||a[1]===10&&a[2]>=26?0:1)" "$version"; then expected_count=21; fi
+          test "${#assets[@]}" -eq "$expected_count"
           # R499: an attested asset bundle is NOT fleet owner acceptance.
           # Publish only as an editable GitHub Draft; latest stable and auto-update
           # continue to resolve the immutable v0.10.20 baseline until an owner-
           # accepted serial rollout / rollback / offline-host reconciliation.
           # Draft assets are uploaded atomically at creation, before immutability.
+          title="Remote Commander $tag"
+          if [ "$version" = "0.10.26" ]; then
+            title="TandemVector Labs | Remote Commander Core $tag"
+            if [ "$SETUP_SIGNED" = "false" ]; then
+              title="$title | UNSIGNED Preview"
+            fi
+          fi
+          if [[ "$version" == 0.12.* ]]; then
+            node tools/verify-v012-publish-readiness.mjs "$version" "$tag"
+          fi
           gh release create "$tag" "${assets[@]}" \
             --repo "$GH_REPO" \
             --verify-tag \
-            --title "Remote Commander $tag" \
+            --title "$title" \
             --notes-file "$notes" \
             --draft
           echo "RELEASE_SYNC_DRAFT_STAGED tag=$tag assets=${#assets[@]} ownerAcceptance=pending"

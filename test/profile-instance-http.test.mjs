@@ -9,13 +9,14 @@ import { once } from 'node:events';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { buildProfileInstance } from '../src/profile-instances.mjs';
+import { requireNonElevatedLegacyHttp } from './fixtures/legacy-http-token-admission.mjs';
 
 const repo=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
 async function freePort(){const s=net.createServer();await new Promise((r,j)=>s.listen(0,'127.0.0.1',r).once('error',j));const p=s.address().port;await new Promise(r=>s.close(r));return p;}
 function shaIf(file){try{return createHash('sha256').update(fs.readFileSync(file)).digest('hex');}catch(e){if(e.code==='ENOENT')return null;throw e;}}
 
-test('isolated profile server owns separate marker, private memory and conservative catalog',async()=>{
+test('isolated profile server owns separate marker, private memory and conservative catalog',async t=>{
  const temp=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'rc-profile-http-')));
  const project=path.join(temp,'project'),state=path.join(temp,'private-state');fs.mkdirSync(project);fs.mkdirSync(state);
  const p=await freePort();
@@ -35,6 +36,10 @@ test('isolated profile server owns separate marker, private memory and conservat
    await pause(50);
   }
   assert.ok(health,`isolated server did not become healthy within 30000ms; output=${output}`);assert.equal(health.instance.profile,'fixture-account');assert.equal(health.instance.isolated,true);
+  if(!(await requireNonElevatedLegacyHttp(t,p))){
+    assert.equal(shaIf(liveMarker),before,'isolated quarantine must preserve primary marker');
+    return;
+  }
   const rpc=async(name,args={})=>{const r=await fetch('http://127.0.0.1:'+p+'/mcp',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name,arguments:args}})});return r.json();};
   const status=await rpc('system_status');assert.equal(status.result.isError,false);const s=status.result.structuredContent;
   assert.equal(s.instance.profile,'fixture-account');assert.equal(s.powerMode.enabled,false);assert.equal(s.durableWorkflows.enabled,true);assert.deepEqual(s.allowedPrograms,[]);

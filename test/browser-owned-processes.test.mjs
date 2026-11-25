@@ -8,7 +8,8 @@ import {
  browserProfileArgument,
  argvHasExactArgument,
  commandLineHasExactArgument,
- terminateProcessesUsingBrowserProfile
+ terminateProcessesUsingBrowserProfile,
+ waitForBrowserDevToolsPort
 } from '../src/browser-owned-processes.mjs';
 
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -45,4 +46,34 @@ test('terminating one owned profile never terminates a prefix-sibling process',a
    await Promise.race([once(child,'close'),sleep(500)]).catch(()=>{});
   }
  }
+});
+
+test('DevTools handoff tolerates early parent exit only if the owned port file becomes ready',async()=>{
+ const { mkdtemp, writeFile, rm }=await import('node:fs/promises');
+ const root=await mkdtemp(path.join(os.tmpdir(),'rc-browser-handoff-'));
+ const file=path.join(root,'DevToolsActivePort');
+ try{
+  const parent={exitCode:0};
+  const pending=waitForBrowserDevToolsPort(file,parent,{waitMs:1400,exitGraceMs:900,pollMs:10});
+  await sleep(90);
+  await writeFile(file,'2439\n/devtools/browser/test-owned\n','utf8');
+  assert.equal(await pending,2439);
+ }finally{await rm(root,{recursive:true,force:true});}
+});
+
+test('DevTools handoff never accepts malformed port, and dead launcher fails within grace',async()=>{
+ const { mkdtemp, writeFile, rm }=await import('node:fs/promises');
+ const root=await mkdtemp(path.join(os.tmpdir(),'rc-browser-no-port-'));
+ const file=path.join(root,'DevToolsActivePort');
+ try{
+  await writeFile(file,'bad-port\n','utf8');
+  await assert.rejects(
+   waitForBrowserDevToolsPort(file,{exitCode:0},{waitMs:300,exitGraceMs:70,pollMs:10}),
+   /BROWSER_LAUNCH_FAILED/
+  );
+  await assert.rejects(
+   waitForBrowserDevToolsPort(file,{exitCode:null},{waitMs:65,exitGraceMs:30,pollMs:10}),
+   /BROWSER_DEVTOOLS_TIMEOUT/
+  );
+ }finally{await rm(root,{recursive:true,force:true});}
 });

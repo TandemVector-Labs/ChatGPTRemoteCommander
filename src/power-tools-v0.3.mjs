@@ -1,5 +1,7 @@
 import os from 'node:os';
+import {boundedCommandTimeout} from './command-timeout-limits.mjs';
 import { synchronousCommandInput } from './retry-guard.mjs';
+import { effectivePowerMode } from './effective-power-mode.mjs';
 import { assertNoCodexCommand, assertNoCodexShellDelegation, codexLaunchAuthorized, commanderChildEnv } from './no-codex-policy.mjs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -14,6 +16,7 @@ import { guardFileWrite } from './file-write-guard.mjs';
 import { IS_WINDOWS, defaultBackupRoot, expandPathValue, shellName, shellSpec, spawnShell, terminateProcessTree } from './platform.mjs';
 import { assertEnumerationScope, boundedSearchVisitLimit } from './filesystem-enumeration-guard.mjs';
 import { refreshCodexPluginCache } from './codex-maintenance.mjs';
+import { runContainedProjectCommand } from './process-containment.mjs';
 
 const terminals = new Map();
 let terminalCounter = 1;
@@ -26,8 +29,9 @@ function expandEnv(value) {
 }
 
 function power(ctx) {
-  if (ctx.config.powerMode?.enabled !== true) throw new Error('Power Mode is disabled');
-  return ctx.config.powerMode;
+  const scope = effectivePowerMode(ctx.config, { accessStatus: ctx.accessStatus });
+  if (scope.enabled !== true) throw new Error('Power Mode is disabled');
+  return scope;
 }
 
 function lexicalTarget(ctx, userPath, base = ctx.roots[0]) {
@@ -242,14 +246,28 @@ function checkShell(ctx, command) {
   }
   return command;
 }
-async function capture(command, cwd, timeoutMs, outputLimit, { allowCodex = false } = {}) {
-  const child = spawnShell(command, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: commanderChildEnv(cwd, process.env, { allowCodex }) });
+async function capture(command, cwd, timeoutMs, outputLimit, {
+  allowCodex = false, workflowOperation = null, file = null, args = null
+} = {}) {
+  const env = commanderChildEnv(cwd, process.env, { allowCodex });
+  if (workflowOperation) {
+    if (!file || !Array.isArray(args)) throw Object.assign(new Error('PROCESS_CONTAINMENT_COMMAND_SPEC_REQUIRED'), {
+      workflowCode:'PROCESS_CONTAINMENT_COMMAND_SPEC_REQUIRED'
+    });
+    return runContainedProjectCommand({
+      program:file, args, cwd, timeoutMs, outputLimit, env, binding:workflowOperation
+    });
+  }
+  const child = spawnShell(command, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env });
   let stdout = '';
   let stderr = '';
   let timedOut = false;
   child.stdout.on('data', (chunk) => { if (stdout.length < outputLimit) stdout += chunk.toString('utf8'); });
   child.stderr.on('data', (chunk) => { if (stderr.length < outputLimit) stderr += chunk.toString('utf8'); });
-  const timer = setTimeout(() => { timedOut = true; terminateProcessTree(child.pid, { signal: 'SIGKILL' }); }, timeoutMs);
+  const timer = setTimeout(() => {
+    timedOut = true;
+    terminateProcessTree(child.pid, { signal: 'SIGKILL' });
+  }, timeoutMs);
   const outcome = await new Promise((resolve, reject) => {
     child.once('error', reject);
     child.once('close', (code, signal) => resolve({ code, signal }));
@@ -570,7 +588,7 @@ export async function prepareShellCommand(ctx, input) {
   const info = await stat(cwd);
   if (!info.isDirectory()) throw new Error('cwd is not a directory');
   const cfg = power(ctx);
-  const timeoutMs = Math.max(1000, Math.min(Number(input.timeoutMs ?? cfg.maxCommandMs ?? 300000), Number(cfg.maxCommandMs ?? 300000)));
+  const timeoutMs = boundedCommandTimeout(input.timeoutMs, cfg.maxCommandMs ?? 300000);
   const outputLimit = Math.max(4096, Math.min(Number(cfg.maxOutputBytes ?? 1048576), 8388608));
   const spec = shellSpec(command);
   return { file: spec.file, args: spec.args, cwd, timeoutMs, outputLimit, allowCodex };
@@ -579,7 +597,7 @@ export async function runShell(ctx, input) {
   const guarded = synchronousCommandInput(input);
   const prepared = await prepareShellCommand(ctx, guarded);
   const outputLimit = Math.min(prepared.outputLimit, 32 * 1024);
-  const result = await capture(input.command, prepared.cwd, prepared.timeoutMs, outputLimit, { allowCodex: prepared.allowCodex });
+  const result = await capture(input.command, prepared.cwd, prepared.timeoutMs, outputLimit, { allowCodex: prepared.allowCodex, workflowOperation: Number.isSafeInteger(ctx.workflowOperation?.fencingToken) ? ctx.workflowOperation : null, file: prepared.file, args: prepared.args });
   return { command: input.command, cwd: prepared.cwd, timeoutMs: prepared.timeoutMs, ...result };
 }
 
@@ -835,7 +853,7 @@ export const powerToolDefinitions = [
   { name: 'list_processes', description: 'List operating-system processes with PID and resource details when available.', inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: ro },
   { name: 'kill_process', description: 'Terminate a process by PID; protected/system PIDs and this server are refused.', inputSchema: { type: 'object', properties: { pid: { type: 'integer' }, signal: { type: 'string' } }, required: ['pid'], additionalProperties: false }, annotations: localDestructive },
   { name: 'start_terminal', description: 'Start a platform terminal session and return immediately. With command and no interactive=true it is a one-shot background fallback for long or high-output work when operation_* tools are unavailable; retrieve output using bounded read_terminal pages. Use interactive=true only when later send_terminal input is genuinely required. With no command it remains interactive.', inputSchema: { type: 'object', properties: { cwd: { type: 'string' }, command: { type: 'string' }, interactive: { type: 'boolean' } }, additionalProperties: false }, annotations: openDestructive },
-  { name: 'read_terminal', description: 'Read a bounded page of buffered terminal stdout/stderr. Default is 32 KiB per stream; maxChars is capped at 64 KiB. Optional waitMs long-polls for new output for at most 5 seconds. Use nextStdoutOffset/nextStderrOffset for absolute paging without skipping unread output.', inputSchema: { type: 'object', properties: { id: { type: 'string' }, consume: { type: 'boolean' }, stdoutOffset: { type: 'integer', minimum: 0 }, stderrOffset: { type: 'integer', minimum: 0 }, maxChars: { type: 'integer', minimum: 1, maximum: 65536 }, waitMs: { type: 'integer', minimum: 0, maximum: 5000 } }, required: ['id'], additionalProperties: false }, annotations: ro },
+  { name: 'read_terminal', description: 'Read a bounded page of buffered terminal stdout/stderr. By default consume=true advances session output cursors; use consume=false for a non-consuming observation. Default is 32 KiB per stream; maxChars is capped at 64 KiB. Optional waitMs long-polls for new output for at most 5 seconds. Use nextStdoutOffset/nextStderrOffset for absolute paging without skipping unread output.', inputSchema: { type: 'object', properties: { id: { type: 'string' }, consume: { type: 'boolean' }, stdoutOffset: { type: 'integer', minimum: 0 }, stderrOffset: { type: 'integer', minimum: 0 }, maxChars: { type: 'integer', minimum: 1, maximum: 65536 }, waitMs: { type: 'integer', minimum: 0, maximum: 5000 } }, required: ['id'], additionalProperties: false }, annotations: { ...ro, readOnlyHint: false } },
   { name: 'send_terminal', description: 'Send input to an explicitly interactive terminal session. One-shot command sessions reject input.', inputSchema: { type: 'object', properties: { id: { type: 'string' }, input: { type: 'string' }, newline: { type: 'boolean' } }, required: ['id', 'input'], additionalProperties: false }, annotations: openDestructive },
   { name: 'stop_terminal', description: 'Stop and optionally remove a persistent terminal session.', inputSchema: { type: 'object', properties: { id: { type: 'string' }, signal: { type: 'string' }, remove: { type: 'boolean' } }, required: ['id'], additionalProperties: false }, annotations: localDestructive }
 ];
@@ -863,7 +881,7 @@ export async function prepareDeferredPowerMutation(ctx, name, input) {
   throw new Error('unsupported deferred power mutation');
 }
 
-export async function executePowerTool(ctx, name, input) {
+async function executePowerToolLocal(ctx, name, input) {
   switch (name) {
     case 'power_status': return powerStatus(ctx);
     case 'file_info': return fileInfo(ctx, input);
@@ -885,4 +903,32 @@ export async function executePowerTool(ctx, name, input) {
     case 'stop_terminal': return stopTerminal(ctx, input);
     default: throw Object.assign(new Error(`Unknown tool: ${name}`), { rpcCode: -32602 });
   }
+}
+
+const V102_PROTECTED_POWER_EFFECTS = new Set([
+  'write_file', 'create_directory', 'copy_path', 'move_path', 'delete_path',
+  'run_shell', 'kill_process', 'start_terminal', 'send_terminal',
+  'stop_terminal', 'codex_plugin_refresh'
+]);
+
+// The trusted Host injects executionAccess.run after verifying the
+// originating caller/owner and exact action. No provider means no mutation.
+// Preserve the legacy interface for profiles not enrolled in this policy.
+export async function executePowerTool(ctx, name, input) {
+  if (ctx?.config?.executionAccess?.required !== true
+      || !V102_PROTECTED_POWER_EFFECTS.has(name)) {
+    return executePowerToolLocal(ctx, name, input);
+  }
+  if (typeof ctx?.executionAccess?.run !== 'function') {
+    throw Object.assign(new Error('V102_EXECUTION_ACCESS_REQUIRED'),
+      { code: 'V102_EXECUTION_ACCESS_REQUIRED' });
+  }
+  const outcome = await ctx.executionAccess.run({ tool: name, args: input },
+    () => executePowerToolLocal(ctx, name, input));
+  if (!outcome || typeof outcome !== 'object'
+      || !Object.hasOwn(outcome, 'result') || !outcome.authorization) {
+    throw Object.assign(new Error('V102_EXECUTION_RECEIPT_REQUIRED'),
+      { code: 'V102_EXECUTION_RECEIPT_REQUIRED' });
+  }
+  return outcome.result;
 }

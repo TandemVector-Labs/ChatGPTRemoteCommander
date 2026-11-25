@@ -12,7 +12,11 @@ const mutation={readOnlyHint:false,destructiveHint:true,openWorldHint:true,idemp
 const profile=str(32,{pattern:'^[a-z][a-z0-9_-]{0,31}$'});
 const selector=str(512);
 const defs=[
+ ['browser_chat_tabs','Read privacy-minimized ChatGPT tab presence from the Commander-owned Chromium browser core. No extension, Native Messaging, DOM text, account attestation or user-browser profile is involved.',object(lease,['lease']),ro],
+ ['browser_chat_tab_open','Open a lease-scoped ChatGPT tab in the Commander-owned browser only, maximum 16.',object({...lease,url:str(2048)},['lease','url']),open],
+ ['browser_chat_tab_close','Close a Commander-owned tab by opaque handle.',object({...lease,tabRef:str(32,{pattern:'^[a-f0-9]{32}$'})},['lease','tabRef']),mutation],
  ['browser_status','Report zero-interference background-browser readiness. This never opens a page, touches the user desktop, reads cookies, or accesses the browser password store.',object(),ro],
+ ['browser_owner_route_plan','Find same-owner browser windows and profile counts for a requested website without exposing tab text or secrets. Return an exact verified owner route only when a trusted native broker attests consent and signed-in identity; never implicitly open Chromium.',object({targetUrl:str(2048)},['targetUrl']),ro],
  ['browser_session_begin','Start one owned headless browser session using a Commander-only profile. Persistent mode preserves that owned profile cookies/local storage between sessions; it never reuses or unlocks the user browser profile/password store.',object({ttlSeconds:int(30,1800),profile,mode:choice('persistent','isolated')},[]),coordination],
  ['browser_session_renew','Renew the owned background-browser lease.',object({...lease,ttlSeconds:int(30,1800)},['lease']),coordination],
  ['browser_session_end','Close the owned background browser and release the lease. Persistent Commander profile state remains on disk.',object(lease,['lease']),coordination],
@@ -21,6 +25,8 @@ const defs=[
  ['browser_screenshot','Capture the owned background page as an MCP image. This does not capture the user desktop.',object({...lease,format:choice('jpeg','png'),quality:int(25,90),maxBytes:int(262144,4194304)},['lease']),ro],
  ['browser_fill','Fill one CSS-selected input/textarea/select in the owned background page and dispatch input/change events. The submitted value is never echoed in the tool result.',object({...lease,selector,text:{type:'string',minLength:0,maxLength:4096}},['lease','selector','text']),mutation],
  ['browser_click','Click one CSS-selected element in the owned background page. A click can submit forms or trigger external side effects; verify afterward with browser_snapshot.',object({...lease,selector},['lease','selector']),mutation],
+ ['browser_upload_file','Attach one SHA-256-verified file already staged inside the Commander-owned browser profile to one file input. V1-01 verified owner grant required; never accepts absolute paths or user browser profiles.',object({...lease,selector,filename:str(128),expectedSha256:str(64,{pattern:'^[a-f0-9]{64}$'}),grantRef:str(128)},['lease','selector','filename','expectedSha256','grantRef']),mutation],
+ ['browser_download_file','Download an explicit same-origin A[download] link to the Commander-owned profile with bounded bytes and SHA-256 result. V1-01 verified owner grant required.',object({...lease,selector,filename:str(128),maxBytes:int(1,4194304),grantRef:str(128)},['lease','selector','filename','grantRef']),mutation],
  ['browser_wait','Wait for a bounded condition in the owned background page.',object({...lease,selector,textIncludes:str(1024),urlIncludes:str(1024),timeoutMs:int(100,30000)},['lease']),ro],
  ['browser_foreground_requirement','Record that background automation reached a step requiring explicit current-task foreground approval, such as saved user-browser credentials, MFA, WebAuthn, CAPTCHA or a site that blocks headless/background operation. This tool does NOT take over the desktop.',object({...lease,reason:choice('saved-browser-credential','mfa','webauthn','captcha','site-blocked-background','other'),targetHost:str(253),detail:str(500)},['lease','reason']),coordination],
  ['browser_foreground_begin','After explicit current-task approval, relaunch the SAME Commander-owned browser profile as a visible browser so the minimum required foreground step can be completed. This may steal focus and therefore always requires explicitUserAuthorization.',object({...lease,explicitUserAuthorization:str(500)},['lease','explicitUserAuthorization']),coordination],
@@ -42,6 +48,14 @@ export function validateBrowserInput(name,input){
  const errors=validateJsonSchema(input,rule.inputSchema);
  if(errors.length)throw browserError('BROWSER_INVALID_ARGUMENTS');
  if(name==='browser_navigate'&&!validUrl(input.url))throw browserError('BROWSER_URL_NOT_ALLOWED');
+ if(name==='browser_owner_route_plan'&&!validUrl(input.targetUrl))throw browserError('BROWSER_URL_NOT_ALLOWED');
+ if(name==='browser_chat_tab_open'){
+   let u;try{u=new URL(input.url);}catch{throw browserError('BROWSER_CHAT_URL_NOT_ALLOWED');}
+   if(u.protocol!=='https:'||!['chatgpt.com','chat.openai.com'].includes(u.hostname)||
+      u.username||u.password||u.port||u.search||u.hash||
+      !(u.pathname==='/'||/^\/(?:g\/[^/?#]{1,120}\/)?c\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/?$/i.test(u.pathname)))
+     throw browserError('BROWSER_CHAT_URL_NOT_ALLOWED');
+ }
  if(name==='browser_wait'){
    const count=Number(input.selector!==undefined)+Number(input.textIncludes!==undefined)+Number(input.urlIncludes!==undefined);
    if(count!==1)throw browserError('BROWSER_WAIT_EXACTLY_ONE_CONDITION');

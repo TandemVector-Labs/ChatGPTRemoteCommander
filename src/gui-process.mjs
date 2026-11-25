@@ -27,6 +27,26 @@ function parseGuiResult(bytes) {
         value.effect === 'NOT_APPLIED' && value.phase === 'PRE_DISPATCH_GUARD') {
       failure.guiNotApplied = true;
     }
+    // GNOME coordinate rejection before MutterInput is deterministic no-effect.
+    // Require the exact closed receipt; never infer from an error code alone.
+    if (safeCode==='GUI_POINT_OUTSIDE_MONITOR' && value.ok===false &&
+        value.error==='GUI_POINT_OUTSIDE_MONITOR' &&
+        value.effect==='NOT_APPLIED' && value.phase==='PRE_DISPATCH_GUARD' &&
+        Object.getPrototypeOf(value)===Object.prototype &&
+        Reflect.ownKeys(value).length===4 &&
+        ['ok','error','effect','phase'].every(k=>Object.hasOwn(value,k))) {
+      failure.guiNotApplied=true;
+    }
+    // A KDE error is proven to have had no effect only with the exact five-field
+    // portal pre-dispatch attestation; never unlock uncertain input on a generic error.
+    if (['GUI_KDE_PRECHECK_FAILED','GUI_FOREGROUND_OR_GEOMETRY_CHANGED'].includes(safeCode) &&
+        value.effect==='NOT_APPLIED' && value.phase==='PRE_DISPATCH_GUARD' &&
+        value.backend==='kde-wayland-xdg-portal' && Object.getPrototypeOf(value)===Object.prototype &&
+        Reflect.ownKeys(value).length===5 &&
+        ['ok','error','effect','phase','backend'].every(k=>Object.hasOwn(value,k))) {
+      failure.guiNotApplied=true;
+      failure.guiKdePreDispatch=true;
+    }
     throw failure;
   }
   return value;
@@ -85,6 +105,7 @@ export function createGuiProcessClient({
   args,
   timeoutMs = 15000,
   startupTimeoutMs = 15000,
+  timeoutForRequest = null,
   maxBytes = 7 * 1024 * 1024,
   env = process.env
 }) {
@@ -210,7 +231,7 @@ export function createGuiProcessClient({
       pending = {
         resolve,
         reject,
-        timer: setTimeout(() => fail('GUI_HELPER_TIMEOUT'), timeoutMs)
+        timer: setTimeout(() => fail('GUI_HELPER_TIMEOUT'), timeoutForRequest ? Math.min(65000,Math.max(1,Number(timeoutForRequest(request))||timeoutMs)) : timeoutMs)
       };
       const line = JSON.stringify(request) + '\n';
       child.stdin.write(line, 'utf8', error => {

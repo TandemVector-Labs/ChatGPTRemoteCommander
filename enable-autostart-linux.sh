@@ -65,6 +65,7 @@ ensure_mcp() {
   echo 'Remote Commander MCP did not become healthy on 127.0.0.1:47831. Check var/mcp-connect.err.log.' >&2
   return 1
 }
+/bin/bash "$ROOT/tools/install-tunnel-client-linux.sh" --install-dir "$ROOT"
 ensure_mcp
 
 TUNNEL_EXE="$(find_tunnel)" || { echo 'tunnel-client not found; run install.sh first.' >&2; exit 1; }

@@ -3,6 +3,8 @@ param(
   [string]$SourceRef = '',
   [string]$ExpectedCommit = '',
   [string]$BrowserInstaller = '',
+  [string]$SourceBundle = '',
+  [string]$SourceSnapshot = '',
   [switch]$AllowDirty
 )
 $ErrorActionPreference='Stop'
@@ -10,6 +12,7 @@ $Root=(Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $Package=Get-Content (Join-Path $Root 'package.json') -Raw|ConvertFrom-Json
 $Version=if($VersionOverride){$VersionOverride}else{[string]$Package.version}
 if($Version -notmatch '^\d+\.\d+\.\d+(?:-[A-Za-z0-9._-]+)?$'){throw "Invalid setup version: $Version"}
+if($Version -cne [string]$Package.version){throw "SETUP_VERSION_MUST_MATCH_SOURCE_PACKAGE"}
 
 $Head=(git -C $Root rev-parse HEAD).Trim()
 if($Head -notmatch '^[0-9a-f]{40}$'){throw 'Could not resolve repository HEAD.'}
@@ -41,6 +44,16 @@ if(-not $AllowDirty){
   }
 }
 
+$RunnerVerifier=Join-Path $Root 'tools\windows-job-runner\verify-windows-job-runner.ps1'
+if(-not(Test-Path -LiteralPath $RunnerVerifier -PathType Leaf)){throw 'WINDOWS_JOB_RUNNER_VERIFIER_MISSING'}
+& pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $RunnerVerifier -Ensure
+if($LASTEXITCODE -ne 0){throw 'WINDOWS_JOB_RUNNER_BUILD_OR_VERIFY_FAILED'}
+$RunnerManifest=Get-Content -LiteralPath (Join-Path $Root 'tools\windows-job-runner\release-manifest.json') -Raw | ConvertFrom-Json
+$RunnerPath=Join-Path $Root 'tools\windows-job-runner\dist\win-x64\CommanderWindowsJobRunner.exe'
+if(-not(Test-Path -LiteralPath $RunnerPath -PathType Leaf)){throw 'WINDOWS_JOB_RUNNER_BUILD_OUTPUT_MISSING'}
+$RunnerSha=(Get-FileHash -LiteralPath $RunnerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+if($RunnerSha -cne [string]$RunnerManifest.runnerSha256){throw 'WINDOWS_JOB_RUNNER_BUILD_HASH_MISMATCH'}
+
 & (Join-Path $Root 'desktop\build-windows.ps1')
 if($LASTEXITCODE -ne 0){throw 'Desktop payload build failed.'}
 
@@ -67,7 +80,8 @@ if(-not $Iscc){throw 'Inno Setup 6 compiler (ISCC.exe) is required to build the 
 $args=@(
   ('/DMyVersion='+$Version),
   ('/DMyCommit='+$ExpectedCommit),
-  ('/DMySourceRef='+$SourceRef)
+  ('/DMySourceRef='+$SourceRef),
+  ('/DWindowsJobRunner='+$RunnerPath)
 )
 $BrowserSha=$null
 if($BrowserInstaller){
@@ -76,6 +90,41 @@ if($BrowserInstaller){
   if([IO.Path]::GetExtension($BrowserInstaller) -ne '.exe'){throw 'Browser installer must be an .exe artifact.'}
   $BrowserSha=(Get-FileHash -LiteralPath $BrowserInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
   $args+=('/DBrowserSetup='+$BrowserInstaller)
+}
+$SnapshotSha=$null
+if($SourceBundle){
+  if($SourceSnapshot){throw 'CORE_SHALLOW_SNAPSHOT_AND_LEGACY_BUNDLE_CONFLICT'}
+  if($env:GITHUB_ACTIONS -ne 'true' -or -not $env:RUNNER_TEMP){
+    throw 'CORE_LEGACY_BUNDLE_DIRECT_USE_FORBIDDEN'
+  }
+  # Legacy CI still creates a historical .bundle but it must NEVER enter
+  # a release payload. Recreate the exact pinned source as a one-commit
+  # shallow bare Git snapshot from the trusted checkout instead.
+  $SourceSnapshot=Join-Path $env:RUNNER_TEMP 'remote-commander-core-shallow.zip'
+  if(Test-Path -LiteralPath $SourceSnapshot){throw 'CORE_SHALLOW_SNAPSHOT_OUTPUT_PREEXISTS'}
+  $helper=Join-Path $Root 'tools\offline-shallow-source.ps1'
+  $created=@(& pwsh.exe -NoLogo -NoProfile -NonInteractive -File $helper -Mode Create -SourceRoot $Root -SourceRef $SourceRef -ExpectedCommit $ExpectedCommit -Archive $SourceSnapshot)
+  if($LASTEXITCODE -ne 0){throw 'CORE_SHALLOW_SNAPSHOT_BUILD_FAILED'}
+  $createdRecord=($created|Select-Object -Last 1|ConvertFrom-Json)
+  if($createdRecord.status -ne 'SHALLOW_SOURCE_SNAPSHOT_CREATED'){throw 'CORE_SHALLOW_SNAPSHOT_BUILD_RECEIPT_INVALID'}
+  Write-Output 'LEGACY_GIT_BUNDLE_NEVER_EMBEDDED'
+}
+if($SourceSnapshot){
+  $SourceSnapshot=[IO.Path]::GetFullPath($SourceSnapshot)
+  if(-not(Test-Path -LiteralPath $SourceSnapshot -PathType Leaf) -or
+     [IO.Path]::GetExtension($SourceSnapshot) -ne '.zip'){throw 'CORE_SHALLOW_SNAPSHOT_REQUIRED'}
+  # An on-runner native regression proves the actual offline exact-commit
+  # import and historical-object denial before compiling the Setup EXE.
+  & node.exe --test (Join-Path $Root 'test/offline-shallow-source.test.mjs') | Out-Host
+  if($LASTEXITCODE -ne 0){throw 'CORE_SHALLOW_SOURCE_NATIVE_REGRESSION_FAILED'}
+  $helper=Join-Path $Root 'tools\offline-shallow-source.ps1'
+  $receipt=@(& pwsh.exe -NoLogo -NoProfile -NonInteractive -File $helper -Mode Verify -SourceRef $SourceRef -ExpectedCommit $ExpectedCommit -Archive $SourceSnapshot)
+  if($LASTEXITCODE -ne 0){throw 'CORE_SHALLOW_SNAPSHOT_VERIFICATION_FAILED'}
+  $parsed=($receipt|Select-Object -Last 1|ConvertFrom-Json)
+  if($parsed.status -ne 'SHALLOW_SOURCE_SNAPSHOT_VERIFIED'){throw 'CORE_SHALLOW_SNAPSHOT_NOT_VERIFIED'}
+  $SnapshotSha=(Get-FileHash -LiteralPath $SourceSnapshot -Algorithm SHA256).Hash.ToLowerInvariant()
+  $args+=('/DCoreSourceSnapshot='+$SourceSnapshot)
+  $args+=('/DCoreSourceSnapshotSHA256='+$SnapshotSha)
 }
 $args+=(Join-Path $PSScriptRoot 'RemoteCommander.iss')
 
@@ -96,5 +145,8 @@ $result=[ordered]@{
   signatureStatus=[string]$Signature.Status
   browserBundled=[bool]$BrowserInstaller
   browserSha256=$BrowserSha
+  windowsJobRunnerSha256=$RunnerSha
+  coreBundled=[bool]$SourceSnapshot
+  coreSourceSnapshotSha256=$SnapshotSha
 }
 $result|ConvertTo-Json -Depth 5

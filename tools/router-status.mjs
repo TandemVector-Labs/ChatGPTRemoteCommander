@@ -12,10 +12,20 @@ function parse(argv){
   if(!o.url||!Number.isSafeInteger(o.port))throw new Error('ROUTER_STATUS_REQUIRED');
   return o;
 }
+function canonicalRouterStatusUrl(value){
+  let u;
+  try{u=new URL(value);}catch{throw new Error('ROUTER_STATUS_URL_INVALID');}
+  if(u.protocol!=='http:'||!['127.0.0.1','localhost','[::1]'].includes(u.hostname)
+    ||u.username||u.password||u.search||u.hash||u.pathname!=='/router/status'
+    ||!Number.isSafeInteger(Number(u.port))||Number(u.port)<1||Number(u.port)>65535)
+    throw new Error('ROUTER_STATUS_LOOPBACK');
+  const host=u.hostname==='127.0.0.1'?'127.0.0.1'
+    :u.hostname==='localhost'?'localhost':'[::1]';
+  return 'http://'+host+':'+Number(u.port)+'/router/status';
+}
 const o=parse(process.argv.slice(2));
-const u=new URL(o.url);
-if(!['127.0.0.1','localhost','::1','[::1]'].includes(u.hostname))throw new Error('ROUTER_STATUS_LOOPBACK');
-const r=await fetch(u,{redirect:'error',signal:AbortSignal.timeout(o.timeoutMs)});
+const endpoint=canonicalRouterStatusUrl(o.url);
+const r=await fetch(endpoint,{redirect:'error',signal:AbortSignal.timeout(o.timeoutMs)});
 if(!r.ok)throw new Error('ROUTER_STATUS_HTTP_'+r.status);
 const s=await r.json();
 if(!s?.ok||!s?.router)throw new Error('ROUTER_STATUS_INVALID');

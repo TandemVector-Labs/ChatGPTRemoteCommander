@@ -9,6 +9,7 @@ import {
   boundedSearchVisitLimit
 } from '../src/filesystem-enumeration-guard.mjs';
 import { searchFiles } from '../src/power-tools-v0.3.mjs';
+import { withFullPowerAccess } from './helpers/access-mode-fixtures.mjs';
 import { listDirectory } from '../src/tools-v0.3.mjs';
 
 test('Windows recursive enumeration refuses a bare volume root but permits narrower scopes', () => {
@@ -57,6 +58,7 @@ test('search_files stops at the entry-visit budget without needing a large fixtu
     roots: [root],
     config: { powerMode: { enabled: true, fullFilesystem: true } }
   };
+  withFullPowerAccess(ctx);
   const result = await searchFiles(ctx, {
     path: root,
     pattern: 'definitely-no-match',
@@ -100,6 +102,7 @@ test('list_directory honors its entry ceiling on a non-root directory', async (t
     config: { powerMode: { enabled: true, fullFilesystem: true } },
     auditLog: path.join(root, 'audit.jsonl')
   };
+  withFullPowerAccess(ctx);
   const result = await listDirectory(ctx, { path: root, depth: 0, maxEntries: 3 });
   assert.equal(result.entries.length, 3);
   assert.equal(result.truncated, true);
@@ -116,6 +119,7 @@ test('Windows tool wiring refuses recursive enumeration at the active volume roo
     config: { powerMode: { enabled: true, fullFilesystem: true } },
     auditLog: path.join(os.tmpdir(), 'rc-enumeration-guard-audit.jsonl')
   };
+  withFullPowerAccess(ctx);
   await assert.rejects(
     listDirectory(ctx, { path: volumeRoot, depth: 1, maxEntries: 10 }),
     error => error?.code === 'WINDOWS_VOLUME_ROOT_RECURSION_REFUSED'

@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
+import {resolveProfileIdentity} from '../src/profile-identity-registry.mjs';
 
 function fail(message) {
   process.stderr.write(String(message) + '\n');
@@ -219,7 +220,7 @@ function zipStore(root, zipPath) {
 
 const args = parseArgs(process.argv.slice(2));
 if (args.help) {
-  console.log('Usage: node tools/generate-device-plugin.mjs --template DIR --output DIR --zip FILE --app-id ID [--device-name NAME] [--profile NAME] [--fingerprint HEX] [--version VERSION]');
+  console.log('Usage: node tools/generate-device-plugin.mjs --template DIR --output DIR --zip FILE --app-id ID [--device-name NAME] [--profile NAME] [--identity-map FILE --host-id ID --account-id ID] [--fingerprint HEX] [--version VERSION]');
   process.exit(0);
 }
 for (const key of ['template','output','zip','app-id']) if (!args[key]) fail('missing --' + key);
@@ -229,17 +230,37 @@ const output = path.resolve(args.output);
 const zipPath = path.resolve(args.zip);
 if (!fs.existsSync(path.join(template, 'plugin.json'))) fail('template plugin.json not found');
 const appId = normalizeAppId(args['app-id']);
-const deviceName = cleanDisplay(args['device-name'] || os.hostname());
 const profile = cleanDisplay(args.profile || 'default');
+const useIdentityMap = Boolean(args['identity-map']);
+if (useIdentityMap !== Boolean(args['host-id']) ||
+    useIdentityMap !== Boolean(args['account-id'])) {
+  fail('identity-map, host-id and account-id must be supplied together');
+}
+let identity = null;
+if (useIdentityMap) {
+  try {
+    const identityFile = path.resolve(args['identity-map']);
+    const stat = fs.lstatSync(identityFile);
+    if (!stat.isFile() || stat.isSymbolicLink()) fail('identity-map must be a regular local file');
+    identity = resolveProfileIdentity(JSON.parse(fs.readFileSync(identityFile,'utf8')), {
+      hostId: args['host-id'], accountId: args['account-id'], profileName: profile
+    });
+  } catch (error) {
+    fail('Profile identity map rejected: ' + (error?.message ?? 'invalid input'));
+  }
+}
+const deviceName = cleanDisplay(args['device-name'] || identity?.hostLabel || os.hostname());
+if (identity && deviceName !== identity.hostLabel) fail('identity-map device-name mismatch');
 let fingerprint = String(args.fingerprint || '').toLowerCase();
 if (fingerprint && !/^[a-f0-9]{8,24}$/u.test(fingerprint)) fail('fingerprint must be 8-24 lowercase hex characters');
-if (!fingerprint) fingerprint = sha256Hex([deviceName, profile, process.platform, process.arch].join('\0')).slice(0, 10);
+if (!fingerprint) fingerprint = sha256Hex([deviceName, identity?.bindingHash ?? profile, process.platform, process.arch].join('\0')).slice(0, 10);
 const digest = crypto.createHash('sha256').update(fingerprint).digest();
 const slug = slugify(deviceName);
 const pluginName = ('remote-commander-' + slug + '-' + fingerprint).slice(0, 63).replace(/-+$/u, '');
-const displayName = profile === 'default' || profile === 'chatgpt-remote-commander'
-  ? 'Remote Commander · ' + deviceName
-  : 'Remote Commander · ' + deviceName + ' · ' + profile;
+const displayName = identity?.displayName ?? (
+  profile === 'default' || profile === 'chatgpt-remote-commander'
+    ? 'Remote Commander · ' + deviceName
+    : 'Remote Commander · ' + deviceName + ' · ' + profile);
 const hue = (digest[0] * 360) / 256;
 const brandRgb = hslToRgb(hue, 0.72, 0.42);
 const brandColor = '#' + brandRgb.map((v) => v.toString(16).padStart(2, '0')).join('').toUpperCase();
@@ -294,6 +315,10 @@ const metadata = {
   displayName,
   deviceName,
   profile,
+  ...(identity ? { identity: {
+    profileId: identity.profileId, tunnelProfile: identity.tunnelProfile,
+    bindingHash: identity.bindingHash, source: identity.source
+  }} : {}),
   platform: process.platform,
   arch: process.arch,
   fingerprint,

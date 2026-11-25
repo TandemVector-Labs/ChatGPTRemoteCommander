@@ -18,8 +18,8 @@ const git=(args,options={})=>{
   assert.equal(p.status,0,'git '+args.join(' ')+' '+(p.stderr||''));
   return p.stdout.trim();
 };
-function fixture(){
-  const root=fs.mkdtempSync(path.join(os.tmpdir(),'rc-r566-control-'));
+function fixture(baseDir=os.tmpdir()){
+  const root=fs.mkdtempSync(path.join(baseDir,'rc-r566-control-'));
   const stage=(name,version)=>{
     const dir=path.join(root,name);
     fs.mkdirSync(dir);
@@ -40,13 +40,13 @@ function fixture(){
 function promoteInFixture(f,stage,commit,ref='refs/heads/rollback-r521'){
   const sh=[
     'set -Eeuo pipefail',
-    'INSTALL_DIR="'+f.control+'"',
-    'STAGE_DIR="'+stage.dir+'"',
+    'INSTALL_DIR="$1"',
+    'STAGE_DIR="$2"',
     'log(){ :; }',
     promote,
-    'promote_control "$1" "$2"'
+    'promote_control "$3" "$4"'
   ].join('\n');
-  return spawnSync('bash',['-c',sh,'rc-r566',commit,ref],{
+  return spawnSync('bash',['-s','--',f.control,stage.dir,commit,ref],{input:sh,
     encoding:'utf8',timeout:20000,
     env:{...process.env,GIT_TERMINAL_PROMPT:'0',GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_SYSTEM:'/dev/null',GIT_ALLOW_PROTOCOL:'file'}
   });
@@ -98,3 +98,16 @@ test('substantive unstaged and staged tracked changes remain blocked', {skip:pro
     assert.equal(git(['-C',f.control,'rev-parse','HEAD']),head);
   }
 }));
+
+test('special characters in fixture paths are literal, never interpreted as shell script', {skip:process.platform!=='linux'?'Requires native Linux Bash fixture':false},()=>{
+  const outer=fs.mkdtempSync(path.join(os.tmpdir(),'rc-r566-injection-'));
+  const special=path.join(outer,'$(printf RC_PATH_MUST_STAY_LITERAL)');
+  fs.mkdirSync(special);
+  try{
+    const f=fixture(special);
+    const p=promoteInFixture(f,f.old,f.old.commit);
+    assert.equal(p.status,0,p.stdout+'\\n'+p.stderr);
+    assert.equal(git(['-C',f.control,'rev-parse','HEAD']),f.old.commit);
+    assert.equal(fs.readFileSync(path.join(f.control,'keep.txt'),'utf8'),f.sentinel);
+  }finally{fs.rmSync(outer,{recursive:true,force:true});}
+});

@@ -6,6 +6,7 @@ import os from 'node:os';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { requireNonElevatedLegacyHttp } from './fixtures/legacy-http-token-admission.mjs';
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function freePort() {
@@ -26,14 +27,17 @@ async function post(port, id, name, args, extraHeaders = {}) {
   assert.equal(response.status, 200);
   return body;
 }
-async function startServer(serverRoot, configPath) {
+async function startServer(serverRoot, configPath, fixturePort) {
+  if (!Number.isSafeInteger(fixturePort) || fixturePort < 1 || fixturePort > 65535)
+    throw new Error('HTTP_FIXTURE_PORT_INVALID');
+  const healthUrl = 'http://127.0.0.1:' + fixturePort + '/health';
   const child = spawn(process.execPath, [path.join(serverRoot, 'src', 'server-v0.3.mjs')], {
     cwd: serverRoot, env: { ...process.env, REMOTE_COMMANDER_CONFIG: configPath }, stdio:['ignore','pipe','pipe']
   });
   let stderr=''; child.stderr.on('data', c => { stderr += c.toString('utf8'); });
-  const config = JSON.parse(await fs.readFile(configPath, 'utf8'));
+
   for (let i=0;i<400;i+=1) {
-    try { const r=await fetch(`http://127.0.0.1:${config.port}/health`); if (r.ok) return { child, stderr:()=>stderr }; } catch {}
+    try { const r=await fetch(healthUrl); if (r.ok) return { child, stderr:()=>stderr }; } catch {}
     await wait(25);
   }
   child.kill();
@@ -43,7 +47,7 @@ async function stopServer(child) {
   if (child && child.exitCode === null) { child.kill(); await Promise.race([once(child,'close'), wait(4000)]); }
 }
 
-test('direct mutation requestId prevents duplicate append across lost ack and restart', async () => {
+test('direct mutation requestId prevents duplicate append across lost ack and restart', async t => {
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'rc-mut-http-'));
   const serverRoot=path.join(root,'server');
   const dataRoot=path.join(root,'data');
@@ -62,12 +66,17 @@ test('direct mutation requestId prevents duplicate append across lost ack and re
       auditLog:'var/audit.jsonl',
       durableDelivery:{directory:deliveryRoot},
       asyncOperations:{enabled:false},
+      capabilityProfile:{tier:'STANDARD'},
       powerMode:{enabled:false,fullFilesystem:false,allowShell:false,allowProcessControl:false,allowPermanentDelete:false,
         guiControl:{enabled:false},browserControl:{enabled:false}}
     };
     const configPath=path.join(serverRoot,'config.json');
     await fs.writeFile(configPath,JSON.stringify(config,null,2));
-    running=await startServer(serverRoot,configPath);
+    running=await startServer(serverRoot,configPath,port);
+    if(!(await requireNonElevatedLegacyHttp(t,port))){
+      assert.equal(await fs.readFile(target,'utf8'),'');
+      return;
+    }
 
     const missing=await post(port,1,'write_text',{path:target,content:'x',mode:'append'});
     assert.equal(missing.result.isError,true);
@@ -90,7 +99,7 @@ test('direct mutation requestId prevents duplicate append across lost ack and re
     assert.equal(await fs.readFile(target,'utf8'),'x');
 
     await stopServer(running.child); running=null;
-    running=await startServer(serverRoot,configPath);
+    running=await startServer(serverRoot,configPath,port);
     const afterRestart=await post(port,5,'write_text',args);
     assert.equal(afterRestart.result.isError,false);
     assert.deepEqual(afterRestart.result.structuredContent, first.result.structuredContent);
@@ -102,7 +111,7 @@ test('direct mutation requestId prevents duplicate append across lost ack and re
 });
 
 
-test('legacy cached client derives durable mutation idempotency from x-request-id', async () => {
+test('legacy cached client derives durable mutation idempotency from x-request-id', async t => {
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'rc-mut-legacy-xreq-'));
   const serverRoot=path.join(root,'server');
   const dataRoot=path.join(root,'data');
@@ -120,12 +129,17 @@ test('legacy cached client derives durable mutation idempotency from x-request-i
       maxReadBytes:1024*1024, maxWriteBytes:1024*1024, maxCommandMs:300000,
       auditLog:'var/audit.jsonl', durableDelivery:{directory:deliveryRoot},
       asyncOperations:{enabled:false},
+      capabilityProfile:{tier:'STANDARD'},
       powerMode:{enabled:false,fullFilesystem:false,allowShell:false,allowProcessControl:false,allowPermanentDelete:false,
         guiControl:{enabled:false},browserControl:{enabled:false}}
     };
     const configPath=path.join(serverRoot,'config.json');
     await fs.writeFile(configPath,JSON.stringify(config,null,2));
-    running=await startServer(serverRoot,configPath);
+    running=await startServer(serverRoot,configPath,port);
+    if(!(await requireNonElevatedLegacyHttp(t,port))){
+      assert.equal(await fs.readFile(target,'utf8'),'');
+      return;
+    }
 
     const legacyHeaders={'x-request-id':'legacy-client-call-1'};
     const first=await post(port,10,'write_text',{path:target,content:'x',mode:'append'},legacyHeaders);
@@ -153,7 +167,7 @@ test('legacy cached client derives durable mutation idempotency from x-request-i
     assert.equal(await fs.readFile(target,'utf8'),'xz');
 
     await stopServer(running.child); running=null;
-    running=await startServer(serverRoot,configPath);
+    running=await startServer(serverRoot,configPath,port);
     const afterRestart=await post(port,15,'write_text',{path:target,content:'x',mode:'append'},legacyHeaders);
     assert.equal(afterRestart.result.isError,false);
     assert.deepEqual(afterRestart.result.structuredContent,first.result.structuredContent);
@@ -164,7 +178,7 @@ test('legacy cached client derives durable mutation idempotency from x-request-i
   }
 });
 
-test('full-power direct mutation catalog requires requestId across file/process/terminal/browser/GUI', async () => {
+test('full-power legacy HTTP denies anonymous and forged access before mutation catalog or effects', async () => {
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'rc-mut-catalog-'));
   const serverRoot=path.join(root,'server');
   const dataRoot=path.join(root,'data');
@@ -174,6 +188,7 @@ test('full-power direct mutation catalog requires requestId across file/process/
     await fs.mkdir(serverRoot,{recursive:true}); await fs.mkdir(dataRoot,{recursive:true});
     await fs.cp(new URL('../src/', import.meta.url), path.join(serverRoot,'src'), {recursive:true});
     const canonicalDataRoot=await fs.realpath(dataRoot);
+    const destination=path.join(canonicalDataRoot,'unauthorized.txt');
     const port=await freePort();
     const config={
       host:'127.0.0.1', port, allowedRoots:[canonicalDataRoot], allowedPrograms:['node'],
@@ -182,35 +197,47 @@ test('full-power direct mutation catalog requires requestId across file/process/
       asyncOperations:{enabled:true,backgroundFirst:true},
       powerMode:{enabled:true,fullFilesystem:true,allowShell:true,allowProcessControl:true,allowPermanentDelete:true,
         guiControl:{enabled:true,allowScreenshot:true,allowMouse:true,allowKeyboard:true,allowWindowFocus:true},
-        browserControl:{enabled:true,allowNavigate:true,allowInput:true,allowScreenshot:true}}
+        browserControl:{enabled:true,allowNavigate:true,allowInput:true}}
     };
     const configPath=path.join(serverRoot,'config.json');
     await fs.writeFile(configPath,JSON.stringify(config,null,2));
-    running=await startServer(serverRoot,configPath);
-    const response=await fetch(`http://127.0.0.1:${port}/mcp`,{
-      method:'POST',headers:{'content-type':'application/json'},
-      body:JSON.stringify({jsonrpc:'2.0',id:20,method:'tools/list',params:{}})
-    });
-    const body=await response.json();
-    assert.equal(response.status,200);
-    const directMutations=body.result.tools.filter(tool =>
-      tool.annotations?.readOnlyHint === false &&
-      !/^(operation_|delivery_|workflow_)/.test(tool.name)
-    );
-    assert.ok(directMutations.length > 10, 'expected broad Full Power mutation catalog');
-    for (const tool of directMutations) {
-      assert.ok(tool.inputSchema?.properties?.requestId, `missing requestId schema: ${tool.name}`);
+    running=await startServer(serverRoot,configPath,port);
+    const health=await (await fetch(`http://127.0.0.1:${port}/health`)).json();
+    assert.equal(health.privilegedLegacyHttpQuarantined,true);
+    const requests=[
+      {method:'tools/list',params:{}},
+      {method:'tools/call',params:{name:'write_text',arguments:{
+        path:destination,content:'forbidden',mode:'overwrite',requestId:'denied-write-1'
+      }}},
+      {method:'tools/call',params:{name:'kill_process',arguments:{pid:process.pid,requestId:'denied-kill-1'}}},
+      {method:'tools/call',params:{name:'send_terminal',arguments:{
+        id:'denied',input:'not-executed',requestId:'denied-terminal-1'
+      }}}
+    ];
+    for(const headers of [
+      {'content-type':'application/json'},
+      {'content-type':'application/json',authorization:'Bearer forged',
+        'x-chat-id':'forged','mcp-session-id':'forged'}
+    ]){
+      for(const [i,request] of requests.entries()){
+        const response=await fetch(`http://127.0.0.1:${port}/mcp`,{
+          method:'POST',headers,
+          body:JSON.stringify({jsonrpc:'2.0',id:i+1,...request})
+        });
+        assert.equal(response.status,403,request.method);
+        assert.deepEqual(await response.json(),{error:'trusted_transport_required'});
+      }
     }
-    const names=new Set(directMutations.map(tool=>tool.name));
-    assert.ok(names.has('write_text'), 'file mutation missing');
-    assert.ok(names.has('kill_process'), 'process mutation missing');
-    assert.ok(names.has('send_terminal'), 'terminal mutation missing');
-    assert.ok([...names].some(name=>name.startsWith('browser_')), 'browser mutation missing');
-    assert.ok([...names].some(name=>name.startsWith('gui_')), 'GUI mutation missing');
-    const readOnly=body.result.tools.filter(tool => tool.annotations?.readOnlyHint === true);
-    assert.ok(readOnly.some(tool=>tool.name==='system_status' && !tool.inputSchema?.properties?.requestId));
+    await assert.rejects(fs.access(destination));
   } finally {
     if (running) await stopServer(running.child);
     await fs.rm(root,{recursive:true,force:true,maxRetries:20,retryDelay:50});
   }
+});
+
+test('test-only health probe refuses invalid port before any fixture config read', async () => {
+  await assert.rejects(
+    startServer('not-a-server', 'not-a-fixture-config.json', 0),
+    /HTTP_FIXTURE_PORT_INVALID/
+  );
 });

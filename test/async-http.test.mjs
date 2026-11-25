@@ -6,6 +6,7 @@ import os from 'node:os';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { probeWindowsAdministrator } from '../src/windows-admin-token.mjs';
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -47,7 +48,7 @@ async function waitTerminal(port, operationId) {
   throw new Error('operation did not reach terminal state');
 }
 
-test('HTTP async operation returns immediately, retry is idempotent, and output stays file-backed', async () => {
+test('HTTP async operation returns immediately, retry is idempotent, and output stays file-backed', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rc-async-http-'));
   const serverRoot = path.join(root, 'server');
   const dataRoot = path.join(root, 'data');
@@ -55,6 +56,9 @@ test('HTTP async operation returns immediately, retry is idempotent, and output 
   const stateRoot = path.join(root, 'operation-state');
   const port = await freePort();
   let child;
+  let stderr='';
+  let stdoutBytes=0;
+  let phase='fixture-setup';
 
   try {
     await fs.mkdir(serverRoot, { recursive: true });
@@ -67,6 +71,7 @@ test('HTTP async operation returns immediately, retry is idempotent, and output 
     await fs.copyFile(new URL('./async-operation-fixture.mjs', import.meta.url), fixture);
 
     const config = {
+      capabilityProfile: { tier: 'STANDARD' },
       host: '127.0.0.1',
       port,
       allowedRoots: [canonicalDataRoot],
@@ -99,9 +104,10 @@ test('HTTP async operation returns immediately, retry is idempotent, and output 
       env: { ...process.env, REMOTE_COMMANDER_CONFIG: configPath },
       stdio: ['ignore', 'pipe', 'pipe']
     });
-    let stderr = '';
-    child.stderr.on('data', (chunk) => { stderr += chunk.toString('utf8'); });
+    child.stderr.on('data', (chunk) => { if (stderr.length < 8192) stderr += chunk.toString('utf8').slice(0,8192-stderr.length); });
+    child.stdout.on('data', (chunk) => { stdoutBytes += chunk.length; });
 
+    phase='server-startup';
     let healthy = false;
     // Release qualification runs test files in parallel. Keep startup bounded,
     // but give the copied fixture server 10s of process-start headroom; this is
@@ -116,6 +122,33 @@ test('HTTP async operation returns immediately, retry is idempotent, and output 
     }
     assert.equal(healthy, true, stderr || `server failed to become healthy; exitCode=${child.exitCode}`);
 
+    phase='native-token-and-quarantine';
+    const nativeToken = process.platform === 'win32'
+      ? await probeWindowsAdministrator() : null;
+    if(process.platform==='win32'){
+      const safeToken={ok:nativeToken?.ok===true,isAdmin:nativeToken?.isAdmin===true,
+        isSystem:nativeToken?.isSystem===true,elevation:nativeToken?.elevation??null,
+        source:nativeToken?.source??null,code:nativeToken?.code??null};
+      console.log('R157_ASYNC_HTTP_TOKEN_PROBE='+JSON.stringify(safeToken));
+    }
+    const url='http://127.0.0.1:'+port;
+    const health = await (await fetch(url+'/health')).json();
+    if(process.platform==='win32') console.log('R157_ASYNC_HTTP_QUARANTINE='+String(health.privilegedLegacyHttpQuarantined===true));
+    if(nativeToken?.ok === true && nativeToken.isAdmin === true) {
+      // Hosted Windows Actions may use an elevated Administrator token.
+      // A legacy unauthenticated MCP path must remain quarantined.
+      assert.equal(health.privilegedLegacyHttpQuarantined,true);
+      const blocked=await fetch(url+'/mcp',{
+        method:'POST',headers:{'content-type':'application/json'},
+        body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/list',params:{}})
+      });
+      assert.equal(blocked.status,403);
+      assert.deepEqual(await blocked.json(),{error:'trusted_transport_required'});
+      return t.skip('elevated native Windows token: fail-closed admission verified; positive STANDARD requires non-admin host');
+    }
+    assert.equal(health.privilegedLegacyHttpQuarantined,false,
+      'STANDARD loopback fixture must be reachable by a verified non-elevated host token');
+
     const effect = path.join(canonicalDataRoot, 'effect.txt');
     const request = {
       requestId: 'http-retry-1',
@@ -127,18 +160,22 @@ test('HTTP async operation returns immediately, retry is idempotent, and output 
         timeoutMs: 5000
       }
     };
+    phase='operation-start';
     const startedAt = Date.now();
     const first = await post(port, 1, 'operation_start', request);
     const elapsed = Date.now() - startedAt;
     assert.ok(elapsed < 1000, `operation_start stayed open for ${elapsed}ms`);
+    phase='idempotent-retry';
     const retry = await post(port, 2, 'operation_start', request);
     assert.equal(retry.operationId, first.operationId);
     assert.equal(retry.duplicate, true);
 
+    phase='operation-terminal';
     const final = await waitTerminal(port, first.operationId);
     assert.equal(final.status, 'SUCCEEDED');
     assert.equal(await fs.readFile(effect, 'utf8'), 'x');
 
+    phase='file-backed-result';
     const result = await post(port, 3, 'operation_result', { operationId: first.operationId, tailBytes: 1024 });
     assert.equal(result.state.status, 'SUCCEEDED');
     assert.equal(result.stdoutTail, 'effect-done');
@@ -148,6 +185,7 @@ test('HTTP async operation returns immediately, retry is idempotent, and output 
     assert.equal(durableState.includes(effect), false);
     assert.equal(durableState.includes(fixture), false);
 
+    phase='large-output-start';
     const large = await post(port, 4, 'operation_start', {
       requestId: 'http-large-1',
       tool: 'run_project_command',
@@ -158,13 +196,37 @@ test('HTTP async operation returns immediately, retry is idempotent, and output 
         timeoutMs: 5000
       }
     });
+    phase='large-output-terminal';
     await waitTerminal(port, large.operationId);
+    phase='large-output-result';
     const largeResult = await post(port, 5, 'operation_result', { operationId: large.operationId, tailBytes: 512 });
     assert.equal(largeResult.result.stdout.totalBytes, 200000);
     assert.equal(largeResult.result.stdout.capturedBytes, 65536);
     assert.equal(largeResult.result.stdout.truncated, true);
     assert.equal(Buffer.byteLength(largeResult.stdoutTail), 512);
     assert.ok(JSON.stringify(largeResult).length < 10000);
+  } catch (error) {
+    const safeName=typeof error?.name==='string' && /^[A-Za-z0-9_]{1,48}$/.test(error.name) ? error.name : 'Error';
+    const safeCode=typeof error?.code==='string' && /^[A-Z0-9_]{1,64}$/.test(error.code) ? error.code : null;
+    const safeScalar=value=>typeof value==='boolean'||(typeof value==='number'&&Number.isFinite(value))||
+      (typeof value==='string'&&/^[A-Za-z0-9_ .:-]{1,64}$/.test(value)) ? value : null;
+    const assertion=error?.code==='ERR_ASSERTION' ? {
+      operator:typeof error.operator==='string'&&/^[A-Za-z]{1,24}$/.test(error.operator)?error.operator:null,
+      actual:safeScalar(error.actual),expected:safeScalar(error.expected)
+    } : null;
+    console.log('R157_ASYNC_HTTP_FAILURE_PHASE='+phase);
+    console.log('R157_ASYNC_HTTP_FAILURE_NAME='+safeName);
+    if(safeCode)console.log('R157_ASYNC_HTTP_FAILURE_CODE='+safeCode);
+    if(phase==='server-startup'){
+      const known=['ERR_MODULE_NOT_FOUND','ERR_INVALID_ARG_TYPE','ERR_UNKNOWN_FILE_EXTENSION','EACCES','EPERM','ENOENT','EADDRINUSE','SyntaxError','ReferenceError','TypeError','Error'];
+      const stderrClass=known.find(kind=>stderr.includes(kind))??'UNCLASSIFIED';
+      const serverDiag={exitCode:Number.isInteger(child?.exitCode)?child.exitCode:null,
+        signalCode:['SIGTERM','SIGINT','SIGKILL'].includes(child?.signalCode)?child.signalCode:null,
+        stderrClass,stderrBytes:Buffer.byteLength(stderr),stdoutBytes};
+      console.log('R157_ASYNC_HTTP_SERVER_STARTUP='+JSON.stringify(serverDiag));
+    }
+    if(assertion)console.log('R157_ASYNC_HTTP_FAILURE_ASSERTION='+JSON.stringify(assertion));
+    throw error;
   } finally {
     if (child && child.exitCode === null) {
       child.kill();

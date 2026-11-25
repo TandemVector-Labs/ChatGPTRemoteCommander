@@ -46,7 +46,10 @@ try {
     $stop = Join-Path (Split-Path -Parent $PSScriptRoot) 'var\GUI_STOP'
     # Fixed local path: a request may not replace the local emergency-stop file.
     $mutex = [Threading.Mutex]::new($false, 'Local\ChatGPTRemoteCommander.GuiInput')
-    try { $owned = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owned=$true; throw 'GUI_PREVIOUS_HELPER_ABANDONED' }
+    # Read-only observation may wait briefly for another legitimate native action.
+    # Input/focus never queues behind a mutex: its observed frame may be stale.
+    $nativeWaitMs = if ($req['action'] -in @('status','screenshot','cursor','listWindows')) { 1500 } else { 0 }
+    try { $owned = $mutex.WaitOne($nativeWaitMs) } catch [Threading.AbandonedMutexException] { $owned=$true; throw 'GUI_PREVIOUS_HELPER_ABANDONED' }
     if (-not $owned) { return @{ok=$false;error='GUI_NATIVE_BUSY';submission='NOT_SUBMITTED'} }
     $oldDpi = [RcGuiNative]::SetThreadDpiAwarenessContext([IntPtr]::new(-4))
     if ($oldDpi -eq [IntPtr]::Zero) { throw 'GUI_DPI_CONTEXT_FAILED' }
@@ -140,7 +143,29 @@ try {
             } finally { foreach($resource in @($parameters,$stream,$sg,$scaled,$graphics,$bitmap)) { if($resource) {$resource.Dispose()} } }
         }
         'cursor' { $p=[RcGuiNative]::Cursor(); @{ok=$true;x=$p.X;y=$p.Y} }
-        'listWindows' { @{ok=$true;windows=@([RcGuiNative]::ListWindows().ToArray())} }
+        'listWindows' {
+            # Windows yields PascalCase Win32 handles. Bind application identity to the
+            # actual OS process, not mutable window titles; expose focus for exact targets.
+            $foreground=[RcGuiNative]::Foreground()
+            $names=@{}
+            $windows=@(foreach($entry in [RcGuiNative]::ListWindows().ToArray()) {
+                $processId=[int]$entry.ProcessId
+                $key=[string]$processId
+                if(-not $names.ContainsKey($key)) {
+                    $names[$key]=''
+                    try { $names[$key]=[string](Get-Process -Id $processId -ErrorAction Stop).ProcessName }
+                    catch { } # A protected/exiting process never gains a guessed name.
+                }
+                [pscustomobject]@{
+                    Handle=[string]$entry.Handle
+                    Title=[string]$entry.Title
+                    ProcessId=$processId
+                    ProcessName=$names[$key]
+                    Focused=([string]$entry.Handle -ceq $foreground)
+                }
+            })
+            @{ok=$true;windows=$windows}
+        }
         'move' { $p=Point $req $observed;[RcGuiNative]::Move($p.X,$p.Y,$stop);@{ok=$true} }
         'moveRelative' { [RcGuiNative]::Delta([int]$req['dx'],[int]$req['dy'],$stop);@{ok=$true} }
         'scroll' { [RcGuiNative]::Scroll([int]$req['delta'],[bool]($req['horizontal'] ?? $false),$stop);@{ok=$true} }

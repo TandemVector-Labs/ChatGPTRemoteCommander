@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { mkdir, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import {
   copyPath, createDirectory, deletePath, fileInfo, movePath,
   powerStatus, readAnyFile, runShell, searchFiles,
@@ -13,10 +15,12 @@ import {
   writeText as legacyWriteText
 } from '../src/tools-v0.3.mjs';
 
-const root = path.resolve('test', '.tmp-power-v03-root');
-const backups = path.resolve('test', '.tmp-power-v03-backups');
-const legacyOutside = path.resolve('test', '.tmp-legacy-power-v03-outside');
-const legacyAudit = path.resolve('test', '.tmp-legacy-power-v03-audit.jsonl');
+const tempRoot = await mkdtemp(path.join(tmpdir(), 'rc-power-smoke-v03-'));
+const root = path.join(tempRoot, 'root');
+const backups = path.join(tempRoot, 'backups');
+const legacyOutside = path.join(tempRoot, 'legacy-outside');
+const legacyAudit = path.join(tempRoot, 'legacy-audit.jsonl');
+process.once('exit', () => { try { rmSync(tempRoot, { recursive: true, force: true }); } catch {} });
 const cleanup = async (target) => {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     try { await rm(target, { recursive: true, force: true }); return; }
@@ -26,22 +30,20 @@ const cleanup = async (target) => {
     }
   }
 };
-await cleanup(root);
-await cleanup(backups);
-await cleanup(legacyOutside);
-await rm(legacyAudit, { force: true });
-await cleanup(legacyOutside);
-await rm(legacyAudit, { force: true });
 await mkdir(root, { recursive: true });
 await mkdir(legacyOutside, { recursive: true });
 const ctx = {
   roots: [root],
   auditLog: legacyAudit,
+  accessStatus: {configuredTier:'FULL_POWER',effectiveTier:'FULL_POWER',hostExecution:{mode:'FULL_HOST_USER',hostFilesystem:true,shellAvailable:true},nativeRoot:{nonRootTokenVerified:true},nativeAdmin:{nonElevatedTokenVerified:false}},
   config: {
     maxReadBytes: 1024 * 1024,
     maxWriteBytes: 1024 * 1024,
     maxCommandMs: 10000,
     allowedPrograms: ['git', 'node'],
+    capabilityProfile: {
+      tier: 'FULL_POWER', explicitlyAuthorized: true, disabledCapabilities: []
+    },
     powerMode: {
       enabled: true, fullFilesystem: true, allowShell: true,
       allowProcessControl: true, allowPermanentDelete: false,
@@ -161,5 +163,4 @@ await assert.rejects(
 );
 console.log('LEGACY_POWER_COMPAT_V03_PASS');
 console.log('POWER_SMOKE_V03_PASS');
-await cleanup(root);
-await cleanup(backups);
+await cleanup(tempRoot);

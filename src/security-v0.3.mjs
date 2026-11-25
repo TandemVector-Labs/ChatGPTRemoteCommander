@@ -18,7 +18,7 @@ export function normalizeRoots(roots) {
   return roots.map((root) => path.resolve(root));
 }
 
-export function isWithin(candidate, roots) {
+function isWithinCanonical(candidate, roots) {
   const target = comparePath(candidate);
   return roots.some((root) => {
     const base = comparePath(root);
@@ -26,12 +26,31 @@ export function isWithin(candidate, roots) {
     return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
   });
 }
+
+export function isWithin(candidate, roots) {
+  if (isWithinCanonical(candidate, roots)) return true;
+  // Accept the exact configured lexical alias for pre-resolution checks only.
+  // safeExistingPath/safeWritablePath still verify the resolved target against
+  // canonical roots, so symlink/Junction escapes remain denied.
+  return (roots?.aliases ?? []).some(({ lexical }) => isWithinCanonical(candidate, [lexical]));
+}
 export async function canonicalizeRoots(roots) {
   const result = [];
+  const aliases = [];
   for (const root of normalizeRoots(roots)) {
     await access(root);
-    result.push(await realpath(root));
+    const canonical = await realpath(root);
+    result.push(canonical);
+    aliases.push({ canonical, lexical: root });
   }
+  // Keep the public array shape and canonical iteration semantics unchanged.
+  // Alias metadata is private to this process and is not serialized/enumerated.
+  Object.defineProperty(result, 'aliases', {
+    value: aliases,
+    enumerable: false,
+    configurable: false,
+    writable: false
+  });
   return result;
 }
 
@@ -92,12 +111,12 @@ export function validateCommandArgs(program, args, cwd, roots, options = {}) {
   for (const arg of args) {
     const possible = arg.includes('=') ? arg.slice(arg.indexOf('=') + 1) : arg;
     const absolute = path.isAbsolute(possible) || WIN_ABS.test(possible);
-    if (absolute && !isWithin(possible, roots)) {
+    if (absolute && !isWithinCanonical(possible, roots)) {
       throw new Error(`absolute argument path is outside allowed roots: ${possible}`);
     }
     if (possible === '..' || possible.startsWith('../') || possible.startsWith('..\\')) {
       const resolved = path.resolve(cwd, possible);
-      if (!isWithin(resolved, roots)) throw new Error('relative argument escapes allowed roots');
+      if (!isWithinCanonical(resolved, roots)) throw new Error('relative argument escapes allowed roots');
     }
   }
   return args;

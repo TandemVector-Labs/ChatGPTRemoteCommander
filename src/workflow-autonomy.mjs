@@ -14,12 +14,13 @@ export const OPERATION_CLASS = Object.freeze([
 
 const READ_ONLY = new Set([
   'system_status','list_directory','read_text','power_status','file_info','read_file',
+  'search_files','system_info','list_processes','workflow_run_status',
   'gui_status','gui_screenshot','gui_list_windows','gui_cursor_position'
 ]);
 const EXTERNAL = new Set([
   'gui_session_begin','gui_session_renew','gui_session_end','gui_mouse_move','gui_mouse_delta',
   'gui_mouse_scroll','gui_mouse_click','gui_mouse_drag','gui_type_text','gui_key_press','gui_focus_window',
-  'run_project_command'
+  'run_project_command','run_shell'
 ]);
 
 export function canonicalHash(value) {
@@ -62,7 +63,14 @@ export function normalizeSchedulerPolicy(policy = {}) {
   };
 }
 
+// FULL_ACCESS is a separate Host/owner-grant contract and is not admitted here.
+const unsupportedAuthorityTier=authority=>
+  authority?.tier!==undefined&&!['STANDARD','FULL_POWER'].includes(authority.tier);
+
 export function normalizeAuthority(authority = {}) {
+  if(unsupportedAuthorityTier(authority))
+    throw Object.assign(new Error('WORKFLOW_AUTHORITY_TIER_UNSUPPORTED'),
+      {workflowCode:'WORKFLOW_AUTHORITY_TIER_UNSUPPORTED'});
   return {
     profileId: typeof authority.profileId === 'string' && authority.profileId ? authority.profileId : 'default',
     tier: authority.tier === 'FULL_POWER' ? 'FULL_POWER' : 'STANDARD',
@@ -72,19 +80,27 @@ export function normalizeAuthority(authority = {}) {
 }
 
 export function authorityCompatible(expected, actual) {
+  if(unsupportedAuthorityTier(expected)||unsupportedAuthorityTier(actual))
+    return {ok:false,code:'WORKFLOW_AUTHORITY_TIER_UNSUPPORTED',missing:[]};
   const e = normalizeAuthority(expected), a = normalizeAuthority(actual);
   if (e.profileId !== a.profileId) return { ok:false, code:'WORKFLOW_AUTHORITY_PROFILE_CHANGED', missing:[] };
   const have = new Set(a.capabilities);
   const missing = e.capabilities.filter(x => !have.has(x));
-  return { ok: missing.length === 0, code: missing.length ? 'WORKFLOW_AUTHORITY_REGRESSION' : 'OK', missing };
+  if (missing.length) return { ok:false, code:'WORKFLOW_AUTHORITY_REGRESSION', missing };
+  if (e.tier !== a.tier) return {ok:false,code:'WORKFLOW_AUTHORITY_TIER_CHANGED',missing:[]};
+  return {ok:true,code:'OK',missing:[]};
 }
 
 export function classifyTool(tool, args = {}) {
+  // read_terminal consumes its output cursor by default; only an explicit
+  // non-consuming observation can be safely retried after uncertain delivery.
+  if (tool === 'read_terminal') return args.consume === false ? 'READ_ONLY' : 'NON_IDEMPOTENT_MUTATION';
   if (READ_ONLY.has(tool)) return 'READ_ONLY';
   if (tool === 'write_text') return args.mode === 'append' ? 'NON_IDEMPOTENT_MUTATION' : 'IDEMPOTENT_MUTATION';
   if (tool === 'write_file') return args.mode === 'append' ? 'NON_IDEMPOTENT_MUTATION' : 'IDEMPOTENT_MUTATION';
   if (tool === 'create_directory') return 'IDEMPOTENT_MUTATION';
-  if (/delete|remove|kill|terminate/i.test(tool)) return 'DESTRUCTIVE';
+  // Match complete snake_case action tokens, not substrings such as "skill".
+  if (/(?:^|_)(?:delete|remove|kill|terminate)(?:_|$)/i.test(tool)) return 'DESTRUCTIVE';
   if (EXTERNAL.has(tool)) return 'EXTERNAL_SIDE_EFFECT';
   return 'NON_IDEMPOTENT_MUTATION';
 }

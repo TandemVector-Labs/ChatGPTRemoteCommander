@@ -1,0 +1,14 @@
+# Local QA evidence is not part of npm install artifacts.
+# Preserve all V1 source, scripts and native adapters; exclude only staging metadata.
+HYBRID_QA_SOURCE_MANIFEST.json
+QA_HYBRID_*
+README-HYBRID-QA.txt
+.qa-hybrid-*.tap
+PROJECT_BRAIN.md
+
+# Generated local test output and Python caches are never part of install packages.
+outputs/
+test/.tmp-*
+tools/__pycache__/
+**/__pycache__/
+*.pyc

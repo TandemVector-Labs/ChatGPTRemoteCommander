@@ -108,8 +108,8 @@ write_update_result(){
 import fs from 'node:fs';
 import path from 'node:path';
 const [, , file, status, version, commit, sourceRef] = process.argv;
-if (!/^(?:pass|maintenance_pass)$/.test(status)) process.exit(2);
-if (!/^\d+\.\d+\.\d+$/.test(version)) process.exit(3);
+if (!/^(?:pass|maintenance_pass|blocked_release_train)$/.test(status)) process.exit(2);
+if (!/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:dev|rc)\.[1-9]\d*)?$/.test(version)) process.exit(3);
 if (!/^[0-9a-fA-F]{40}$/.test(commit)) process.exit(4);
 if (sourceRef.length > 128 || !/^[A-Za-z0-9._/-]+$/.test(sourceRef)) process.exit(5);
 fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -131,10 +131,12 @@ curl_fetch(){ curl --fail --silent --show-error --location --connect-timeout "$C
 json_field(){ node "$1/tools/json-field.mjs" --file "$2" --field "$3" 2>/dev/null || true; }
 route_tsv(){ node "$1/tools/router-state.mjs" --state "$2" --tsv; }
 version_gt(){
-  [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$2" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "AUTO_UPDATE_VERSION_COMPARE_INVALID left=$1 right=$2" >&2; return 2; }
-  local IFS=. a1 a2 a3 b1 b2 b3
-  read -r a1 a2 a3 <<< "$1"; read -r b1 b2 b3 <<< "$2"
-  ((10#$a1 > 10#$b1)) || { ((10#$a1 == 10#$b1)) && ((10#$a2 > 10#$b2)); } || { ((10#$a1 == 10#$b1)) && ((10#$a2 == 10#$b2)) && ((10#$a3 > 10#$b3)); }
+  local order
+  order="$(node "$(dirname "$SELF_PATH")/tools/semver-release.mjs" compare "$1" "$2")" || {
+    echo 'AUTO_UPDATE_VERSION_COMPARE_INVALID' >&2
+    exit 2
+  }
+  [[ "$order" == gt ]]
 }
 
 wait_health(){
@@ -162,6 +164,41 @@ stop_owned_candidate(){
   [[ -n "$actual" && "$actual" == "$expected" ]] || { log "CANDIDATE_CLEANUP_OWNERSHIP_MISMATCH pid=$pid"; return 1; }
   stop_pid "$pid"
 }
+prepare_staged_tunnel_client(){
+  # Release checkouts exclude the pinned binary; provision before cutover.
+  local project="$1" helper="$1/tools/install-tunnel-client-linux.sh"
+  local pin="$1/tools/tunnel-client-pin.json" json="$1/tools/json-field.mjs"
+  local version upstream arch exe actual
+  [[ -f "$helper" && -f "$pin" && -f "$json" ]] || {
+    log 'TUNNEL_STAGE_BLOCK reason=installer-or-pin-missing'
+    return 1
+  }
+  log "TUNNEL_STAGE_PREFLIGHT project=$project"
+  if ! /bin/bash "$helper" --install-dir "$project"; then
+    log 'TUNNEL_STAGE_BLOCK reason=pinned-install-failed'
+    return 1
+  fi
+  version="$(node "$json" --file "$pin" --field version 2>/dev/null || true)"
+  upstream="$(node "$json" --file "$pin" --field upstreamCommit 2>/dev/null || true)"
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$upstream" =~ ^[0-9a-f]{40}$ ]] || {
+    log 'TUNNEL_STAGE_BLOCK reason=invalid-pin'
+    return 1
+  }
+  case "$(uname -m)" in
+    x86_64|amd64) arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) log 'TUNNEL_STAGE_BLOCK reason=unsupported-architecture'; return 1 ;;
+  esac
+  exe="$project/tools/tunnel-client-v${version}-linux-${arch}/tunnel-client"
+  [[ -x "$exe" ]] || { log 'TUNNEL_STAGE_BLOCK reason=missing-executable'; return 1; }
+  actual="$("$exe" --version 2>/dev/null || true)"
+  [[ "$actual" == "$version+$upstream"* ]] || {
+    log 'TUNNEL_STAGE_BLOCK reason=provenance-mismatch'
+    return 1
+  }
+  log "TUNNEL_STAGE_VERIFIED version=$version"
+}
+
 run_gate(){ local project="$1" name="$2"; shift 2; log "GATE_START $name"; (cd "$project"; "$@"); log "GATE_PASS $name"; }
 ensure_project_provider(){
   if [[ "$NO_PROMOTE" == 1 ]]; then
@@ -220,7 +257,8 @@ latest_ref(){
     --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
     --output /dev/null --write-out '%{url_effective}' \
     https://github.com/GOD13emad/ChatGPTRemoteCommander/releases/latest 2>/dev/null || true)"
-  tag="$(printf '%s' "$effective" | sed -nE 's#^.*/releases/tag/(v[0-9]+\.[0-9]+\.[0-9]+)$#\1#p' | head -n1)"
+  # Require canonical HTTPS GitHub release URL, otherwise fall back to REST API.
+  tag="$(printf '%s' "$effective" | sed -nE 's#^https://github[.]com/GOD13emad/ChatGPTRemoteCommander/releases/tag/(v[0-9]+\.[0-9]+\.[0-9]+)$#\1#p' | head -n1)"
   if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then printf '%s\n' "$tag"; return; fi
   body="$(curl_fetch -H 'User-Agent: ChatGPTRemoteCommander-Updater' https://api.github.com/repos/GOD13emad/ChatGPTRemoteCommander/releases/latest 2>/dev/null || true)"
   tag="$(printf '%s' "$body" | sed -nE 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -n1)"
@@ -277,7 +315,20 @@ tunnel_control_plane_fresh(){
 tunnel_profile_ready(){
   local file="$1" raw hp ready live age
   raw="$(cat "$file")"
-  [[ "$raw" == *'http://127.0.0.1:47831/mcp'* ]] || return 0
+  if [[ "$raw" != *'http://127.0.0.1:47831/mcp'* ]]; then
+    local profile rule approved=0 expected=0
+    local -a private_targets=()
+    profile="$(basename "$file" .yaml)"
+    IFS=',' read -r -a private_targets <<< "${REMOTE_COMMANDER_TUNNEL_PRIVATE_TARGETS:-}"
+    for rule in "${private_targets[@]}"; do
+      [[ "$rule" =~ ^([A-Za-z0-9][A-Za-z0-9._-]*):([0-9]{4,5})$ ]] || continue
+      [[ "${BASH_REMATCH[1]}" == "$profile" ]] || continue
+      approved=1
+      [[ "$raw" == *"http://127.0.0.1:${BASH_REMATCH[2]}/mcp"* ]] && expected=1
+    done
+    [[ "$approved" == 1 ]] || return 0
+    [[ "$expected" == 1 ]] || { log "TUNNEL_READINESS_BLOCK profile=$profile reason=backend-target-mismatch"; return 1; }
+  fi
   hp="$(printf '%s' "$raw" | sed -nE 's/.*listen_addr:[[:space:]]*["'\'']?127\.0\.0\.1:([0-9]+).*/\1/p' | head -n1)"
   [[ -n "$hp" ]] || { log "TUNNEL_READINESS_BLOCK profile=$(basename "$file") reason=health-port-missing"; return 1; }
   ready="$(curl -fsS --connect-timeout 1 --max-time 2 "http://127.0.0.1:$hp/readyz" 2>/dev/null || true)"
@@ -693,10 +744,61 @@ if [[ "$SELF_TEST" == 1 ]]; then
 fi
 
 REF="$(latest_ref)"
+# A newer approved Preview route makes an older published Stable tag obsolete.
+# Direct installs without a route must use the live health version as authority;
+# otherwise an older GitHub Stable tag could replace a newer direct runtime.
+if [[ "$FORCE" != 1 && "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && ! -f "$ROUTING_ROOT/default.json" ]]; then
+  TAG_VERSION="$(printf '%s' "$REF" | cut -c2-)"
+  LIVE_VERSION="$(curl -fsS --connect-timeout 1 --max-time 2 http://127.0.0.1:47831/health 2>/dev/null | node -e 'const h=JSON.parse(require("node:fs").readFileSync(0,"utf8")); if(h?.ok!==true || typeof h.version!=="string" || !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:dev|rc)\.[1-9]\d*)?$/.test(h.version) || h.instance?.profile!=="default" || !/^[0-9a-f]{64}$/.test(String(h.configSha256??""))) process.exit(2); process.stdout.write(h.version);' 2>/dev/null)" || {
+    log 'AUTO_UPDATE_DIRECT_HEALTH_UNVERIFIED'
+    exit 2
+  }
+  if version_gt "$LIVE_VERSION" "$TAG_VERSION"; then
+    log "AUTO_UPDATE_NEWER_DIRECT_VERSION current=$LIVE_VERSION target=$TAG_VERSION"
+    exit 0
+  fi
+fi
+
+# Until the signed/approved v0.12.0 release exists, unattended updates must
+# not stage or promote an older published Stable tag.
+if [[ "$FORCE" != 1 && "$NO_PROMOTE" != 1 && "$REF" != 'v0.12.0' ]]; then
+  log "AUTO_UPDATE_RELEASE_TRAIN_REF_BLOCK ref=$REF"
+  exit 0
+fi
+
+if [[ "$FORCE" != 1 && "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && -f "$ROUTING_ROOT/default.json" ]]; then
+  TAG_VERSION="$(printf '%s' "$REF" | cut -c2-)"
+  ROUTED_PREVIEW_VERSION="$(node --input-type=module - "$ROUTING_ROOT/default.json" <<'NODE'
+import fs from 'node:fs';
+const state=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));
+const version=String(state?.active?.version??'');
+const commit=String(state?.active?.commit??'');
+if(state?.schema!==1 || state?.profile!=='default' ||
+   !/^\d+\.\d+\.\d+(?:-(?:dev|rc)\.[1-9]\d*)?$/.test(version) || !/^[0-9a-f]{40}$/.test(commit)){
+  console.error('AUTO_UPDATE_ACTIVE_ROUTE_UNVERIFIED');
+  process.exit(2);
+}
+console.log(version);
+NODE
+)"
+  if version_gt "$ROUTED_PREVIEW_VERSION" "$TAG_VERSION"; then
+    log "AUTO_UPDATE_NEWER_PERSISTED_ROUTE_PRESTAGE current=$ROUTED_PREVIEW_VERSION target=$TAG_VERSION"
+    exit 0
+  fi
+fi
 IFS=$'\t' read -r COMMIT VERSION STAGE_DIR < <(stage_release "$REF")
 ACTIVE_CFG="$(active_config "$STAGE_DIR")"
 AUTO_ENABLED="$(json_field "$STAGE_DIR" "$ACTIVE_CFG" autoUpdate.enabled)"
 if [[ "$FORCE" != 1 && "$AUTO_ENABLED" != true ]]; then log 'AUTO_UPDATE_DISABLED'; exit 0; fi
+
+if [[ "$FORCE" != 1 && "$NO_PROMOTE" != 1 ]]; then
+  if [[ "$REF" != 'v0.12.0' || "$VERSION" != '0.12.0' ]] ||
+     ! (cd "$STAGE_DIR" && node tools/verify-v012-publish-readiness.mjs "$VERSION" "$REF" >/dev/null 2>&1); then
+    write_update_result blocked_release_train "$VERSION" "$COMMIT" "$REF"
+    log "AUTO_UPDATE_RELEASE_TRAIN_BLOCK version=$VERSION ref=$REF"
+    exit 0
+  fi
+fi
 
 ROUTE="$ROUTING_ROOT/default.json"
 if [[ "$FORCE" != 1 && -f "$ROUTE" ]]; then
@@ -706,6 +808,9 @@ if [[ "$FORCE" != 1 && -f "$ROUTE" ]]; then
     exit 0
   fi
   if [[ "$ACTIVE_COMMIT" == "$COMMIT" ]]; then
+    # The active route may already match while its release-local client is missing.
+    # Fail closed before maintenance, drain or Supervisor recycling.
+    prepare_staged_tunnel_client "$STAGE_DIR"
     CONTROL="$(git -C "$INSTALL_DIR" rev-parse HEAD 2>/dev/null || true)"
     PREV_PORT="$(json_field "$STAGE_DIR" "$ROUTE" previous.port)"
     PREV_CFG="$(json_field "$STAGE_DIR" "$ROUTE" previous.configPath)"
@@ -751,6 +856,7 @@ run_gate "$STAGE_DIR" linux-gui-safety node tools/linux-gui-safety-audit.mjs
 run_gate "$STAGE_DIR" check npm run check:qualification
 run_gate "$STAGE_DIR" test npm run test:qualification
 run_gate "$STAGE_DIR" audit npm run audit
+prepare_staged_tunnel_client "$STAGE_DIR"
 
 PORT="$(node "$STAGE_DIR/tools/find-free-port.mjs" --start 48831 --end 51999)"
 STATE_DIR="$RUNTIME_ROOT/$COMMIT/default"
@@ -781,32 +887,66 @@ build_cfg(){
   node "${args[@]}"
 }
 
+# A FULL_POWER/FULL_ACCESS development candidate necessarily quarantines legacy
+# unauthenticated MCP. Do not demand anonymous tools/list from Doctor and label
+# its 403 response a crash. Negative-only NoPromote is NOT authorization.
+qualify_candidate_dispatch(){
+  local cfg="$1" tier power trust
+  tier="$(json_field "$STAGE_DIR" "$cfg" capabilityProfile.tier)"
+  power="$(json_field "$STAGE_DIR" "$cfg" powerMode.enabled)"
+  trust="$(json_field "$STAGE_DIR" "$cfg" requireTrustedIngress)"
+  if [[ "$NO_PROMOTE" == 1 && (
+      "$tier" == FULL_POWER || "$tier" == FULL_ACCESS ||
+      "$power" == true || "$trust" == true
+     ) ]]; then
+    node "$STAGE_DIR/tools/qa-v012-no-promote-ingress.mjs" "--port=$PORT"
+    log 'V012_NOPROMOTE_PROTECTED_NEGATIVE_ONLY_PASS G1_J01_POSITIVE_UNPROVED'
+  else
+    node "$STAGE_DIR/tools/doctor.mjs" --url "http://127.0.0.1:$PORT/mcp" --expected-version "$VERSION" --config "$cfg" --json
+    node "$STAGE_DIR/tools/hardware-selftest.mjs" --url "http://127.0.0.1:$PORT/mcp" --config "$cfg" --expected-version "$VERSION"
+  fi
+}
 DIAG_CFG="$STATE_DIR/diagnostic-config.json"
 build_cfg "$DIAG_CFG" "$SHADOW_WF" shadow >/dev/null
+# Use the previously installed source as authority when available; during first
+# adoption, use the pinned and qualified staged source. Never trust an arbitrary
+# writable state-root guard for future releases.
+RUNNER_POLICY_GUARD="$INSTALL_DIR/tools/runner-policy-continuity.mjs"
+[[ -f "$RUNNER_POLICY_GUARD" ]] || RUNNER_POLICY_GUARD="$STAGE_DIR/tools/runner-policy-continuity.mjs"
+if ! node "$RUNNER_POLICY_GUARD" "$ACTIVE_CFG" "$DIAG_CFG"; then
+  log 'AUTO_UPDATE_RUNNER_POLICY_DIAGNOSTIC_BLOCKED'
+  exit 3
+fi
 DIAG_SHA="$(sha256sum "$DIAG_CFG" | awk '{print $1}')"
 CANDIDATE_PID="$(start_backend "$STAGE_DIR" "$DIAG_CFG" "$STATE_DIR/diagnostic.log")"
 wait_health "$PORT" "$VERSION" "$DIAG_SHA" default || { stop_pid "$CANDIDATE_PID"; echo 'diagnostic health failed' >&2; exit 1; }
-node "$STAGE_DIR/tools/doctor.mjs" --url "http://127.0.0.1:$PORT/mcp" --expected-version "$VERSION" --config "$DIAG_CFG" --json
-node "$STAGE_DIR/tools/hardware-selftest.mjs" --url "http://127.0.0.1:$PORT/mcp" --config "$DIAG_CFG" --expected-version "$VERSION"
+qualify_candidate_dispatch "$DIAG_CFG"
 stop_owned_candidate "$CANDIDATE_PID" "$STAGE_DIR"
 CANDIDATE_PID=""
 
 FINAL_CFG="$STATE_DIR/config.json"
 build_cfg "$FINAL_CFG" "$LIVE_WF" preserve >/dev/null
+if ! node "$RUNNER_POLICY_GUARD" "$ACTIVE_CFG" "$FINAL_CFG"; then
+  log 'AUTO_UPDATE_RUNNER_POLICY_CHANGE_BLOCKED'
+  exit 3
+fi
 FINAL_SHA="$(sha256sum "$FINAL_CFG" | awk '{print $1}')"
 CANDIDATE_PID="$(start_backend "$STAGE_DIR" "$FINAL_CFG" "$STATE_DIR/server.log")"
 wait_health "$PORT" "$VERSION" "$FINAL_SHA" default || { stop_pid "$CANDIDATE_PID"; echo 'final candidate health failed' >&2; exit 1; }
-node "$STAGE_DIR/tools/doctor.mjs" --url "http://127.0.0.1:$PORT/mcp" --expected-version "$VERSION" --config "$FINAL_CFG" --json
-node "$STAGE_DIR/tools/hardware-selftest.mjs" --url "http://127.0.0.1:$PORT/mcp" --config "$FINAL_CFG" --expected-version "$VERSION"
+qualify_candidate_dispatch "$FINAL_CFG"
 
 if [[ "$NO_PROMOTE" == 1 ]]; then stop_owned_candidate "$CANDIDATE_PID" "$STAGE_DIR"; CANDIDATE_PID=""; trap - ERR; log 'AUTO_UPDATE_CANDIDATE_PASS'; exit 0; fi
 
 if [[ -f "$ROUTE" ]]; then
   SCHEMA_OLD_PORT="$(json_field "$STAGE_DIR" "$ROUTE" active.port)"
   if [[ -n "$SCHEMA_OLD_PORT" ]]; then
-    set +e
-    SCHEMA_PRE="$(node "$STAGE_DIR/tools/schema-continuity-gate.mjs" --old-url "http://127.0.0.1:$SCHEMA_OLD_PORT/mcp" --candidate-url "http://127.0.0.1:$PORT/mcp" --router-url "http://127.0.0.1:47831/router/status" 2>/dev/null)"
-    set -e
+    # Expected incompatible preflight can return 3; guard the assignment.
+    # set +e alone does not inhibit the active ERR trap (R170 regression).
+    if SCHEMA_PRE="$(node "$STAGE_DIR/tools/schema-continuity-gate.mjs" --old-url "http://127.0.0.1:$SCHEMA_OLD_PORT/mcp" --candidate-url "http://127.0.0.1:$PORT/mcp" --router-url "http://127.0.0.1:47831/router/status" 2>/dev/null)"; then
+      :
+    else
+      log 'SCHEMA_PRE_REJECTED_BEFORE_ROUTER_BOOTSTRAP'
+    fi
     SCHEMA_CHANGED="$(node -e 'try{const x=JSON.parse(process.argv[1]);process.stdout.write(x.changed===true?"true":"false")}catch{process.stdout.write("false")}' "$SCHEMA_PRE")"
     BOOTSTRAP="$(node "$STAGE_DIR/tools/router-source-bootstrap.mjs" --url http://127.0.0.1:47831/router/status --state "$ROUTE" --runtime "$ROUTING_ROOT/default.runtime.json" --candidate-source "$STAGE_DIR/src/stable-router.mjs" --log "$STATE_ROOT/router.log")"
     ROUTER_CHANGED="$(node -e 'const x=JSON.parse(process.argv[1]);process.stdout.write(x.changed===true?"true":"false")' "$BOOTSTRAP")"

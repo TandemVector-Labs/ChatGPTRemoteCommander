@@ -7,10 +7,18 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { WorkflowStore, canonical, hash } from '../src/workflow-store.mjs';
+import { classifyTool, reconciliationPlan } from '../src/workflow-autonomy.mjs';
+import { powerToolDefinitions } from '../src/power-tools-v0.3.mjs';
+import { agentExtensionToolDefinitions } from '../src/agent-extensions.mjs';
+import { runContainedProjectCommand, processContainmentAvailable } from '../src/process-containment.mjs';
 const worker = fileURLToPath(new URL('./workflow-worker.mjs', import.meta.url));
 const fixture = (overrides = {}) => {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'rc-memory-')));
-  const options = { directory: path.join(root, 'memory'), allowedRoots: [root], device: 'fixture', configSha256: '1'.repeat(64), ...overrides };
+  // Spawned workers reopen the same workflow with the exact same owner tier.
+  const authority={profileId:'default',tier:'FULL_POWER',
+    capabilities:['filesystem.full','workflow.durable','workflow.scheduler']};
+  const options = { directory: path.join(root, 'memory'), allowedRoots: [root],
+    device: 'fixture', configSha256: '1'.repeat(64), authority, ...overrides };
   const s = new WorkflowStore(options);
   const create = (id='sample') => s.create({ id, root, goal: 'Resume safely', acceptance: ['Validate visible outcome'], steps: [{ id: 'first', title: 'Inspect' }, { id: 'second', title: 'Act' }] });
   return { root, options, s, create, dispose() { s.close(); fs.rmSync(root, { recursive: true, force: true }); } };
@@ -24,7 +32,80 @@ function runWorker(args) {
   });
 }
 const host = dispatch => ({ validate: async()=>{}, dispatch });
+function expireRootLease(f){
+  const db=new DatabaseSync(path.join(f.options.directory,'root-leases.sqlite'));
+  try{
+    const key=process.platform==='win32'?path.resolve(f.root).toLowerCase():path.resolve(f.root);
+    const row=db.prepare('SELECT root FROM root_leases WHERE root=?').get(key);
+    assert.ok(row,'uncertain operation must retain its exact root lease');
+    db.prepare('UPDATE root_leases SET expires_at=? WHERE root=?').run('2000-01-01T00:00:00.000Z',row.root);
+  }finally{db.close();}
+}
+
 const call = (f, extra={}) => f.s.call({ id:'sample',stepId:'first',expectedRevision:1,tool:'read_text',arguments:{path:'x'},...extra },host(async()=>({ok:true})));
+
+test('host-declared read-only inspection tools have safe-retry receipts and verified workflow status',async()=>{
+  for(const tool of ['search_files','system_info','list_processes']){
+    assert.equal(classifyTool(tool,{}),'READ_ONLY');
+    assert.deepEqual(reconciliationPlan(tool,{}),{strategy:'SAFE_RETRY',classification:'READ_ONLY'});
+    const f=fixture();
+    try{
+      f.create();
+      let dispatches=0;
+      const result=await f.s.call({
+        id:'sample',stepId:'first',expectedRevision:1,tool,arguments:{}
+      },host(async()=>{dispatches++;return {ok:true};}));
+      assert.equal(dispatches,1);
+      assert.equal(result.operation.classification,'READ_ONLY');
+      assert.equal(result.operation.status,'VERIFIED');
+      assert.equal(f.s.get('sample').state.steps[0].status,'verified');
+      assert.equal(f.s.operations('sample')[0].status,'VERIFIED');
+      assert.equal(f.s.schedulerStatus().currentLeases,0);
+    }finally{f.dispose();}
+  }
+});
+
+test('Host catalog and durable effect classifier remain aligned for Power tools',()=>{
+  const names=new Set();
+  for(const definition of powerToolDefinitions){
+    assert.ok(!names.has(definition.name),'duplicate Host tool definition '+definition.name);
+    names.add(definition.name);
+    const readOnly=definition.annotations?.readOnlyHint===true;
+    const actual=classifyTool(definition.name,{});
+    assert.equal(actual==='READ_ONLY',readOnly,
+      'Host annotation and workflow classification disagree for '+definition.name);
+  }
+  const terminal=powerToolDefinitions.find(x=>x.name==='read_terminal');
+  assert.ok(terminal,'read_terminal must remain in the Host catalog');
+  assert.equal(terminal.annotations.readOnlyHint,false,
+    'default read_terminal advances its output cursor and is not safely read-only');
+  assert.equal(classifyTool('read_terminal',{}),'NON_IDEMPOTENT_MUTATION');
+  assert.equal(classifyTool('read_terminal',{consume:true}),'NON_IDEMPOTENT_MUTATION');
+  assert.equal(classifyTool('read_terminal',{consume:false}),'READ_ONLY');
+  assert.deepEqual(reconciliationPlan('read_terminal',{consume:false}),
+    {strategy:'SAFE_RETRY',classification:'READ_ONLY'});
+});
+
+test('whole-token destructive verbs do not mistake agent skill metadata for a kill operation',()=>{
+  const readOnlyAgentTools=agentExtensionToolDefinitions.filter(x=>x.annotations?.readOnlyHint===true);
+  assert.ok(readOnlyAgentTools.some(x=>x.name==='agent_extension_skill'));
+  for(const definition of readOnlyAgentTools){
+    assert.notEqual(classifyTool(definition.name,{}),'DESTRUCTIVE',
+      'read-only Host tool must not be classified destructive: '+definition.name);
+  }
+  assert.equal(classifyTool('agent_extension_skill',{}),'NON_IDEMPOTENT_MUTATION');
+  assert.equal(classifyTool('skill_repository',{}),'NON_IDEMPOTENT_MUTATION');
+  for(const tool of ['delete_path','kill_process','remove_entry','terminate_job','worker_kill_process']){
+    assert.equal(classifyTool(tool,{}),'DESTRUCTIVE',tool+' must remain destructive');
+  }
+});
+
+test('shell execution retains external-effect classification rather than safe retry',()=>{
+  assert.equal(classifyTool('run_shell',{command:'echo hello'}),'EXTERNAL_SIDE_EFFECT');
+  assert.deepEqual(reconciliationPlan('run_shell',{command:'echo hello'}),{
+    strategy:'MANUAL_OR_REMOTE_STATE',classification:'EXTERNAL_SIDE_EFFECT'
+  });
+});
 
 test('creation, restart, typed notes and scoped search retain exact state',()=>{
   const f=fixture();try {
@@ -97,6 +178,50 @@ test('scheduler store installs indexes for bounded large-history recovery',()=>{
 }finally{f.dispose();}});
 
 test('stale revision cannot overwrite new memory',()=>{const f=fixture();try{f.create();f.s.note({id:'sample',expectedRevision:1,kind:'decision',text:'A'});assert.throws(()=>f.s.note({id:'sample',expectedRevision:1,kind:'decision',text:'B'}),/REVISION_CONFLICT/);}finally{f.dispose();}});
+test('workflow call binds canonical root lease and step identity to Host dispatch and durable receipts',async()=>{
+ const f=fixture();try{
+  f.create();let dispatched=null;
+  const result=await f.s.call({
+    id:'sample',stepId:'first',expectedRevision:1,tool:'read_text',arguments:{path:'x'}
+  },host(async(_tool,_args,_state,scope)=>{
+    dispatched=scope;
+    assert.ok(Object.isFrozen(scope));
+    return {ok:true};
+  }));
+  const scope=result.receipt.workflowScope;
+  assert.ok(scope);
+  assert.deepEqual(Object.keys(scope).sort(),[
+    'fencingToken','leaseId','operationId','revision','rootFingerprint','stepId','workflowId'
+  ]);
+  assert.deepEqual(dispatched,scope);
+  assert.deepEqual(result.operation.workflowScope,scope);
+  const step=f.s.get('sample').state.steps[0];
+  assert.deepEqual(step.workflowScope,scope);
+  assert.equal(step.leaseRevision,1);
+  assert.equal(step.leaseId,scope.leaseId);
+  assert.equal(step.rootFingerprint,scope.rootFingerprint);
+  assert.equal(scope.workflowId,'sample');
+  assert.equal(scope.stepId,'first');
+  assert.equal(scope.operationId,result.operation.operationId);
+  assert.equal(scope.revision,1);
+  assert.equal(scope.fencingToken,result.operation.fencingToken);
+  assert.equal(scope.rootFingerprint,hash(canonical({device:'fixture',root:f.root})));
+  assert.match(scope.leaseId,/^[a-f0-9]{64}$/);
+  assert.notEqual(scope.leaseId,scope.operationId);
+ }finally{f.dispose();}
+});
+test('workflow calls omit lease-bound scope when one-writer-per-root is explicitly disabled',async()=>{
+ const f=fixture({schedulerPolicy:{oneWriterPerRoot:false}});try{
+  f.create();let dispatched='unset';
+  const result=await f.s.call({
+    id:'sample',stepId:'first',expectedRevision:1,tool:'read_text',arguments:{path:'x'}
+  },host(async(_tool,_args,_state,scope)=>{dispatched=scope;return{ok:true};}));
+  assert.equal(dispatched,null);
+  assert.equal(Object.hasOwn(result.receipt,'workflowScope'),false);
+  assert.equal(Object.hasOwn(result.operation,'workflowScope'),false);
+  assert.equal(Object.hasOwn(f.s.get('sample').state.steps[0],'workflowScope'),false);
+ }finally{f.dispose();}
+});
 test('exact duplicate returns receipt and never executes twice',async()=>{const f=fixture();try{
  f.create();let n=0;const h=host(async()=>{n++;return{ok:true};});const a={id:'sample',stepId:'first',expectedRevision:1,tool:'read_text',arguments:{path:'x'}};
  await f.s.call(a,h); const b=await f.s.call(a,h);assert.equal(b.cachedReceipt,true);assert.equal(n,1);assert.equal(f.s.get('sample').state.revision,3);
@@ -133,6 +258,91 @@ test('history triggers enforce append-only and projection tampering fails closed
  assert.throws(()=>f.s.get('sample'),/CORRUPT/);
 }finally{f.dispose();}});
 test('export has verifiable canonical digest and excludes foreign project',()=>{const f=fixture();try{f.create();f.create('other');const b=f.s.export('sample');assert.equal(b.sha256,hash(canonical(b.bundle)));assert.equal(b.bundle.state.id,'sample');assert.equal(b.bundle.events.length,1);assert.equal(f.s.list().length,2);}finally{f.dispose();}});
+test('WorkflowStore accepts only the contained runner proof bound to its acquired root lease',async t=>{
+  if(!(await processContainmentAvailable())) return t.skip('host-local process containment provider unavailable');
+  const f=fixture();
+  try{
+    f.create();
+    const result=await f.s.call({
+      id:'sample',stepId:'first',expectedRevision:1,tool:'run_project_command',
+      arguments:{program:process.execPath,args:['-e',"process.stdout.write('workflow-bound')"]}
+    },{
+      validate:async()=>{},
+      dispatch:async(_name,_args,_state,binding)=>runContainedProjectCommand({
+        program:process.execPath,args:['-e',"process.stdout.write('workflow-bound')"],cwd:f.root,
+        timeoutMs:10000,outputLimit:4096,env:process.env,binding
+      })
+    });
+    assert.equal(result.outcome,'RECORDED_NOT_VALIDATED');
+    assert.equal(result.receipt.processCessationProof.workflowId,'sample');
+    assert.equal(result.receipt.processCessationProof.stepId,'first');
+    assert.equal(result.receipt.processCessationProof.operationId,result.operation.operationId);
+    assert.equal(result.receipt.processCessationProof.fencingToken,result.operation.fencingToken);
+    assert.equal(result.receipt.processCessationProof.leaseId.length,64);
+    assert.equal(f.s.get('sample').state.steps[0].status,'recorded');
+    assert.equal(f.s.schedulerStatus().currentLeases,0);
+  }finally{f.dispose();}
+});
+
+test('process-capable operation without a native cessation proof remains uncertain and cannot release its root lease',async()=>{
+  const f=fixture();
+  try{
+    f.create();
+    const result=await f.s.call({
+      id:'sample',stepId:'first',expectedRevision:1,tool:'run_project_command',
+      arguments:{program:process.execPath,args:['-e','process.exit(0)']}
+    },host(async()=>({exitCode:0,stdout:'not-contained',stderr:''})));
+    assert.equal(result.outcome,'UNCERTAIN');
+    assert.equal(result.receipt.nativeCessationProofRequired,true);
+    assert.equal(result.receipt.errorCode,'WORKFLOW_NATIVE_CESSATION_PROOF_MISSING_OR_UNTRUSTED');
+    assert.equal(Object.hasOwn(result.receipt,'processCessationProof'),false);
+    const db=new DatabaseSync(path.join(f.options.directory,'root-leases.sqlite'));
+    try{assert.equal(db.prepare('SELECT count(*) AS n FROM root_leases').get().n,1);}finally{db.close();}
+    expireRootLease(f);
+    assert.throws(()=>f.s.reconcile({
+      id:'sample',stepId:'first',expectedRevision:f.s.get('sample').state.revision,
+      outcome:'not_applied',files:[],explanation:'No host-verified cessation proof exists.'
+    }),/WORKFLOW_CESSATION_PROOF_REQUIRED_OR_INVALID/);
+    const verify=new DatabaseSync(path.join(f.options.directory,'root-leases.sqlite'));
+    try{assert.equal(verify.prepare('SELECT count(*) AS n FROM root_leases').get().n,1);}finally{verify.close();}
+  }finally{f.dispose();}
+});
+
+test('trusted process-cessation receipt reconciles and releases only the expired matching root lease',async t=>{
+  if(!(await processContainmentAvailable())) return t.skip('host-local process containment provider unavailable');
+  const f=fixture();
+  try{
+    f.create();
+    fs.writeFileSync(path.join(f.root,'observed.txt'),'no side effect');
+    const args=['-e','process.exit(17)'];
+    const result=await f.s.call({
+      id:'sample',stepId:'first',expectedRevision:1,tool:'run_project_command',
+      arguments:{program:process.execPath,args}
+    },host(async(_name,_args,_state,binding)=>runContainedProjectCommand({
+      program:process.execPath,args,cwd:f.root,timeoutMs:10000,
+      outputLimit:4096,env:process.env,binding
+    })));
+    assert.equal(result.outcome,'UNCERTAIN');
+    assert.equal(result.receipt.processCessationProof.operationId,result.operation.operationId);
+    assert.equal(result.receipt.processCessationProof.leaseId.length,64);
+    assert.equal(result.receipt.processCessationProof.fencingToken,result.operation.fencingToken);
+    expireRootLease(f);
+    const reconciled=f.s.reconcile({
+      id:'sample',stepId:'first',expectedRevision:f.s.get('sample').state.revision,outcome:'not_applied',
+      files:['observed.txt'],explanation:'Contained process tree ceased; independent inspection found no effect.'
+    });
+    assert.equal(reconciled.state.steps[0].status,'reconciled_not_applied');
+    assert.equal(reconciled.state.steps[0].reconciliation.leaseReleaseStatus,'RELEASED');
+    const db=new DatabaseSync(path.join(f.options.directory,'root-leases.sqlite'));
+    try{assert.equal(db.prepare('SELECT count(*) AS n FROM root_leases').get().n,0);}finally{db.close();}
+    const replay=f.s.reconcile({
+      id:'sample',stepId:'first',expectedRevision:reconciled.revision,outcome:'not_applied',
+      files:['observed.txt'],explanation:'Contained process tree ceased; independent inspection found no effect.'
+    });
+    assert.equal(replay.replayed,true);
+    assert.equal(replay.leaseRelease.status,'ALREADY_RELEASED');
+  }finally{f.dispose();}
+});
 test('second live process cannot reconcile another process in-flight',async()=>{const f=fixture();try{
  f.create();fs.writeFileSync(path.join(f.root,'proof.txt'),'inspect');let release;const wait=new Promise(r=>release=r);
  const action=f.s.call({id:'sample',stepId:'first',expectedRevision:1,tool:'read_text',arguments:{}},host(async()=>{await wait;return{ok:true};}));
@@ -156,7 +366,7 @@ test('crash inside an uncommitted transaction is rolled back on reopen',async()=
 }finally{f.dispose();}});
 test('large and deeply nested inputs are bounded',()=>{const f=fixture();try{f.create();assert.throws(()=>f.s.note({id:'sample',expectedRevision:1,kind:'fact',text:'x'.repeat(9000)}),/INVALID_TEXT/);let v={};for(let i=0;i<30;i++)v={nested:v};assert.throws(()=>canonical(v),/DEPTH/);}finally{f.dispose();}});
 test('not-applied attestation does not create an automatic retry',async()=>{const f=fixture();try{
- f.create();fs.writeFileSync(path.join(f.root,'proof.txt'),'not applied');await f.s.call({id:'sample',stepId:'first',expectedRevision:1,tool:'x',arguments:{}},host(async()=>{throw Error('failed');}));
+ f.create();fs.writeFileSync(path.join(f.root,'proof.txt'),'not applied');await f.s.call({id:'sample',stepId:'first',expectedRevision:1,tool:'write_text',arguments:{path:'proof.txt',content:'unused'}},host(async()=>{throw Error('failed');}));
  f.s.reconcile({id:'sample',stepId:'first',expectedRevision:3,outcome:'not_applied',files:['proof.txt'],explanation:'Independent target inspection'});
  assert.ok(f.s.resume('sample').blockers.includes('WORKFLOW_REPLAN_REQUIRED'));await assert.rejects(call(f),/REQUIRES_RECONCILIATION/);
 }finally{f.dispose();}});

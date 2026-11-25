@@ -19,9 +19,6 @@ if($ArgumentsJson){
   if($null-ne$parsed){$arguments=@($parsed|ForEach-Object{[string]$_})}
 }
 
-$childScript=Join-Path $PSScriptRoot 'owned-command-child.ps1'
-if(-not(Test-Path -LiteralPath $childScript -PathType Leaf)){throw 'OWNED_PROCESS_TREE_CHILD_HELPER_MISSING'}
-
 if(-not('RcQualificationJobNative' -as [type])){
   Add-Type -TypeDefinition @'
 using System;
@@ -206,20 +203,28 @@ public static class RcQualificationJobNative {
 
   public static UInt64[] ActiveProcessIds(IntPtr job) {
     int capacity=64;
+    int headerBytes=8;
     for(int attempt=0;attempt<7;attempt++,capacity*=2) {
-      int bytes=8+(IntPtr.Size*capacity);
+      int bytes=headerBytes+(IntPtr.Size*capacity);
       IntPtr mem=Marshal.AllocHGlobal(bytes);
       try {
         for(int i=0;i<bytes;i++) Marshal.WriteByte(mem,i,0);
         UInt32 returned;
         bool ok=QueryInformationJobObject(job,JobObjectBasicProcessIdList,mem,(UInt32)bytes,out returned);
-        UInt32 assigned=(UInt32)Marshal.ReadInt32(mem,0);
-        UInt32 count=(UInt32)Marshal.ReadInt32(mem,4);
+        UInt32 assigned=unchecked((UInt32)Marshal.ReadInt32(mem,0));
+        UInt32 count=unchecked((UInt32)Marshal.ReadInt32(mem,4));
         if(ok) {
+          // Win32 declares both count fields as DWORD and only the PID array
+          // as ULONG_PTR. The header remains 8 bytes on x64; each PID is 8.
+          // Never accept a partial list as proof that the job is empty.
+          if(count!=assigned || count>(UInt32)capacity) {
+            if(assigned>(UInt32)capacity) continue;
+            throw new InvalidOperationException("JOB_PROCESS_LIST_COUNT_MISMATCH");
+          }
           var result=new List<UInt64>();
-          for(int i=0;i<count;i++) {
-            IntPtr value=Marshal.ReadIntPtr(mem,8+(i*IntPtr.Size));
-            result.Add((UInt64)value.ToInt64());
+          for(int i=0;i<(int)count;i++) {
+            IntPtr value=Marshal.ReadIntPtr(mem,headerBytes+(i*IntPtr.Size));
+            result.Add(unchecked((UInt64)value.ToInt64()));
           }
           return result.ToArray();
         }
@@ -260,28 +265,6 @@ function Quote-WindowsArgument([string]$Value){
   return $sb.ToString()
 }
 
-function Get-ProcessEvidence([UInt64[]]$Ids){
-  $rows=@()
-  foreach($id64 in @($Ids)){
-    if($id64 -gt [int]::MaxValue){continue}
-    $id=[int]$id64
-    try{
-      $p=Get-CimInstance Win32_Process -Filter ("ProcessId="+$id) -ErrorAction Stop
-      $rows+=[ordered]@{
-        pid=$id
-        ppid=[int]$p.ParentProcessId
-        name=[string]$p.Name
-        executablePath=[string]$p.ExecutablePath
-        commandLine=[string]$p.CommandLine
-      }
-    }catch{
-      $rows+=[ordered]@{pid=$id;missing=$true}
-    }
-  }
-  return @($rows)
-}
-
-$specPath=Join-Path $env:TEMP ("rc-owned-command-{0}-{1}.json" -f ($RunId -replace '[^A-Za-z0-9._-]','_'),$PID)
 $report=[ordered]@{
   schema=1
   runId=$RunId
@@ -296,6 +279,7 @@ $report=[ordered]@{
   cleanupRequired=$false
   activeBeforeCleanup=0
   activeAfterCleanup=$null
+  cleanupVerified=$false
   leakedProcesses=@()
   status='STARTING'
   completedAt=$null
@@ -306,8 +290,6 @@ $previousRunId=$env:RC_QUALIFICATION_RUN_ID
 $hadRunId=Test-Path Env:RC_QUALIFICATION_RUN_ID
 $exitCode=1
 try{
-  $spec=[ordered]@{program=$Program;arguments=@($arguments);workingDirectory=$WorkingDirectory}
-  [IO.File]::WriteAllText($specPath,($spec|ConvertTo-Json -Depth 8)+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
   $env:RC_QUALIFICATION_RUN_ID=$RunId
 
   # Launch executables directly and suspended so the kill-on-close Job owns descendants.
@@ -357,33 +339,46 @@ try{
     throw ("OWNED_PROCESS_TREE_WAIT_FAILED code="+$wait)
   }
 
-  $deadline=[DateTime]::UtcNow.AddMilliseconds($DrainGraceMs)
-  do{
-    $active=@([RcQualificationJobNative]::ActiveProcessIds($job))
-    if($active.Count-eq0){break}
-    Start-Sleep -Milliseconds 50
-  }while([DateTime]::UtcNow-lt$deadline)
+  # A timeout requires immediate termination; do not spend the drain grace
+  # or perform slow WMI/CIM inspection while an untrusted child can still mutate.
+  if(-not $report.timedOut){
+    $deadline=[DateTime]::UtcNow.AddMilliseconds($DrainGraceMs)
+    do{
+      $active=@([RcQualificationJobNative]::ActiveProcessIds($job))
+      if($active.Count-eq0){break}
+      Start-Sleep -Milliseconds 50
+    }while([DateTime]::UtcNow-lt$deadline)
+  }
 
   $active=@([RcQualificationJobNative]::ActiveProcessIds($job))
   $report.activeBeforeCleanup=$active.Count
   if($active.Count-gt0){
     $report.cleanupRequired=$true
-    $report.leakedProcesses=Get-ProcessEvidence $active
-    [RcQualificationJobNative]::TerminateJobObject($job,125)|Out-Null
+    # Capture PIDs only before termination. CIM/WMI queries here can block long
+    # enough for a descendant to finish an unwanted delayed mutation.
+    $report.leakedProcesses=@($active|ForEach-Object{[ordered]@{pid=[UInt64]$_}})
+    $terminated=[RcQualificationJobNative]::TerminateJobObject($job,[uint32]125)
+    if(-not $terminated){
+      $win32=[Runtime.InteropServices.Marshal]::GetLastWin32Error()
+      throw ("OWNED_PROCESS_TREE_TERMINATE_JOB_FAILED win32="+$win32)
+    }
     $cleanupDeadline=[DateTime]::UtcNow.AddSeconds(5)
+    $remaining=@([RcQualificationJobNative]::ActiveProcessIds($job))
     do{
+      if($remaining.Count-eq0){break}
       Start-Sleep -Milliseconds 50
       $remaining=@([RcQualificationJobNative]::ActiveProcessIds($job))
-      if($remaining.Count-eq0){break}
     }while([DateTime]::UtcNow-lt$cleanupDeadline)
     $report.activeAfterCleanup=$remaining.Count
     if($remaining.Count-gt0){throw 'OWNED_PROCESS_TREE_CLEANUP_FAILED'}
+    $report.cleanupVerified=$true
     if(-not $report.timedOut -and $exitCode-eq0){
       $report.status='DESCENDANT_LEAK_CLEANED'
       $exitCode=125
     }
   }else{
     $report.activeAfterCleanup=0
+    $report.cleanupVerified=$true
   }
 
   if($report.timedOut){
@@ -403,10 +398,30 @@ try{
       $report.activeBeforeCleanup=$active.Count
       if($active.Count){
         $report.cleanupRequired=$true
-        $report.leakedProcesses=Get-ProcessEvidence $active
-        [RcQualificationJobNative]::TerminateJobObject($job,126)|Out-Null
+        $report.leakedProcesses=@($active|ForEach-Object{[ordered]@{pid=[UInt64]$_}})
+        $terminated=[RcQualificationJobNative]::TerminateJobObject($job,[uint32]126)
+        if(-not $terminated){
+          $win32=[Runtime.InteropServices.Marshal]::GetLastWin32Error()
+          throw ("OWNED_PROCESS_TREE_TERMINATE_JOB_FAILED win32="+$win32)
+        }
+        $cleanupDeadline=[DateTime]::UtcNow.AddSeconds(5)
+        $remaining=@([RcQualificationJobNative]::ActiveProcessIds($job))
+        do{
+          if($remaining.Count-eq0){break}
+          Start-Sleep -Milliseconds 50
+          $remaining=@([RcQualificationJobNative]::ActiveProcessIds($job))
+        }while([DateTime]::UtcNow-lt$cleanupDeadline)
+        $report.activeAfterCleanup=$remaining.Count
+        if($remaining.Count-gt0){throw 'OWNED_PROCESS_TREE_CLEANUP_FAILED'}
+        $report.cleanupVerified=$true
+      }else{
+        $report.activeAfterCleanup=0
+        $report.cleanupVerified=$true
       }
-    }catch{}
+    }catch{
+      $report.cleanupVerified=$false
+      $report.cleanupError=$_.Exception.Message
+    }
   }
 }finally{
   $report.completedAt=(Get-Date).ToUniversalTime().ToString('o')
@@ -420,7 +435,6 @@ try{
     if($pi.hProcess-ne[IntPtr]::Zero){[RcQualificationJobNative]::CloseHandle($pi.hProcess)|Out-Null}
   }
   if($job-ne[IntPtr]::Zero){[RcQualificationJobNative]::CloseHandle($job)|Out-Null}
-  Remove-Item -LiteralPath $specPath -Force -ErrorAction SilentlyContinue
   if($hadRunId){$env:RC_QUALIFICATION_RUN_ID=$previousRunId}else{Remove-Item Env:RC_QUALIFICATION_RUN_ID -ErrorAction SilentlyContinue}
 }
 exit $exitCode

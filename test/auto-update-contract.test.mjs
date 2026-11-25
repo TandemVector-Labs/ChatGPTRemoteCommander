@@ -1,4 +1,8 @@
 import test from 'node:test';
+import offlineOs from 'node:os';
+import * as offlineSpawn from 'node:child_process';
+import './release-discovery-url-security.test.mjs';
+import { assertPinnedReleaseDiscovery } from './release-discovery-contract.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -87,7 +91,7 @@ test('R230 real updater helper execution leaves arbitrary legacy projection sent
        linuxFn,
        'ensure_project_provider'
      ].join('\n');
-     result=spawnSync('bash',['-c',command,'--',sandbox,promote?'1':'0'],{encoding:'utf8',timeout:15000});
+     result=spawnSync('bash',['-s','--',sandbox,promote?'1':'0'],{input:command,encoding:'utf8',timeout:15000});
    }else{
      return t.skip('R230 native execution is required only on Windows and Linux');
    }
@@ -97,6 +101,59 @@ test('R230 real updater helper execution leaves arbitrary legacy projection sent
    assert.ok(result.stdout.includes(promote?'PROJECT_PROVIDER_CLEANUP_SKIPPED reason=no-promote':'LEGACY_CODEX_PROVIDER_CLEANUP_PENDING reason=OWNER_ACCEPTANCE_REQUIRED'),result.stdout);
    if(!promote)assert.ok(result.stdout.includes('PROJECT_PROVIDER_DISABLED policy=NO_CODEX_VIA_COMMANDER'));
  }
+});
+
+test('R-fleet unattended Stable check preserves newer persisted active route when MCP is unavailable',t=>{
+ const win=read('auto-update-windows.ps1');
+ const marker=win.indexOf('  # R-fleet: An accepted newer route');
+ const end=win.indexOf('  $currentStatus=$null',marker);
+ assert.ok(marker>win.indexOf('$script:QualificationCommit=$stage.Commit'),'guard follows stage identity');
+ assert.ok(end>marker && end<win.indexOf("Run-Gate $stage.Dir 'check'"),'guard must precede tests or promotion');
+ const snippet=win.slice(marker,end);
+ for(const key of ["if(-not $Force)", "Get-RoutePath 'default'","Read-Json $persistedRoutePath",
+   "Test-VersionGreater $persistedVersion $stage.Version","$report.authoritySource='PERSISTED_ROUTE'",
+   "AUTO_UPDATE_NEWER_PERSISTED_ROUTE","exit 0"])assert.ok(snippet.includes(key),'missing '+key);
+ if(process.platform!=='win32')return;
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'rc-route-no-downgrade-'));
+ t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const fixture=path.join(dir,'default.json');
+ const run=(force,contents)=>{
+   if(contents===null){fs.rmSync(fixture,{force:true});}
+   else fs.writeFileSync(fixture,contents,'utf8');
+   const program=[
+     "$ErrorActionPreference='Stop'",
+     '$Force='+String(force?'$true':'$false'),
+     "$stage=[pscustomobject]@{Version='0.10.20'}",
+     "$report=[ordered]@{}",
+     "$ResultFile='unused-isolated-contract'",
+     'function Get-RoutePath([string]$Profile){return $env:RC_ROUTE_FIXTURE}',
+     'function Read-Json([string]$Path){return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -ErrorAction Stop}',
+     'function Test-VersionGreater([string]$Left,[string]$Right){return ([version]$Left -gt [version]$Right)}',
+     'function Atomic-Json([string]$Path,[object]$Value){Write-Output ("RECEIPT_STATUS="+$Value.status)}',
+     'function Log([string]$Message){Write-Output $Message}',
+     snippet,
+     "Write-Output 'CROSSED_GUARD'"
+   ].join('\n');
+   return spawnSync('pwsh.exe',['-NoLogo','-NoProfile','-NonInteractive','-Command',program],{
+     encoding:'utf8',timeout:15000,
+     env:{...process.env,RC_ROUTE_FIXTURE:fixture}
+   });
+ };
+ const newer=JSON.stringify({active:{version:'0.10.24',commit:'accepted-preview'}});
+ const blocked=run(false,newer);
+ assert.equal(blocked.status,0,blocked.stderr);
+ assert.match(blocked.stdout,/AUTO_UPDATE_NEWER_PERSISTED_ROUTE/);
+ assert.match(blocked.stdout,/RECEIPT_STATUS=NEWER_CURRENT/);
+ assert.doesNotMatch(blocked.stdout,/CROSSED_GUARD/);
+ const explicit=run(true,newer);
+ assert.equal(explicit.status,0,explicit.stderr);
+ assert.match(explicit.stdout,/CROSSED_GUARD/,'explicit Force is still available');
+ const fresh=run(false,null);
+ assert.equal(fresh.status,0,fresh.stderr);
+ assert.match(fresh.stdout,/CROSSED_GUARD/,'first install without route is unaffected');
+ const invalid=run(false,'{"active": ');
+ assert.notEqual(invalid.status,0,'unparseable persisted authority fails closed');
+ assert.doesNotMatch(invalid.stdout,/CROSSED_GUARD/);
 });
 
 test('auto updater is candidate-first, hardware-gated and commit-point aware',()=>{
@@ -162,7 +219,8 @@ test('auto updater is candidate-first, hardware-gated and commit-point aware',()
   for(const marker of ['diff --cached --quiet --','diff --ignore-space-at-eol --exit-code --','CONTROL_TRACKED_EOL_DRIFT_ACCEPTED'])assert.ok(promote.includes(marker),marker);
   assert.ok(promote.indexOf('diff --cached --quiet --') < promote.indexOf('CONTROL_TRACKED_EOL_DRIFT_ACCEPTED'),'staged control changes must fail before EOL-only drift is accepted');
   assert.ok(promote.indexOf('diff --ignore-space-at-eol --exit-code --') < promote.indexOf('CONTROL_TRACKED_EOL_DRIFT_ACCEPTED'),'substantive unstaged control changes must fail before EOL-only drift is accepted');
-  assert.ok(s.includes('https://github.com/GOD13emad/ChatGPTRemoteCommander/releases/latest') && s.includes('Invoke-WebRequest') && s.includes('Invoke-RestMethod'),'Windows stable discovery must prefer published-release redirect with REST fallback');
+  assertPinnedReleaseDiscovery(s,'windows');
+   assert.ok(s.includes('Invoke-RestMethod'), 'Windows stable discovery must retain REST fallback');
   assert.ok(s.includes("MCP-Protocol-Version") && s.includes("2026-07-28") && s.includes("-Headers $headers"), 'internal updater MCP calls through the canonical router must identify as the current protocol and never self-poison legacy-host continuity state');
   assert.ok(s.includes("io.modelcontextprotocol/protocolVersion") && s.includes("_meta"), 'modern updater MCP calls must mirror the protocol marker in body metadata so header/body classification cannot fail');
   assert.ok(s.includes("io.modelcontextprotocol/clientCapabilities") && s.includes("io.modelcontextprotocol/clientInfo") && s.includes("Mcp-Method") && s.includes("Mcp-Name"), 'modern updater MCP calls must satisfy the complete server-side modern client contract');
@@ -178,7 +236,8 @@ test('auto updater is candidate-first, hardware-gated and commit-point aware',()
   assert.ok(s.includes('Stop-OwnedCandidate $currentCandidate'), 'failure cleanup must include the current pre-registration candidate');
   assert.ok(s.indexOf('$currentCandidate=[pscustomobject]') > s.indexOf('$p=Start-Backend'), 'candidate ownership tracking must start immediately after spawn');
   const startBackend=s.slice(s.indexOf('function Start-Backend'),s.indexOf('function Stop-OwnedCandidate'));
-  assert.ok(startBackend.includes('Start-Process') && !startBackend.includes('-RedirectStandardOutput') && !startBackend.includes('-RedirectStandardError'),'Windows staged backends must detach from updater run_shell stdio handles');
+  const productionBackend=startBackend.slice(startBackend.indexOf('# Production retains no redirected stdio'));
+  assert.ok(startBackend.includes('# Production retains no redirected stdio') && productionBackend.includes('return Start-Process') && !productionBackend.includes('-RedirectStandardOutput') && !productionBackend.includes('-RedirectStandardError'),'Production Windows staged backends must detach from updater run_shell stdio handles');
   const stale=s.slice(s.indexOf('function Get-StaleDrainEvidence'),s.indexOf('function Get-DrainStatus'));
   for(const marker of ['activeOperations','queued','unexpectedConnections','Get-NetTCPConnection -State Established','Get-BackendDescendants','guiBusy','guiLeased','browserActive','browserBusy','browserLeased','browserUncertain','browser_status','DEFER_PROCESS_TREE'])assert.ok(stale.includes(marker),marker);
   assert.ok(stale.includes("tools\\browser-control.mjs --server") && stale.includes('$isBrowserHelper') && stale.includes('-not$result.browserActive') && stale.includes('-not$result.browserUncertain'),'idle browser helper is safe only after explicit fail-closed browser_status evidence');
@@ -195,11 +254,11 @@ test('auto updater is candidate-first, hardware-gated and commit-point aware',()
   const deferred=s.slice(s.indexOf('function Complete-DeferredDrains'),s.indexOf('function Has-SupersededRelease'));
   assert.ok(deferred.indexOf('Get-PersistentTerminalChildren $old') < deferred.indexOf('Stop-OldBackend $old'),'Windows deferred retirement must check persistent terminals before every old-backend stop path');
   assert.ok(deferred.indexOf('Get-RetainableLongCommandRoots $old $canonical') < deferred.indexOf('Stop-OldBackend $old'),'Windows deferred retirement must preserve verified long command trees before any old-backend stop path');
-  const currentFastPath=s.slice(s.indexOf("if(-not $Force -and $currentStatus -and [string]$currentStatus.version-eq $stage.Version)"),s.indexOf('Push-Location $stage.Dir'));
+  const currentFastPath=s.slice(s.indexOf("if(-not $Force -and $currentStatus -and [string]$currentStatus.version-eq $stage.Version)"),s.lastIndexOf('Push-Location $stage.Dir'));
   assert.ok(currentFastPath.includes('Complete-RetainedBackends'),'already-current Windows maintenance must reconcile retained backends');
   assert.ok(currentFastPath.indexOf('Complete-RetainedBackends') < currentFastPath.indexOf('Complete-DeferredDrains'),'retained-backend reconciliation must precede deferred-drain handling in current fast path');
   assert.ok(currentFastPath.indexOf('Complete-RetainedBackends') < currentFastPath.lastIndexOf('$cleanupPending=@(Cleanup-Releases)'),'retained-backend reconciliation must precede release cleanup so dead retained releases are not protected forever');
-  const maintenance=s.slice(s.indexOf('$controlMismatch=($controlHead-ne $stage.Commit)'),s.indexOf('Push-Location $stage.Dir'));
+  const maintenance=s.slice(s.indexOf('$controlMismatch=($controlHead-ne $stage.Commit)'),s.lastIndexOf('Push-Location $stage.Dir'));
   assert.ok(maintenance.includes("if($controlMismatch)") && maintenance.includes('Recycle-ControlSupervisor'),'control-code promotion may recycle the supervisor');
   const cleanupOnly=maintenance.slice(maintenance.lastIndexOf('$cleanupPending=@(Cleanup-Releases)'));
   assert.ok(cleanupOnly.includes("AUTO_UPDATE_CLEANUP_PENDING") && !cleanupOnly.includes('Recycle-ControlSupervisor'),'release cleanup alone must never recycle a healthy supervisor');
@@ -570,7 +629,6 @@ test('Linux updater is candidate-first, hardware-gated, routed and rollback-awar
     'retained-backends.mjs',
     'RELEASE_CLEANUP_RETAINED_PROTECT',
     'AUTO_UPDATE_EXISTING_DRAIN_BLOCK',
-    'https://github.com/GOD13emad/ChatGPTRemoteCommander/releases/latest',
     '%{url_effective}',
     'install_linux_gui_backend',
     'LINUX_GUI_BACKEND_SYNCED',
@@ -588,6 +646,7 @@ test('Linux updater is candidate-first, hardware-gated, routed and rollback-awar
     '/usr/local/bin/geckodriver',
     '"$HOME/.local/bin/geckodriver"'
   ]) assert.ok(s.includes(marker),marker);
+  assertPinnedReleaseDiscovery(s,'linux');
   assert.ok(s.includes('build_cfg "$DIAG_CFG" "$SHADOW_WF" shadow'),'Linux diagnostic candidate must use an isolated delivery shadow');
   assert.ok(s.includes('build_cfg "$FINAL_CFG" "$LIVE_WF" preserve'),'Linux final candidate must preserve active delivery identity');
   assert.ok(s.includes('--delivery-directory "$BACKUP_ROOT/$COMMIT/default/delivery-shadow-$PORT"'),'Linux diagnostic delivery directory must stay inside candidate backup state');
@@ -847,7 +906,28 @@ test('Windows qualification Job Object leaves zero descendants after fail, leak-
     });
     try{
       const foreignOwnership=listenerOwnership(port);
-      assert.ok(foreignOwnership.some(row=>Number(row.pid)===process.pid),'controlled foreign listener must be attributable to the test process');
+      // When Windows TCP owner enumeration is available, require exact native PID evidence.
+      // Some isolated owner sessions expose no rows even for an unrelated listening socket.
+      // In that case verify actual loopback reachability from an independent Node child;
+      // never count an empty owner query alone as a successful network check.
+      if(foreignOwnership.length>0){
+        assert.ok(foreignOwnership.some(row=>Number(row.pid)===process.pid),
+          'foreign listener has wrong native owner attribution: '+JSON.stringify(foreignOwnership));
+      }else{
+        assert.equal(foreign.address()?.port,port,'foreign server must own reserved port');
+        const code="const net=require('node:net');"+
+          "const s=net.connect("+port+",'127.0.0.1');"+
+          "s.once('connect',()=>{s.destroy();process.stdout.write('FOREIGN_TCP_CONNECT_OK',()=>process.exit(0));});"+
+          "s.once('error',()=>process.exit(11));"+
+          "setTimeout(()=>process.exit(12),3000).unref();";
+        const child=spawnSync(process.execPath,['-e',code],{
+          encoding:'utf8',timeout:6000,windowsHide:true
+        });
+        assert.equal(child.status,0,'independent foreign TCP client failed: '+
+          (child.error?.message??child.stderr??''));
+        assert.equal(child.stdout,'FOREIGN_TCP_CONNECT_OK');
+        t.diagnostic('Windows TCP PID enumeration unavailable for this user session; foreign listener verified through an independent loopback client');
+      }
       assertNoOwnedListener(port,serverPid,serverScript);
     }finally{
       await new Promise(resolve=>foreign.close(resolve));
@@ -965,7 +1045,7 @@ test('R234 Linux work-plugin updater preserves arbitrary owner data and retains 
     func,
     'sync_work_plugin_projection "$3" "$4" "$5"'
   ].join('\n');
-  const invoke=()=>spawnSync('bash',['-c',bash,'--',backup,data,project,version,commit],{encoding:'utf8',timeout:15000});
+  const invoke=()=>spawnSync('bash',['-s','--',backup,data,project,version,commit],{input:bash,encoding:'utf8',timeout:15000});
   const first=invoke();
   assert.equal(first.error,undefined,first.error?.message);
   assert.equal(first.status,0,first.stderr+' '+first.stdout);
@@ -1019,7 +1099,7 @@ test('R254 Linux plugin post-verify failure preserves owner data and quarantines
  func,
  'sync_work_plugin_projection "$3" "$4" "$5"'
  ].join('\n');
- const invoke=()=>spawnSync('bash',['-c',script,'--',backup,data,project,version,commit],{encoding:'utf8',timeout:15000});
+ const invoke=()=>spawnSync('bash',['-s','--',backup,data,project,version,commit],{input:script,encoding:'utf8',timeout:15000});
  const result=invoke();
  assert.equal(result.error,undefined,result.error?.message);
  assert.notEqual(result.status,0,'fault-injected post-verify must fail closed');
@@ -1038,4 +1118,447 @@ test('R254 Linux plugin post-verify failure preserves owner data and quarantines
  assert.notEqual(retry.status,0);
  assert.match(retry.stdout,/prior-snapshot-or-quarantine-awaiting-owner/);
  assert.equal(fs.readdirSync(parent).filter(n=>n.startsWith('.chatgpt-remote-commander.failed-')).length,1);
+});
+
+test('unattended update promotion requires exact approved v0.12.0 release-train admission',()=>{
+  const linux=read('auto-update-linux.sh');
+  const windows=read('auto-update-windows.ps1');
+  const linuxStage=linux.indexOf('stage_release "$REF"');
+  const linuxRefGuard=linux.indexOf('AUTO_UPDATE_RELEASE_TRAIN_REF_BLOCK');
+  const linuxDirectGuard=linux.indexOf('AUTO_UPDATE_NEWER_DIRECT_VERSION');
+  const linuxGuard=linux.indexOf('AUTO_UPDATE_RELEASE_TRAIN_BLOCK');
+  const linuxPromotion=linux.indexOf('node "$STAGE_DIR/tools/router-switch.mjs"');
+  assert.ok(linuxStage>=0 && linuxRefGuard>0 && linuxRefGuard<linuxStage);
+  assert.ok(linuxDirectGuard>0 && linuxDirectGuard<linuxStage);
+  assert.ok(linux.includes('AUTO_UPDATE_DIRECT_HEALTH_UNVERIFIED'));
+  assert.ok(linux.includes('http://127.0.0.1:47831/health'));
+  assert.ok(linux.includes('verify-v012-publish-readiness.mjs'));
+  assert.ok(linux.includes('blocked_release_train'));
+  assert.ok(linux.includes('if [[ "$FORCE" != 1 && "$NO_PROMOTE" != 1 ]]'));
+  assert.ok(linuxGuard>linuxStage && linuxGuard<linuxPromotion);
+  const windowsStage=windows.indexOf('$stage=Stage-Release $ref');
+  const windowsRefGuard=windows.indexOf('AUTO_UPDATE_RELEASE_TRAIN_REF_BLOCK');
+  const windowsGuard=windows.indexOf('AUTO_UPDATE_RELEASE_TRAIN_BLOCK');
+  const windowsPromotion=windows.indexOf('Promote-Control $stage.Commit $ref $stage.Dir');
+  assert.ok(windowsStage>=0 && windowsRefGuard>0 && windowsRefGuard<windowsStage);
+  assert.ok(windowsGuard>windowsStage && windowsGuard<windowsPromotion);
+  assert.ok(windows.includes('verify-v012-publish-readiness.mjs'));
+  assert.ok(windows.includes('if(-not $Force -and -not $NoPromote)'));
+  assert.ok(windows.includes("$report.status='BLOCKED_RELEASE_TRAIN'"));
+});
+
+test('Windows candidate stage receives only the pinned native Job Object runner before qualification',()=>{
+  const updater=read('auto-update-windows.ps1');
+  const stage=updater.indexOf('function Copy-WindowsJobRunner');
+  const invocation=updater.indexOf('Copy-WindowsJobRunner $stage.Dir');
+  const qualification=updater.indexOf('$script:QualificationCommit=$stage.Commit');
+  assert.ok(stage>=0);
+  assert.ok(invocation>stage);
+  assert.ok(qualification>invocation);
+  assert.ok(updater.includes("'tools\\windows-job-runner\\dist\\win-x64\\CommanderWindowsJobRunner.exe'"));
+  assert.ok(updater.includes('WINDOWS_JOB_RUNNER_SOURCE_SHA_MISMATCH'));
+  assert.ok(updater.includes('WINDOWS_JOB_RUNNER_STAGE_VERIFY_FAILED'));
+  const promote=updater.slice(updater.indexOf('function Promote-Control'),updater.indexOf('function Recycle-ControlSupervisor'));
+  assert.ok(promote.indexOf('checkout --detach --force')<promote.indexOf('Install-ControlWindowsJobRunner $StageDir'),
+    'control runner changes only after the candidate commit is promoted');
+  assert.equal((updater.match(/Promote-Control \$stage\.Commit \$ref \$stage\.Dir/g)||[]).length,4);
+});
+
+test('server canary retains pinned SDK while hiding Node and Git from bootstrapping PATH',()=>{
+ const workflow=read('.github/workflows/server-install-canary.yml');
+ const windows=workflow.slice(workflow.indexOf('windows-server-bootstrap:'),workflow.indexOf('linux-clean-container:'));
+ assert.ok(windows.includes('actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1'));
+ assert.ok(windows.includes("dotnet-version: '8.0.427'"));
+ assert.ok(windows.includes('$env:ProgramFiles\\dotnet'));
+ assert.ok(windows.includes('NODE_SHOULD_BE_HIDDEN_FOR_CANARY'));
+ assert.ok(windows.includes('GIT_SHOULD_BE_HIDDEN_FOR_CANARY'));
+ assert.ok(!windows.includes('$env:ProgramFiles\\nodejs;'));
+ assert.ok(!windows.includes('Git\\cmd;'));
+});
+
+test('pinned native Windows Job runner sources keep LF bytes across Windows Git checkout',async()=>{
+ const attr=read('.gitattributes');
+ for(const name of ['*.cs','*.csproj']){
+   assert.ok(attr.includes(name+' text eol=lf'),name+' must never become CRLF');
+ }
+ const manifest=JSON.parse(read('tools/windows-job-runner/release-manifest.json'));
+ const crypto=await import('node:crypto');
+ const digest=name=>crypto.createHash('sha256').update(read(name)).digest('hex');
+ assert.equal(digest('tools/windows-job-runner/Program.cs'),manifest.sourceSha256);
+ assert.equal(digest('tools/windows-job-runner/CommanderWindowsJobRunner.csproj'),manifest.projectSha256);
+});
+
+test('R157 isolated Windows updater supplies the verified native runner and preserves NoPromote under a real standard token',()=>{
+ const workflow=read('.github/workflows/windows-updater-e2e-r157.yml');
+ const updater=read('auto-update-windows.ps1');
+ const helper=read('tools/run-r157-standard-user.ps1');
+ const setup=workflow.indexOf('actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1');
+ const compile=workflow.indexOf('Build and verify the pinned native Job Object runner for the isolated updater');
+ const verify=workflow.indexOf('verify-windows-job-runner.ps1 -Ensure');
+ const stage=workflow.indexOf('Actual candidate-first updater in isolated state (NoPromote)');
+ const explicit=workflow.lastIndexOf('tools\\run-r157-standard-user.ps1');
+ assert.ok(setup>0 && compile>setup && verify>compile && stage>verify && explicit>stage);
+ assert.ok(workflow.includes("dotnet-version: '8.0.427'"));
+ assert.ok(workflow.includes("R157_PINNED_JOB_RUNNER_MISSING"));
+ assert.ok(workflow.includes("Join-Path $env:GITHUB_WORKSPACE 'tools\\windows-job-runner\\dist\\win-x64\\CommanderWindowsJobRunner.exe'"));
+ assert.ok(workflow.includes("tools\\run-r157-standard-user.ps1"));
+ assert.ok(workflow.includes("R157_STANDARD_USER_HELPER_PARSER"));
+ assert.ok(workflow.includes("'tools/run-r157-standard-user.ps1'"));
+ assert.ok(updater.includes('WINDOWS_JOB_RUNNER_SOURCE_SHA_MISMATCH'));
+ assert.ok(updater.includes('WINDOWS_JOB_RUNNER_STAGE_SHA_MISMATCH'));
+ assert.ok(updater.includes('R157_CANDIDATE_HEALTH_DIAG observed='),'failed candidate startup must report only a bounded failure classification');
+ assert.ok(updater.includes("if($NoPromote -and $env:CI -eq 'true'") && updater.includes("RUNNER_ENVIRONMENT -eq 'github-hosted'"),'Node startup stderr may only be captured in isolated hosted NoPromote');
+ assert.ok(updater.includes("remote-commander-updater-r157\\STATE\\ChatGPTRemoteCommander"),'R157 stderr diagnostic must be confined to private disposable CI state');
+ assert.ok(updater.includes('-RedirectStandardError $stderrPath') && updater.includes("stderrClass=$stderrClass stderrBytes=$stderrBytes"),'R157 reports only an allowlisted backend startup failure class');
+ assert.ok(updater.includes("if($file.Length -gt 32768){$stderrClass='OVERSIZE'}"),'stderr diagnostic must be bounded without raw output');
+
+ assert.ok(updater.includes('listener=$listenerState'),'health diagnostic should distinguish free/busy/owned port');
+ assert.ok(updater.includes('Wait-Health $port $stage.Version $sha $t.Profile 30 $p'),'diagnostic wait tracks the exact candidate process');
+ assert.ok(updater.includes('Wait-Health $port $stage.Version $finalSha $t.Profile 30 $p'),'final-store health verifies its own candidate');
+ assert.ok(!updater.includes('Test-R157HostedNoPromoteQuarantine') && !updater.includes('--expect-anonymous-quarantine'),
+   'a verified STANDARD token must use the normal positive Doctor, not the quarantine-only diagnostic');
+ assert.ok(updater.includes("if($LASTEXITCODE-ne 0){throw \"CANDIDATE_DOCTOR_FAIL profile=$($t.Profile)\"}") &&
+   updater.includes("$status=Invoke-Mcp $port 'system_status'"),
+   'R157 must verify actual STANDARD MCP access after health');
+ assert.ok(workflow.includes("CANDIDATE_PASS") && workflow.includes("liveStoreCompatibility='PASS'"),
+   'isolated NoPromote receipts must require actual Doctor and state compatibility success');
+ assert.ok(workflow.includes("g1Authorization='BLOCKED_NOT_CONFIGURED'") && workflow.includes('promoted=$false'),
+   'a positive STANDARD test never authorizes protected G1 or stable release');
+ assert.ok(workflow.includes('R157_UNEXPECTED_ROUTE_PROMOTION'));
+ assert.ok(workflow.includes("$c.allowedRoots=@((Join-Path $root 'INSTALL'))"), 'isolated candidate can read only INSTALL; Delivery state must be outside allowed roots');
+assert.ok(workflow.includes("R157_DELIVERY_STATE_INSIDE_ALLOWED_ROOT") && !workflow.includes("$c.allowedRoots=@($root)"), 'R157 disallows project-scoped durable Delivery state');
+assert.ok(workflow.includes('R157_STANDARD_USER_CLEANUP_RECEIPT_MISSING'));
+ assert.ok(workflow.includes('R157_STANDARD_USER_CLEANUP_NOT_ACCEPTED'));
+ assert.ok(workflow.includes('standardUserAccountRemoved'));
+ for(const marker of [
+   'RC_NON_ELEVATED_USER_TOKEN','R157_STANDARD_TOKEN_ASSERTION_FAILED',
+   'R157_PARENT_TOKEN_UNVERIFIED','New-LocalUser',
+   "Get-LocalGroupMember -Group 'Administrators'",
+   "Add-LocalGroupMember -Group 'Users'",
+   'icacls.exe','-Credential $credential','-LoadUserProfile',
+   '-NoPromote','Write-R157CleanupReceipt','R157_STANDARD_USER_CLEANUP.json','R157_STANDARD_USER_CLEANUP_PASS',
+   'R157_STANDARD_USER_CLEANUP_DEFERRED_NODE_PROCESS_REMAINS'
+ ]) assert.ok(helper.includes(marker),'missing standard-token isolation safeguard: '+marker);
+ assert.ok(helper.includes("$probe='C:\\Program Files\\PowerShell\\7\\pwsh.exe'"),
+   'token probe must use the same machine PowerShell path as the server');
+});
+
+test('R157 staged release lookup uses the pinned source version, not a fixed old tag',()=>{
+ const workflow=read('.github/workflows/windows-updater-e2e-r157.yml');
+ const version=JSON.parse(read('package.json')).version;
+ const trainPath=version.startsWith('0.12.')?'docs/release-train-0.12.json':'docs/release-train-0.11.json';
+ const train=JSON.parse(read(trainPath));
+ const allowedDevelopment=/^0\.(?:11\.0-dev\.[1-9]\d*|12\.0-dev\.[1-9]\d*)$/.test(version);
+ assert.ok(/^\d+\.\d+\.\d+$/.test(version) ||
+   (allowedDevelopment && train.sourceVersion===version && train.status==='INTEGRATION_CANDIDATE_NOT_FINAL' &&
+    train.publishApproved===false && train.installedPromotionApproved===false &&
+    train.autoupdateApproved===false),'only exact manifest-gated development SemVer is admitted');
+ for(const requirement of [
+  "Join-Path $env:GITHUB_WORKSPACE 'package.json'",
+  "R157_SOURCE_PACKAGE_MISSING",
+  "R157_SOURCE_VERSION_INVALID",
+  "('releases\\v'+$sourceVersion+'-'+$sha.Substring(0,12))",
+  "(git -C $stage rev-parse HEAD).Trim() -ne $sha",
+  "R157_EXACT_STAGE_MISSING",
+  "R157_UNEXPECTED_ROUTE_PROMOTION",
+  "R157_JOB_NOT_ACCEPTED_"
+ ]) assert.ok(workflow.includes(requirement),'missing exact NoPromote safeguard: '+requirement);
+ assert.equal(workflow.includes("('releases\\v0.10.24-'+$sha.Substring(0,12))"),false);
+ assert.equal('releases\\v'+version+'-'+'f'.repeat(12),
+   'releases\\v'+JSON.parse(read('package.json')).version+'-'+'f'.repeat(12));
+});
+
+
+test('R170 isolated rollback qualification is version-scoped, not a release authorization',()=>{
+  const linux=read('test/release-rollback-linux-r170.sh');
+  const workflow=read('.github/workflows/release-rollback-r170.yml');
+  for(const expected of [
+    'SOURCE_VERSION=', 'isolated-qa-policy.mjs', 'R170_SOURCE_VERSION_NOT_QUALIFIED',
+    'R170_ISOLATED_SOURCE_VERSION=', 'releaseAuthorization=false',
+    'ROOT="$TEMPBASE/remote-commander-rollback-r170"', '--source-ref "$TARGET" --expected-commit "$TARGET" --force',
+    'disposable RUNNER_TEMP integration test',
+    'AUTO_UPDATE_PASS version=$SOURCE_VERSION',
+    "assert r['active']['version']==sys.argv[3]"
+  ])assert.ok(linux.includes(expected),'missing isolated qualification constraint: '+expected);
+  assert.ok(workflow.includes('isolated-qa-policy.mjs'));
+  assert.ok(!workflow.includes("'0.10.27'"),'future candidate requires explicit review');
+  assert.ok(linux.includes('R170_GITHUB_HOSTED_LINUX_ONLY'),'CI-only, not owner host');
+  assert.ok(linux.includes("ROLLBACK_BASELINE='8ccf0fd16355a4ab79844feec6c295366763df0d'"),'rollback must target the last fleet-accepted dev23 baseline');
+  assert.ok(linux.includes("ROLLBACK_VERSION='0.11.0-dev.23'"),'rollback version and exact commit must agree');
+  assert.ok(!linux.includes('af18cbdce3cc106842adebde912fea079094deb1'),'obsolete incompatible dev18 rollback is not accepted');
+});
+
+test('R173 Windows rollback source qualification allows only explicitly reviewed versions',()=>{
+  const qa=read('test/release-rollback-windows-r173.ps1');
+  const workflow=read('.github/workflows/release-rollback-windows-r173.yml');
+  for(const body of [qa,workflow]){
+    assert.ok(body.includes('isolated-qa-policy.mjs'),'explicit exact-manifest QA version gate');
+    assert.ok(!body.includes("'0.10.27'"),'next unreviewed version is not admitted');
+  }
+  assert.ok(workflow.includes('R173_UNSUPPORTED_VERSION'),'preflight must fail closed');
+  assert.ok(qa.includes('R173_CANDIDATE_VERSION'),'native updater test must fail closed');
+  assert.ok(workflow.includes('github.event.pull_request.head.sha || github.sha'),'exact SHA');
+  assert.ok(workflow.includes("dotnet-version: '8.0.427'"),'R173 must build the pinned native job runner before update');
+  assert.ok(workflow.includes('verify-windows-job-runner.ps1 -Ensure'),'R173 must verify the native job runner source and binary');
+  assert.ok(qa.includes('R173_JOB_RUNNER_SHA_MISMATCH'),'R173 must verify exact job runner hash');
+  assert.ok(qa.includes("'-WindowsJobRunnerPath',$JobRunner"),'updater must receive the verified runner explicitly');
+  const windowsUpdater=read('auto-update-windows.ps1');
+  assert.ok(qa.includes("if($Name -eq 'ROLLBACK'){$args+= '-PinnedLegacyRunnerOverlay'}"),'only rollback may enable historical runner compatibility');
+  assert.ok(qa.includes('R173_LEGACY_RUNNER_OVERLAY_NOT_ATTESTED'),'rollback must prove the verified compatibility receipt');
+  assert.ok(windowsUpdater.includes('if(-not $PinnedLegacyRunnerOverlay){throw \'WINDOWS_JOB_RUNNER_MANIFEST_MISSING\'}'),'default updater must fail closed on missing native manifest');
+  assert.ok(windowsUpdater.includes("8ccf0fd16355a4ab79844feec6c295366763df0d"),'compatibility overlay is exact dev23 predecessor only');
+  assert.ok(windowsUpdater.includes("RUNNER_ENVIRONMENT -ne 'github-hosted'") && windowsUpdater.includes('R173_PINNED_LEGACY_RUNNER_SCOPE_REJECTED'),'historical exception is hosted-only and explicit');
+  assert.ok(windowsUpdater.includes('R173_PINNED_LEGACY_RUNNER_ELEVATED_TOKEN_REJECTED'),'compatibility must retain standard-user token');
+  assert.ok(windowsUpdater.includes('R173_PINNED_LEGACY_RUNNER_OVERLAY_SHA_MISMATCH'),'compatibility files must retain exact source hashes');
+  assert.ok(windowsUpdater.includes('R173_PINNED_LEGACY_RUNNER_OVERLAY_VERIFIED'),'compatibility receipt must remain identifiable');
+
+  assert.ok(!workflow.includes('gh release create'),'QA workflow is not release authority');
+  const helper=read('tools/run-r157-standard-user.ps1');
+  assert.ok(qa.includes("$RollbackBaseline='8ccf0fd16355a4ab79844feec6c295366763df0d'"),'R173 must roll back to schema-compatible fleet baseline');
+  assert.ok(qa.includes("$RollbackVersion='0.11.0-dev.23'"),'R173 rollback version must match exact baseline');
+  assert.ok(qa.includes('R173_STANDARD_USER_SANDBOX_MARKER_REQUIRED'),'R173 sandbox must be helper-created and fresh');
+  assert.ok(workflow.includes('run-r157-standard-user.ps1 -RunR173Rollback'),'R173 updater must run under a verified standard token');
+  assert.ok(workflow.includes('R173_STANDARD_USER_CLEANUP_NOT_ACCEPTED'),'R173 requires account removal and zero owned processes');
+  assert.ok(workflow.includes("cleanup.revision -ne 'R173_STANDARD_USER_CLEANUP'"),'R173 cleanup evidence has its own revision identity');
+  assert.ok(!workflow.includes('-File test/release-rollback-windows-r173.ps1'),'workflow must not run the promotion script directly as elevated');
+  assert.ok(helper.includes('R173_STANDARD_USER_GITHUB_HOSTED_ONLY') && helper.includes('R173_STANDARD_USER_ROOT_SCOPE_MISMATCH'),'standard-token promotion mode is GitHub-hosted and exact-root scoped');
+});
+
+test('Linux tunnel-client is required before release promotion and profile enrollment',()=>{
+  const updater=read('auto-update-linux.sh');
+  const installer=read('install.sh');
+  const enrollment=read('enable-autostart-linux.sh');
+  const sameCommit=updater.indexOf('if [[ "$ACTIVE_COMMIT" == "$COMMIT" ]]');
+  const maintenanceStage=updater.indexOf('prepare_staged_tunnel_client "$STAGE_DIR"',sameCommit);
+  const maintenanceControl=updater.indexOf('CONTROL="$(git -C "$INSTALL_DIR" rev-parse HEAD',sameCommit);
+  const stage=updater.lastIndexOf('prepare_staged_tunnel_client "$STAGE_DIR"');
+  const audit=updater.indexOf('run_gate "$STAGE_DIR" audit npm run audit');
+  const candidateStart=updater.indexOf('PORT="$(node "$STAGE_DIR/tools/find-free-port.mjs"');
+  assert.ok(updater.includes('prepare_staged_tunnel_client(){'),'pinned stage preflight function must exist');
+  assert.ok(updater.includes('TUNNEL_STAGE_VERIFIED'),'stage requires verified version and upstream commit');
+  assert.ok(sameCommit>0 && maintenanceStage>sameCommit && maintenanceControl>maintenanceStage,'existing-route maintenance must also block on unverified release-local tunnel');
+  assert.ok(audit>0 && stage>audit && candidateStart>stage,'new candidate dependency must run after source audit and before candidate/cutover');
+  assert.ok(updater.includes('/bin/bash "$helper" --install-dir "$project"'),'pinned installer must provision each staged release');
+  assert.ok(installer.includes('TUNNEL_CLIENT_REQUIRED_MISSING'),'--skip-tunnel-client must fail closed when binary is absent');
+  assert.ok(enrollment.includes('/bin/bash "$ROOT/tools/install-tunnel-client-linux.sh" --install-dir "$ROOT"'),'profile enrollment must provision release dependency');
+});
+
+test('Linux installer skip mode rejects missing/wrong tunnel binaries and accepts verified pin (offline fixture)', {skip:process.platform!=='linux'},()=>{
+  const os=offlineOs;
+  const cp=offlineSpawn;
+  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'rc-tunnel-guard-'));
+  try{
+    const toolsDir=path.join(tmp,'tools');
+    fs.mkdirSync(toolsDir);
+    for(const f of ['json-field.mjs','tunnel-client-pin.json','install-tunnel-client-linux.sh']){
+      fs.copyFileSync(path.join(root,'tools',f),path.join(toolsDir,f));
+    }
+    const source=read('install.sh');
+    const begin=source.indexOf('install_tunnel_client() {');
+    const end=source.indexOf('write_local_config() {',begin);
+    assert.ok(begin>0&&end>begin,'installer function must be extractable');
+    const fn=path.join(tmp,'function.sh');
+    fs.writeFileSync(fn,source.slice(begin,end));
+    const invoke=()=>cp.spawnSync('bash',['-c','INSTALL_DIR="$1"; SKIP_TUNNEL_CLIENT=1; . "$2"; install_tunnel_client','_',tmp,fn],{encoding:'utf8'});
+    const missing=invoke();
+    assert.notEqual(missing.status,0,'absent executable must not be accepted');
+    assert.match(missing.stderr,/TUNNEL_CLIENT_REQUIRED_MISSING/);
+    const pin=JSON.parse(fs.readFileSync(path.join(toolsDir,'tunnel-client-pin.json'),'utf8'));
+    const binDir=path.join(toolsDir,'tunnel-client-v'+pin.version+'-linux-'+(process.arch==='arm64'?'arm64':'amd64'));
+    fs.mkdirSync(binDir);
+    const exe=path.join(binDir,'tunnel-client');
+    fs.writeFileSync(exe,'#!/bin/sh\necho \"'+pin.version+'+'+pin.upstreamCommit+'\"\n');
+    fs.chmodSync(exe,0o755);
+    const verified=invoke();
+    assert.equal(verified.status,0,verified.stderr);
+    assert.match(verified.stdout,/Reusing existing pinned tunnel-client/);
+    fs.writeFileSync(exe,'#!/bin/sh\necho \"wrong-version\"\n');
+    const invalid=invoke();
+    assert.notEqual(invalid.status,0,'invalid provenance must be rejected');
+    assert.match(invalid.stderr,/provenance mismatch/);
+  } finally {
+    fs.rmSync(tmp,{recursive:true,force:true});
+  }
+});
+
+test('Linux staged dependency rejects missing helper, missing executable, and bad provenance before accepting pin', {skip:process.platform!=='linux'},()=>{
+  const tmp=fs.mkdtempSync(path.join(offlineOs.tmpdir(),'rc-staged-dependency-'));
+  try{
+    const toolsDir=path.join(tmp,'tools');
+    fs.mkdirSync(toolsDir);
+    for(const f of ['json-field.mjs','tunnel-client-pin.json']) {
+      fs.copyFileSync(path.join(root,'tools',f),path.join(toolsDir,f));
+    }
+    const updater=read('auto-update-linux.sh');
+    const begin=updater.indexOf('prepare_staged_tunnel_client(){');
+    const end=updater.indexOf('\nrun_gate(){',begin);
+    assert.ok(begin>0&&end>begin,'preflight must be extractable');
+    const func=path.join(tmp,'preflight.sh');
+    fs.writeFileSync(func,updater.slice(begin,end));
+    const invoke=()=>offlineSpawn.spawnSync('bash',['-c','log(){ :; }; . "$1"; prepare_staged_tunnel_client "$2"','_',func,tmp],{encoding:'utf8'});
+    assert.notEqual(invoke().status,0,'missing helper must fail closed');
+    const helper=path.join(toolsDir,'install-tunnel-client-linux.sh');
+    fs.writeFileSync(helper,'#!/bin/sh\nexit 0\n');
+    fs.chmodSync(helper,0o755);
+    assert.notEqual(invoke().status,0,'helper receipt without binary must fail closed');
+    const pin=JSON.parse(fs.readFileSync(path.join(toolsDir,'tunnel-client-pin.json'),'utf8'));
+    const arch=process.arch==='arm64'?'arm64':'amd64';
+    const dir=path.join(toolsDir,'tunnel-client-v'+pin.version+'-linux-'+arch);
+    fs.mkdirSync(dir);
+    const bin=path.join(dir,'tunnel-client');
+    fs.writeFileSync(bin,'#!/bin/sh\necho wrong-version\n');
+    fs.chmodSync(bin,0o755);
+    assert.notEqual(invoke().status,0,'wrong upstream commit must fail closed');
+    fs.writeFileSync(bin,'#!/bin/sh\necho "'+pin.version+'+'+pin.upstreamCommit+'"\n');
+    const accepted=invoke();
+    assert.equal(accepted.status,0,accepted.stderr);
+  } finally {
+    fs.rmSync(tmp,{recursive:true,force:true});
+  }
+});
+
+test('preliminary schema probe nonzero must not invoke ERR trap before final continuity gate', {skip:process.platform!=='linux'},()=>{
+  const updater=read('auto-update-linux.sh');
+  const begin=updater.indexOf('if SCHEMA_PRE="$(node "$STAGE_DIR/tools/schema-continuity-gate.mjs"');
+  const finalGate=updater.indexOf('if ! node "$STAGE_DIR/tools/schema-continuity-gate.mjs"');
+  assert.ok(begin>0&&finalGate>begin,'guard preliminary probe and keep final blocking gate');
+  assert.ok(updater.includes('SCHEMA_PRE_REJECTED_BEFORE_ROUTER_BOOTSTRAP'),'diagnostic marker must remain');
+  assert.ok(!updater.includes('set +e\n    SCHEMA_PRE='),'unguarded command substitution still triggers ERR trap');
+  const script=[
+    'set -Eeuo pipefail',
+    "trap 'echo ERR_TRAP_FIRED; exit 99' ERR",
+    "if SCHEMA_PRE=\"$(bash -c 'exit 3')\"; then :; else echo EXPECTED_SCHEMA_REJECT; fi",
+    'echo FINAL_GATE_REACHED'
+  ].join('\n');
+  const result=offlineSpawn.spawnSync('bash',['-s'],{input:script,encoding:'utf8'});
+  assert.equal(result.status,0,result.stderr);
+  assert.match(result.stdout,/EXPECTED_SCHEMA_REJECT/);
+  assert.match(result.stdout,/FINAL_GATE_REACHED/);
+  assert.doesNotMatch(result.stdout,/ERR_TRAP_FIRED/);
+});
+
+test('R170 isolated rollback retries only an explicit router-bootstrap receipt once',()=>{
+  const r170=read('test/release-rollback-linux-r170.sh');
+  assert.ok(r170.includes('R170_ROUTER_BOOTSTRAP_RETRY_ONCE'),'explicit bounded retry marker missing');
+  assert.ok(r170.includes("grep -q '^AUTO_UPDATE_ROUTER_BOOTSTRAPPED_RETRY_REQUIRED profile=default$'"),'only safe router bootstrap may retry');
+  assert.equal(r170.split('R170_ROUTER_BOOTSTRAP_RETRY_ONCE').length-1,1,'retry must be single-use');
+  assert.ok(r170.includes("grep -q \"AUTO_UPDATE_PASS version=$ROLLBACK_VERSION\""),'full compatible rollback acceptance cannot be bypassed');
+  assert.ok(r170.includes("grep -q '^SCHEMA_CONTINUITY_GATE_FAIL profile=default$'"),'legacy incompatible rollback must fail closed');
+  assert.ok(r170.includes('R170_LEGACY_INCOMPATIBLE_ROLLBACK_REJECTED_SAFELY'),'legacy refusal must retain promoted route');
+  assert.ok(r170.includes('ROLLBACK_BASELINE=\'8ccf0fd16355a4ab79844feec6c295366763df0d\''),'compatible rollback commit must be exact and pinned');
+  assert.ok(r170.includes('R170_LINUX_ROLLBACK_ROUTE_PASS'),'route readback must remain mandatory');
+  assert.ok(r170.includes('git -C "$WORKSPACE" diff --cached --quiet --'),'staged changes remain prohibited before byte-exact normalized EOL comparison');
+  assert.ok(r170.includes('R170_SOURCE_CHANGED'),'any semantic source change must block');
+  assert.ok(r170.includes('R170_KNOWN_DASHBOARD_EOL_CONFLICT_CHECKED'),'only the exact dashboard EOL conflict can be tolerated');
+  assert.ok(r170.includes('"$eolmeta" == *w/crlf*'),'worktree CRLF Git index anomaly must be covered by scoped bytes-equal check');
+  assert.ok(r170.includes('d67eeb4bc6eb72f98bfbc3c286c2e70b0bb8a246'),'dashboard CRLF-index source blob must be pinned');
+  assert.ok(r170.includes('R170_SOURCE_BOUNDED_EOL_ONLY_ACCEPTED'),'source cleanliness receipt must distinguish bounded EOL drift');
+  assert.ok(r170.includes("value.replace(b'\\r\\n',b'\\n')"),'the rollback source guard may normalize CRLF only');
+  assert.ok(r170.includes('normalize(current) != normalize(baseline)'),'rollback must prove semantic byte parity, not bypass source integrity');
+  assert.ok(r170.includes('R170_EOL_BYTES_MISMATCH'),'semantic mutation must remain fail closed');
+});
+
+
+test('R761 persisted routed ports are reserved even with no TCP listener; malformed routes fail closed', t => {
+  const win = read('auto-update-windows.ps1');
+  assert.ok(win.includes('Reserve-RoutedBackendPorts $used'), 'reservation must precede Get-FreePort');
+  const start = win.indexOf('function Get-FreePort(');
+  const end = win.indexOf('function Test-VersionGreater(', start);
+  assert.ok(start >= 0 && end > start, 'port reservation function must be extractable');
+  if (process.platform !== 'win32') return;
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rc-port-reservations-'));
+  t.after(() => fs.rmSync(tmp, {recursive:true, force:true}));
+  const routes = path.join(tmp, 'routing');
+  fs.mkdirSync(routes, {recursive:true});
+  fs.writeFileSync(path.join(routes, 'default.json'), JSON.stringify({
+    schema:1, profile:'default', active:{port:48831}, previous:{port:48845}
+  }));
+  fs.writeFileSync(path.join(routes, 'other.json'), JSON.stringify({
+    schema:1, profile:'other', active:{port:48832}, previous:null
+  }));
+  fs.writeFileSync(path.join(routes, 'other.runtime.json'), JSON.stringify({
+    schema:2, runtime:true
+  }));
+  const retained = path.join(tmp, 'retained-backends.json');
+  fs.writeFileSync(retained, JSON.stringify({schema:1,items:[{port:48863}]}));
+  const esc = s => s.replace(/'/g, "''");
+  function run() {
+    const command = [
+      "$ErrorActionPreference='Stop'",
+      "$RoutingRoot='"+esc(routes)+"'",
+      "$RetainedFile='"+esc(retained)+"'",
+      'function Get-NetTCPConnection { param($State,$LocalPort,$ErrorAction) return $null }',
+      win.slice(start,end),
+      "$used=[System.Collections.Generic.HashSet[int]]::new()",
+      'Reserve-RoutedBackendPorts $used',
+      "'RESERVED=' + ((@($used) | Sort-Object) -join ',') + ';PICKED=' + (Get-FreePort $used)"
+    ].join('\r\n');
+    return spawnSync('pwsh.exe',
+      ['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',
+       Buffer.from(command,'utf16le').toString('base64')],
+      {encoding:'utf8',timeout:15000});
+  }
+  const accepted = run();
+  assert.equal(accepted.status,0,accepted.stderr);
+  assert.match(accepted.stdout,/RESERVED=48831,48832,48845,48863;PICKED=48833/);
+  fs.writeFileSync(path.join(routes,'default.json'), JSON.stringify({
+    schema:1,profile:'default',active:{port:'not-a-port'}
+  }));
+  const rejected = run();
+  assert.notEqual(rejected.status,0,'bad persisted port must fail before candidate selection');
+  assert.match(rejected.stderr,/ROUTE_PORT_RESERVATION_INVALID/);
+});
+
+
+test('R762 Windows candidate cleanup is owner-attested when TCP CIM hides the loopback listener', () => {
+  const win = read('auto-update-windows.ps1');
+  const start = win.indexOf('function Stop-OwnedCandidate(');
+  const end = win.indexOf('function Get-Targets {', start);
+  assert.ok(start >= 0 && end > start);
+  const guard = win.slice(start, end);
+  const attest = guard.indexOf('if(-not $owned -and $marker -and $Candidate.ProjectDir)');
+  const terminate = guard.indexOf('Stop-Process -Id $proc.Id -Force');
+  assert.ok(attest >= 0 && terminate > attest, 'native owner attestation must precede candidate termination');
+  for (const fragment of [
+    'Get-CimInstance Win32_Process', 'ProcessId=$($proc.Id)',
+    'src\\server-v0.3.mjs', 'TrimEnd', 'EndsWith',
+    'Get-FileHash -LiteralPath $Candidate.ConfigPath', 'configSha256-eq $cfgSha',
+    'marker.pid-eq[int]$proc.Id', 'marker.port-eq[int]$Candidate.Port',
+    'marker.instance.profile-eq[string]$Candidate.Profile',
+    'h.instance.profile-eq[string]$Candidate.Profile',
+    'CANDIDATE_CLEANUP_OWNERSHIP_MISMATCH'
+  ]) assert.ok(guard.includes(fragment), 'missing strict native fallback: '+fragment);
+  assert.ok(win.includes('Version=$stage.Version;Process=$p;ConfigPath=$cfg;ProjectDir=$stage.Dir'), 'diagnostic candidate must bind exact version and source');
+  assert.ok(win.includes('Version=$stage.Version;Process=$p;ConfigPath=$finalCfg;ProjectDir=$stage.Dir'), 'final candidate must bind exact version and source');
+  assert.ok(guard.includes('$expectedVersion=[string]$Candidate.Version'), 'cleanup fallback must bind the staged version');
+  assert.ok(guard.includes("if(-not $expectedVersion){throw 'CANDIDATE_EXPECTED_VERSION_MISSING'}"), 'missing candidate version must fail closed');
+  assert.ok(guard.includes('[string]$h.version -eq $expectedVersion'), 'health identity must match the exact candidate version');
+  assert.doesNotMatch(guard,/0\.11\.0-dev\.23/,'cleanup must not hard-code the old dev23 version');
+});
+
+test('Windows updater keeps Git long-path support repository-local and rejects incomplete staged releases',()=>{
+  const win=read('auto-update-windows.ps1');
+  const start=win.indexOf('function Assert-StageCheckoutComplete(');
+  const stage=win.indexOf('function Stage-Release(',start);
+  const next=win.indexOf('function Copy-WindowsJobRunner(',stage);
+  assert.ok(start>=0&&stage>start&&next>stage);
+  const guard=win.slice(start,stage);
+  const body=win.slice(stage,next);
+  assert.ok(guard.includes('ls-files --deleted'), 'missing tracked Windows long paths must fail');
+  assert.ok(guard.includes('diff --ignore-space-at-eol --name-only'),
+    'substantive changes must fail without treating Git CRLF conversion as missing files');
+  assert.ok(guard.includes("throw 'STAGE_CHECKOUT_INCOMPLETE'"));
+  const init=body.indexOf('git.exe -C $tmp init');
+  const localLongPaths=body.indexOf('git.exe -C $tmp config --local core.longpaths true');
+  const fetch=body.indexOf('git.exe -C $tmp fetch --depth 1');
+  const checkout=body.indexOf('git.exe -C $tmp checkout --detach $commit');
+  const initialProof=body.indexOf('Assert-StageCheckoutComplete $tmp');
+  const manifestRead=body.indexOf("Read-Json (Join-Path $tmp 'package.json')");
+  assert.ok(init>=0&&localLongPaths>init&&fetch>localLongPaths&&checkout>fetch);
+  assert.ok(initialProof>checkout&&manifestRead>initialProof,
+    'tracked tree must be fully materialized before the release manifest is accepted');
+  assert.ok(body.includes('Assert-StageCheckoutComplete $final'),
+    'both reused and newly moved releases must reject missing tracked files');
+  assert.ok(!body.includes('git config --global')&&!body.includes('LongPathsEnabled'),
+    'do not mutate global Git or Windows path/security policy');
 });

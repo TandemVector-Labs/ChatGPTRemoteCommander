@@ -1,0 +1,38 @@
+appId: io.tandemvector.commander
+productName: Remote Commander
+directories:
+  output: ../../dist/unified
+files:
+  - package.json
+  - main.cjs
+  - preload.cjs
+  - pilot-runtime.cjs
+  - migration-preflight.mjs
+  - owner-windows-legacy-migrate.ps1
+  - index.html
+  - renderer.js
+asar: true
+extraResources:
+  - from: .stage/core
+    to: core
+win:
+  target: nsis
+  requestedExecutionLevel: asInvoker
+nsis:
+  # Different installer family from the legacy Inno product. Refuse coexistence
+  # until a validated, owner-authorized transactional migration is available.
+  include: legacy-inno-guard.nsh
+  oneClick: true
+  perMachine: false
+  allowElevation: false
+  artifactName: Remote-Commander-Unified-${version}-Windows-${arch}.${ext}
+linux:
+  category: Utility
+  target: deb
+  executableName: remote-commander-unified
+  artifactName: Remote-Commander-Unified-${version}-Linux-${arch}.${ext}
+deb:
+  # Keep dpkg identity equal to existing package; fail closed on migration until
+  # rollback and owner admission are separately validated.
+  packageName: chatgpt-remote-commander
+publish: null

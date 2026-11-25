@@ -28,6 +28,34 @@ test('delivery event publish is durable and idempotent across restart',()=>{
   } finally { f.dispose(); }
 });
 
+test('origin-bound worker identity is validated, durable and part of event idempotency',()=>{
+  const f=fixture();let store=f.open();
+  const workerIdentity={workerId:'cw_'+'c'.repeat(64),workerKeyId:'d'.repeat(64),workerGrantRevision:7};
+  const originReceiptHash='e'.repeat(64);
+  try{
+    assert.throws(()=>store.publish({eventKey:'operation:missing-worker',correlationId:'chat-a',
+      source:'operation',sourceId:'missing-worker',kind:'COMPLETED',bindingId:'a'.repeat(32),
+      originReceiptHash}),/DELIVERY_WORKER_IDENTITY_REQUIRED/);
+    assert.throws(()=>store.publish({eventKey:'operation:unbound-worker',correlationId:'chat-a',
+      source:'operation',sourceId:'unbound-worker',kind:'COMPLETED',workerIdentity}),
+      /DELIVERY_WORKER_IDENTITY_REQUIRES_ORIGIN_RECEIPT/);
+    assert.throws(()=>store.publish({eventKey:'operation:invalid-worker',correlationId:'chat-a',
+      source:'operation',sourceId:'invalid-worker',kind:'COMPLETED',bindingId:'a'.repeat(32),
+      originReceiptHash,workerIdentity:{...workerIdentity,workerId:'cw_invalid'}}),
+      /DELIVERY_INVALID_WORKER_IDENTITY/);
+    const first=store.publish({eventKey:'operation:worker-bound',correlationId:'chat-a',
+      source:'operation',sourceId:'worker-bound',kind:'COMPLETED',bindingId:'a'.repeat(32),
+      originReceiptHash,workerIdentity});
+    assert.deepEqual(first.workerIdentity,workerIdentity);
+    store.close();store=f.open();
+    assert.deepEqual(store.get(first.deliveryId,'chat-a').workerIdentity,workerIdentity);
+    assert.throws(()=>store.publish({eventKey:'operation:worker-bound',correlationId:'chat-a',
+      source:'operation',sourceId:'worker-bound',kind:'COMPLETED',bindingId:'a'.repeat(32),
+      originReceiptHash,workerIdentity:{...workerIdentity,workerGrantRevision:8}}),
+      /DELIVERY_EVENT_CONFLICT/);
+  }finally{store.close();f.dispose();}
+});
+
 test('completion beacon exposes only bounded pending metadata without artifact contents',()=>{
   const f=fixture(); const store=f.open();
   try{
@@ -353,4 +381,125 @@ test('transport-receipt repair tool is bounded and explicitly non-acknowledging'
   assert.equal(tool.inputSchema.properties.limit.maximum,10000);
   assert.equal(tool.inputSchema.additionalProperties,false);
   assert.match(tool.description,/Does not delete artifacts or synthesize user acknowledgement/i);
+});
+
+
+test('delivery health breakdown is read-only and separates unattempted results by kind/source',()=>{
+  const f=fixture();const store=f.open();
+  try{
+    const completed=store.publish({eventKey:'operation:classify-ok',correlationId:'chat-qa',
+      source:'operation',sourceId:'qa1',kind:'COMPLETED'});
+    const failed=store.publish({eventKey:'operation:classify-failed',correlationId:'chat-qa',
+      source:'operation',sourceId:'qa2',kind:'FAILED'});
+    store.publish({eventKey:'project:classify-blocked',correlationId:'project-qa',
+      source:'project',sourceId:'qa3',kind:'BLOCKED'});
+    const first=store.health();
+    assert.equal(first.pending,3);
+    assert.deepEqual(first.pendingBreakdown, {
+      byKind:{BLOCKED:1,COMPLETED:1,FAILED:1},
+      bySource:{operation:2,project:1},
+      attempted:0
+    });
+    assert.equal(store.get(completed.deliveryId,'chat-qa').state,'COMPLETED_UNDELIVERED');
+    assert.equal(store.get(failed.deliveryId,'chat-qa').state,'COMPLETED_UNDELIVERED');
+    const claim=store.claim({deliveryId:completed.deliveryId,correlationId:'chat-qa',
+      attemptId:'qa-read-one',leaseMs:1000});
+    assert.equal(claim.claimed,true);
+    const second=store.health();
+    assert.equal(second.pending,3);
+    assert.equal(second.pendingBreakdown.attempted,1);
+    assert.equal(second.pendingBreakdown.byKind.COMPLETED,1);
+    assert.equal(store.get(completed.deliveryId,'chat-qa').state,'DELIVERY_PENDING');
+  } finally {store.close();f.dispose();}
+});
+
+test('health and beacon distinguish unbound backlog from epoch-bound pending without exposing epoch hashes',()=>{
+  const f=fixture();const store=f.open();
+  try{
+    const unbound=store.publish({eventKey:'operation:legacy-pending',correlationId:'chat-a',
+      source:'operation',sourceId:'legacy-pending',kind:'COMPLETED'});
+    const prior=store.publish({eventKey:'operation:prior-pending',correlationId:'chat-a',
+      source:'operation',sourceId:'prior-pending',kind:'COMPLETED',bindingId:'a'.repeat(32)});
+    const current=store.publish({eventKey:'operation:current-pending',correlationId:'chat-a',
+      source:'operation',sourceId:'current-pending',kind:'COMPLETED',bindingId:'b'.repeat(32)});
+    const delivered=store.publish({eventKey:'operation:already-delivered',correlationId:'chat-a',
+      source:'operation',sourceId:'already-delivered',kind:'COMPLETED',bindingId:'c'.repeat(32)});
+    store.claim({deliveryId:delivered.deliveryId,correlationId:'chat-a',attemptId:'delivered-attempt'});
+    store.ack({deliveryId:delivered.deliveryId,correlationId:'chat-a',attemptId:'delivered-attempt'});
+    store.claim({deliveryId:current.deliveryId,correlationId:'chat-a',attemptId:'current-attempt'});
+    const health=store.health();
+    const beacon=store.beacon(10);
+    const expected={unbound:1,epochBound:2};
+    assert.equal(health.pending,3);
+    assert.deepEqual(health.pendingByBinding,expected);
+    assert.equal(beacon.pending,3);
+    assert.deepEqual(beacon.pendingByBinding,expected);
+    assert.equal(health.pendingByBinding.unbound+health.pendingByBinding.epochBound,health.pending);
+    const publicSummary=JSON.stringify({health,beacon});
+    for(const epoch of ['a','b','c'])
+      assert.equal(publicSummary.includes(digest(epoch.repeat(32))),false);
+    assert.equal(publicSummary.includes('bindingEpochHash'),false);
+    assert.equal(beacon.items.some(item=>item.deliveryId===unbound.deliveryId),true);
+    assert.equal(beacon.items.some(item=>item.deliveryId===prior.deliveryId),true);
+    assert.equal(beacon.items.some(item=>item.deliveryId===delivered.deliveryId),false);
+  }finally{store.close();f.dispose();}
+});
+
+test('durable event lineage stays consent-epoch scoped without rewriting legacy results',()=>{
+  const f=fixture();const store=f.open();
+  try {
+    const old=store.publish({eventKey:'operation:old-lineage',correlationId:'chat-a',
+      source:'operation',sourceId:'old',kind:'COMPLETED',bindingId:'a'.repeat(32)});
+    const current=store.publish({eventKey:'operation:new-lineage',correlationId:'chat-a',
+      source:'operation',sourceId:'new',kind:'COMPLETED',bindingId:'b'.repeat(32)});
+    const legacy=store.publish({eventKey:'operation:legacy-lineage',correlationId:'chat-a',
+      source:'operation',sourceId:'legacy',kind:'COMPLETED'});
+    assert.equal(old.bindingEpochHash,digest('a'.repeat(32)));
+    assert.equal(current.bindingEpochHash,digest('b'.repeat(32)));
+    assert.equal(legacy.bindingEpochHash,undefined);
+    const visible=store.list({correlationId:'chat-a',bindingEpochHash:digest('b'.repeat(32))});
+    assert.deepEqual(visible.items.map(row=>row.deliveryId),[current.deliveryId]);
+    assert.equal(store.list({correlationId:'chat-a',limit:10}).items.length,3);
+    assert.throws(()=>store.publish({eventKey:'operation:old-lineage',correlationId:'chat-a',
+      source:'operation',sourceId:'old',kind:'COMPLETED',bindingId:'b'.repeat(32)}),
+      /DELIVERY_EVENT_CONFLICT/);
+    assert.throws(()=>store.publish({eventKey:'operation:invalid-epoch',correlationId:'chat-a',
+      source:'operation',sourceId:'invalid',kind:'COMPLETED',bindingId:'client-input'}),
+      /DELIVERY_INVALID_CONSENT_EPOCH/);
+  } finally {store.close();f.dispose();}
+});
+
+test('workflow root-lease scope requires signed origin and is idempotently persisted',()=>{
+  const f=fixture();let store=f.open();
+  const workerIdentity={workerId:'cw_'+'c'.repeat(64),workerKeyId:'d'.repeat(64),workerGrantRevision:7};
+  const scope={
+    workflowId:'sample',stepId:'first',
+    operationId:'123e4567-e89b-42d3-a456-426614174000',
+    rootFingerprint:'b'.repeat(64),revision:1,
+    leaseId:'c'.repeat(64),fencingToken:2
+  };
+  const event={eventKey:'operation:lease-scope',correlationId:'chat-a',
+    source:'operation',sourceId:'lease-scope',kind:'COMPLETED',bindingId:'a'.repeat(32),
+    originReceiptHash:'e'.repeat(64),workerIdentity};
+  try{
+    assert.throws(()=>store.publish({...event,originReceiptHash:null,workerIdentity:null,
+      workflowScope:scope}),/DELIVERY_WORKFLOW_SCOPE_REQUIRES_ORIGIN_RECEIPT/);
+    for(const bad of [
+      {...scope,revision:0},{...scope,leaseId:'fake'},{...scope,unknown:'extra'},
+      {...scope,stepId:'WRONG CASE'}
+    ]){
+      assert.throws(()=>store.publish({...event,workflowScope:bad}),
+        /DELIVERY_WORKFLOW_SCOPE_INVALID/);
+    }
+    const first=store.publish({...event,workflowScope:scope});
+    assert.deepEqual(first.workflowScope,scope);
+    assert.equal(store.publish({...event,workflowScope:scope}).deliveryId,first.deliveryId);
+    store.close();store=f.open();
+    const after=store.get(first.deliveryId,'chat-a');
+    assert.deepEqual(after.workflowScope,scope);
+    assert.equal(after.resultHash,first.resultHash);
+    assert.throws(()=>store.publish({...event,workflowScope:{...scope,fencingToken:3}}),
+      /DELIVERY_EVENT_CONFLICT/);
+    assert.equal(store.get(first.deliveryId,'chat-a').state,'COMPLETED_UNDELIVERED');
+  }finally{store.close();f.dispose();}
 });

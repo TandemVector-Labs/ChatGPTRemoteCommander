@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { once } from 'node:events';
-import { classifyToolSchemaCompatibility, evaluateSchemaContinuity } from '../tools/schema-continuity-gate.mjs';
+import { classifyToolSchemaCompatibility, evaluateSchemaContinuity, validateLocalSchemaEndpoint } from '../tools/schema-continuity-gate.mjs';
 
 function server(handler){return http.createServer(handler);}
 let portCursor=20000+(process.pid%10000);
@@ -101,4 +101,70 @@ test('classifier rejects newly imposed pattern and closed additional properties'
   assert.match(classifyToolSchemaCompatibility(old,pattern).reasons.join('|'),/pattern_changed/);
   const closed=[{name:'x',inputSchema:{type:'object',additionalProperties:false,properties:{a:{type:'string'}}}}];
   assert.match(classifyToolSchemaCompatibility(old,closed).reasons.join('|'),/additional_properties_narrowed/);
+});
+
+test('SSRF guard rejects remote, credentialed, redirectable and malformed schema endpoints before I/O',async()=>{
+  for(const value of [
+    'http://example.com:47831/mcp',
+    'http://10.0.0.1:47831/mcp',
+    'http://user:password@127.0.0.1:47831/mcp',
+    'http://127.0.0.1:47831/mcp?token=x',
+    'http://127.0.0.1:47831/mcp#secret',
+    'file:///tmp/mcp',
+    'https://127.0.0.1:47831/mcp',
+    'http://127.0.0.1:47831/evil',
+    'http://127.0.0.1:47831/mcp/../secret',
+    'http://127.0.0.1:47831/mcp%2f..%2fadmin',
+    'http://127.0.0.1/mcp'
+  ]){
+    assert.throws(()=>validateLocalSchemaEndpoint(value),/SCHEMA_ENDPOINT_/);
+    await assert.rejects(evaluateSchemaContinuity({
+      oldUrl:value,candidateUrl:'http://127.0.0.1:47832/mcp',
+      routerUrl:'http://127.0.0.1:47833/router/status'
+    }),/SCHEMA_ENDPOINT_/);
+  }
+  assert.equal(validateLocalSchemaEndpoint('http://127.0.0.1:47831/mcp','mcp'),
+    'http://127.0.0.1:47831/mcp');
+  assert.equal(validateLocalSchemaEndpoint('http://[::1]:47831/router/status','router'),
+    'http://[::1]:47831/router/status');
+  assert.throws(()=>validateLocalSchemaEndpoint('http://127.0.0.1:47831/mcp','router'),/SCHEMA_ENDPOINT_LOOPBACK_REQUIRED/);
+});
+
+test('SSRF guard blocks redirects from a loopback schema endpoint to a different destination',async()=>{
+ const source=server((req,res)=>{res.writeHead(302,{location:'http://example.com/'});res.end();});
+ const port=await listen(source);
+ try{
+  await assert.rejects(evaluateSchemaContinuity({
+    oldUrl:`http://127.0.0.1:${port}/mcp`,
+    candidateUrl:`http://127.0.0.1:${port}/mcp`,
+    routerUrl:`http://127.0.0.1:${port}/router/status`
+  }),/redirect|fetch failed/i);
+ }finally{await close(source);}
+});
+
+test('schema endpoint reconstruction retains canonical permitted loopback forms',()=>{
+  for(const host of ['127.0.0.1','localhost','[::1]']){
+    for(const endpoint of ['/mcp','/router/status']){
+      const input=`http://${host}:47831${endpoint}`;
+      const role=endpoint==='/mcp'?'mcp':'router';
+      assert.equal(validateLocalSchemaEndpoint(input,role),input);
+    }
+  }
+});
+
+test('schema preflight rejects an unsafe later endpoint before contacting the first',async()=>{
+  let requests=0;
+  const source=server((_req,res)=>{requests+=1;res.end('{}');});
+  const port=await listen(source);
+  const safe=`http://127.0.0.1:${port}/mcp`;
+  try{
+    await assert.rejects(evaluateSchemaContinuity({
+      oldUrl:safe,candidateUrl:'http://example.com:47832/mcp',
+      routerUrl:'http://127.0.0.1:47833/router/status'
+    }),/SCHEMA_ENDPOINT_LOOPBACK_REQUIRED/);
+    await assert.rejects(evaluateSchemaContinuity({
+      oldUrl:safe,candidateUrl:safe,routerUrl:'http://10.0.0.1:47833/router/status'
+    }),/SCHEMA_ENDPOINT_LOOPBACK_REQUIRED/);
+    assert.equal(requests,0);
+  }finally{await close(source);}
 });

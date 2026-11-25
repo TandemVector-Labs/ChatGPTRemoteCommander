@@ -24,7 +24,7 @@ const defs = [
   ['gui_session_end', 'End your desktop lease without stopping other services.', object(lease, ['lease']), null, null, coordination],
   ['gui_screenshot', 'Capture one monitor as an MCP image. Returns native pixel bounds and a short-lived, single-use frame token for the next action.', object({ ...lease, screenIndex: integer(0, 31), format: choice('jpeg', 'png'), quality: integer(25, 90), maxWidth: integer(320, 1920) }, ['lease']), 'screenshot', 'allowScreenshot', ro],
   ['gui_cursor_position', 'Read cursor position for this lease.', object(lease, ['lease']), 'cursor', 'allowMouse', ro],
-  ['gui_list_windows', 'List visible window handles, titles, and process IDs. Window titles may contain private data.', object(lease, ['lease']), 'listWindows', 'allowWindowFocus', ro],
+  ['gui_list_windows', 'List visible window handles, titles, and process IDs. Window titles may contain private data.', object(lease, ['lease']), 'listWindows', 'allowWindowEnumeration', ro],
   ['gui_mouse_move', 'Move within the monitor shown in a fresh frame.', object({ ...guarded, ...point }, ['lease', 'frame', 'x', 'y']), 'move', 'allowMouse', mutation],
   ['gui_mouse_delta', 'Apply a bounded relative mouse movement; not a low-latency game controller.', object({ ...guarded, dx: integer(-1000, 1000), dy: integer(-1000, 1000) }, ['lease', 'frame', 'dx', 'dy']), 'moveRelative', 'allowMouse', mutation],
   ['gui_mouse_scroll', 'Scroll the current foreground window after validating a fresh observation.', object({ ...guarded, delta: integer(-1200, 1200), horizontal: { type: 'boolean' } }, ['lease', 'frame', 'delta']), 'scroll', 'allowMouse', mutation],

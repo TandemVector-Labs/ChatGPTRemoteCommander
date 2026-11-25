@@ -3,3 +3,11 @@
 *.mjs text eol=lf
 *.json text eol=lf
 *.md text eol=lf
+# Pin the bytes signed by the native Windows Job Runner manifest on every checkout.
+*.cs text eol=lf
+*.csproj text eol=lf
+
+# Preserve the exact OpenAI-published CA PEM bytes on Windows CI checkouts.
+assets/trust/openai/*.pem text eol=lf
+# Preserve the original CRLF bytes of the signed native dashboard entry point.
+desktop/RemoteCommanderDashboard/Program.cs -text

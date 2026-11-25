@@ -3,9 +3,19 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createWorkflowTools } from '../src/workflow-tools.mjs';
+import { createWorkflowTools, PROJECT_ENGINE_TOOL_DEFINITIONS } from '../src/workflow-tools.mjs';
+import { classifyTool, reconciliationPlan } from '../src/workflow-autonomy.mjs';
 import { validateJsonSchema } from '../src/schema-validator.mjs';
 import { DeliveryStore } from '../src/delivery-store.mjs';
+
+test('workflow_run_status Host and durable read-only contracts agree',()=>{
+  const definition=PROJECT_ENGINE_TOOL_DEFINITIONS.find(x=>x.name==='workflow_run_status');
+  assert.ok(definition);
+  assert.equal(definition.annotations?.readOnlyHint,true);
+  assert.equal(classifyTool('workflow_run_status',{}),'READ_ONLY');
+  assert.deepEqual(reconciliationPlan('workflow_run_status',{}),
+    {strategy:'SAFE_RETRY',classification:'READ_ONLY'});
+});
 
 test('project run persists caller correlation id and rejects invalid correlation', async () => {
   const root=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'rc-project-corr-')));
@@ -91,7 +101,14 @@ test('WAITING_INPUT and BLOCKED project states become idempotent correlation-sco
     assert.equal(items[0].kind,'WAITING_INPUT');
     assert.equal(items[0].sourceId,'run-one');
     assert.equal(deliveryStore.list({correlationId:'chat-b',includeDelivered:true}).items.length,0);
-    await api.execute('workflow_run_status',{runId:'run-one'});
+    const originalWriteArtifact=deliveryStore.writeArtifact.bind(deliveryStore);
+    let passiveStatusWrites=0;
+    deliveryStore.writeArtifact=(...args)=>{passiveStatusWrites++;return originalWriteArtifact(...args);};
+    try {
+      assert.equal((await api.execute('workflow_run_status',{runId:'run-one'})).status,'WAITING_INPUT');
+      assert.equal((await api.execute('workflow_run_status',{runId:'run-one'})).status,'WAITING_INPUT');
+      assert.equal(passiveStatusWrites,0,'read-only status must never publish delivery artifacts');
+    } finally { deliveryStore.writeArtifact=originalWriteArtifact; }
     assert.equal(deliveryStore.list({correlationId:'chat-a',includeDelivered:true}).items.length,1);
     assert.throws(
       ()=>deliveryStore.claim({deliveryId:items[0].deliveryId,correlationId:'chat-b',attemptId:'attempt-b'}),

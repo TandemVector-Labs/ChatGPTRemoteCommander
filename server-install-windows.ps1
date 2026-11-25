@@ -1,11 +1,12 @@
 param(
-  [string]$SourceRef = 'v0.10.23',
+  [string]$SourceRef = 'v0.12.0',
   [string]$ExpectedCommit = '',
   [ValidateSet('Power','Standard')][string]$AccessMode = 'Power',
-  [ValidateSet('Auto','On','Off')][string]$GuiControl = 'Auto',
+  [ValidateSet('Auto','On','Off')][string]$GuiControl = 'Off',
   [string]$InstallDir = '',
   [switch]$NoStartServer,
   [switch]$PrerequisitesOnly,
+  [switch]$PrerequisitesProbe,
   [switch]$KeepDownloads
 )
 
@@ -38,7 +39,7 @@ function Refresh-Path {
 
 function Invoke-Download([string]$Url,[string]$Destination) {
   Write-Host "Downloading $Url"
-  Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination -Headers @{'User-Agent'='ChatGPTRemoteCommander-ServerInstaller/0.10.23'}
+  Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination -Headers @{'User-Agent'='ChatGPTRemoteCommander-ServerInstaller/0.10.24'}
   if (-not (Test-Path -LiteralPath $Destination -PathType Leaf)) { throw "Download did not create $Destination" }
 }
 
@@ -111,20 +112,31 @@ function Ensure-PowerShell7([string]$Arch) {
   return $candidate
 }
 
+function Test-PatchedNodeVersion([string]$Version) {
+  if ($Version -notmatch '^v(22|24|26)\.[0-9]{1,3}\.[0-9]{1,3}$') { return $false }
+  try { $parsed = [version]::Parse($Version.Substring(1)) } catch { return $false }
+  switch ($parsed.Major) {
+    22 { return ($parsed -ge [version]'22.23.4') }
+    24 { return ($parsed -ge [version]'24.22.1') }
+    26 { return ($parsed -ge [version]'26.12.1') }
+    default { return $false }
+  }
+}
+
 function Ensure-Node([string]$Arch) {
   $cmd = Get-Command node.exe -ErrorAction SilentlyContinue
   if ($cmd) {
     try {
-      $major = [int]((& $cmd.Source --version).Trim().TrimStart('v').Split('.')[0])
-      if ($major -ge 22) { return $cmd.Source }
+      $version = (& $cmd.Source --version).Trim()
+      if (Test-PatchedNodeVersion $version) { return $cmd.Source }
     } catch {}
   }
 
   $existing = Join-Path $env:ProgramFiles 'nodejs\node.exe'
   if (Test-Path -LiteralPath $existing -PathType Leaf) {
     try {
-      $major = [int]((& $existing --version).Trim().TrimStart('v').Split('.')[0])
-      if ($major -ge 22) {
+      $version = (& $existing --version).Trim()
+      if (Test-PatchedNodeVersion $version) {
         $sha = (Get-FileHash -LiteralPath $existing -Algorithm SHA256).Hash.ToLowerInvariant()
         $signer = Assert-Authenticode $existing
         Add-ArtifactEvidence 'Node.js' $existing 'existing-installation' $sha $signer
@@ -136,7 +148,7 @@ function Ensure-Node([string]$Arch) {
     }
   }
 
-  $version = '22.23.3'
+  $version = '22.23.4'
   $asset = if ($Arch -eq 'x64') { "node-v$version-x64.msi" } else { "node-v$version-arm64.msi" }
   $base = "https://nodejs.org/dist/v$version"
   $sumsPath = Join-Path $Downloads 'node-SHASUMS256.txt'
@@ -176,7 +188,7 @@ function Ensure-Git([string]$Arch) {
   # Public GitHub shared runner IPs can exhaust the unauthenticated REST limit.
   # Authentication is optional, fixed to this release-metadata endpoint only.
   $headers = @{
-    'User-Agent'='ChatGPTRemoteCommander-ServerInstaller/0.10.23'
+    'User-Agent'='ChatGPTRemoteCommander-ServerInstaller/0.10.24'
     'X-GitHub-Api-Version'='2022-11-28'
   }
   if ($script:BootstrapGitHubToken) {
@@ -250,10 +262,53 @@ function Write-AllowlistManifest([string]$Commit,[object]$Server,[object]$Defend
   [IO.File]::WriteAllText($ManifestPath,($doc | ConvertTo-Json -Depth 12)+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
 }
 
-if (-not (Test-Administrator)) { throw 'Run this server installer from an elevated Administrator shell.' }
+# Read-only, unprivileged probe used by Inno before requesting UAC.
+# Exit code 42 means the verified prerequisite installation path is necessary.
+# Never create ProgramData, persist PATH, use network or grant privileges here.
+function Test-ExistingLocalPrerequisites {
+  try {
+    # A fresh installation still requires the original protected machine receipt
+    # and native approval. Only a previously completed bootstrap may skip UAC.
+    $receipt = Get-Item -LiteralPath $ManifestPath -ErrorAction Stop
+    if ($receipt.PSIsContainer -or
+        ($receipt.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $receipt.Length -lt 20 -or $receipt.Length -gt 131072) { return $false }
+    $prior = Get-Content -LiteralPath $ManifestPath -Raw -Encoding UTF8 |
+      ConvertFrom-Json -ErrorAction Stop
+    if ($prior.schema -ne 1 -or $prior.antivirusExclusionsAdded -ne $false -or
+        -not $prior.server -or
+        [string]$prior.resolvedCommit -cnotmatch '^(?:PREREQUISITES_ONLY|[0-9a-f]{40})$') { return $false }
+    $shell = Get-Command pwsh.exe -ErrorAction Stop
+    $node = Get-Command node.exe -ErrorAction Stop
+    $git = Get-Command git.exe -ErrorAction Stop
+    if (-not $shell.Source -or -not $node.Source -or -not $git.Source) { return $false }
+    $shellVersion = (& $shell.Source -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.Major').Trim()
+    $nodeVersion = (& $node.Source --version).Trim()
+    $gitVersion = (& $git.Source --version).Trim()
+    if ($shellVersion -notmatch '^[0-9]+$' -or [int]$shellVersion -lt 7) { return $false }
+    if ($nodeVersion -notmatch '^v([0-9]+)\.' -or [int]$Matches[1] -lt 22) { return $false }
+    if ($gitVersion -notmatch '^git version [0-9]+\.') { return $false }
+    return $true
+  } catch {
+    return $false
+  }
+}
 if ($SourceRef -notmatch '^[A-Za-z0-9._/-]{1,128}$') { throw 'Invalid SourceRef.' }
 if ($ExpectedCommit -and $ExpectedCommit -notmatch '^[0-9a-fA-F]{40}$') { throw 'ExpectedCommit must be a 40-hex SHA.' }
 if ($AccessMode -eq 'Standard' -and $GuiControl -eq 'On') { throw 'GuiControl On requires AccessMode Power.' }
+
+if ($PrerequisitesProbe) {
+  if ($PrerequisitesOnly -or $NoStartServer -or $InstallDir) {
+    throw 'PREREQUISITES_PROBE_EXCLUSIVE_MODE_REQUIRED'
+  }
+  if (Test-ExistingLocalPrerequisites) {
+    Write-Host 'SERVER_PREREQUISITES_LOCAL_PROBE_PASS'
+    exit 0
+  }
+  Write-Host 'SERVER_PREREQUISITES_LOCAL_PROBE_MISSING'
+  exit 42
+}
+if (-not (Test-Administrator)) { throw 'Run this server installer from an elevated Administrator shell.' }
 
 New-Item -ItemType Directory -Force -Path $Downloads | Out-Null
 $server = Get-ServerCoreState
@@ -291,14 +346,37 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'git checkout failed.' }
   $package = Get-Content -LiteralPath (Join-Path $stage 'package.json') -Raw | ConvertFrom-Json
   $expectedVersion = [string]$package.version
-  if ($expectedVersion -notmatch '^\d+\.\d+\.\d+$') { throw 'Staged package version is invalid.' }
+  if ($expectedVersion -notmatch '^\d+\.\d+\.\d+$') {
+    # Development bootstrap is for a SHA-pinned isolated candidate only.
+    $devMatch = [regex]::Match($expectedVersion,'^0\.(?<minor>11|12)\.0-dev\.[1-9][0-9]*$')
+    if (-not $devMatch.Success) { throw 'Staged package version is invalid.' }
+    $trainVersion = '0.' + $devMatch.Groups['minor'].Value
+    $manifestPath = Join-Path $stage ("docs\release-train-$trainVersion.json")
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw 'DEV_MANIFEST_MISSING' }
+    $train = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    if ($train.train -cne $trainVersion -or
+        $train.sourceVersion -cne $expectedVersion -or
+        $train.status -cne 'INTEGRATION_CANDIDATE_NOT_FINAL' -or
+        $train.channel -cne 'development' -or
+        $train.isStable -ne $false -or
+        $train.publishApproved -ne $false -or
+        $train.autoupdateApproved -ne $false -or
+        $train.installedPromotionApproved -ne $false -or
+        $null -ne $train.releaseTag -or
+        @($train.components).Count -lt 8 -or
+        @($train.components | Where-Object {$_.required -ne $true -or $_.verified -ne $false}).Count -ne 0 -or
+        $null -eq $train.acceptance -or
+        @($train.acceptance.PSObject.Properties | Where-Object {$_.Value -ne $false}).Count -ne 0) {
+      throw 'Staged development manifest is not fail-closed.'
+    }
+  }
 
   $guiEnabled = $false
   if ($GuiControl -eq 'On') {
     if ($server.isServerCore) { throw 'GUI control cannot be enabled on Windows Server Core. Use -GuiControl Off or Auto.' }
     $guiEnabled = $true
   } elseif ($GuiControl -eq 'Auto') {
-    $guiEnabled = -not [bool]$server.isServerCore
+    $guiEnabled = $false # Server installer defaults headless regardless of Windows SKU or RDP.
   }
 
   $installer = Join-Path $stage 'install.ps1'

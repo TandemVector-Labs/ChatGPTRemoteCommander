@@ -89,3 +89,71 @@ test('invalid app identity fails before package generation',()=>{
     assert.match(r.stderr,/AppId must be/u);
   }finally{fs.rmSync(tmp,{recursive:true,force:true});}
 });
+
+test('explicit owner-local identity map formats the Plugin name without renaming technical routes',()=>{
+  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'rc-device-plugin-identity-'));
+  const identityFile=path.join(tmp,'identities.json');
+  const out=path.join(tmp,'plugin');
+  const zip=path.join(tmp,'plugin.zip');
+  const accounts={schema:1,hosts:[{hostId:'device-1',hostLabel:'Owner Laptop',profiles:[
+    {accountId:'acct-mmz',profileId:'MMZ',tunnelProfile:'mmz-owner-laptop',
+     displayName:'Remote Commander · MMZ · Owner Laptop',aliases:['old-mmz']},
+    {accountId:'acct-saeid',profileId:'saeid-secondary',tunnelProfile:'saeid-secondary',
+     displayName:'Remote Commander · Saeid · Owner Laptop'}
+  ]}]};
+  fs.writeFileSync(identityFile,JSON.stringify(accounts));
+  const base=[generator,'--template',template,'--output',out,'--zip',zip,
+    '--app-id','asdk_app_TESTDEVICE123','--profile','old-mmz',
+    '--device-name','Owner Laptop','--fingerprint','1234567890',
+    '--identity-map',identityFile,'--host-id','device-1','--account-id','acct-mmz'];
+  try{
+    const result=spawnSync(process.execPath,base,{encoding:'utf8'});
+    assert.equal(result.status,0,result.stderr);
+    const meta=JSON.parse(fs.readFileSync(path.join(out,'DEVICE_PLUGIN.json'),'utf8'));
+    const plugin=JSON.parse(fs.readFileSync(path.join(out,'plugin.json'),'utf8'));
+    assert.equal(meta.profile,'old-mmz');
+    assert.equal(meta.identity.profileId,'MMZ');
+    assert.equal(meta.identity.tunnelProfile,'mmz-owner-laptop');
+    assert.equal(meta.identity.bindingHash.length,24);
+    assert.equal(meta.displayName,'Remote Commander · MMZ · Owner Laptop');
+    assert.equal(plugin.extensions['com.openai'].interface.displayName,meta.displayName);
+    assert.doesNotMatch(JSON.stringify(meta),/acct-mmz|device-1/u);
+    for(const [arg,value] of [['--account-id','acct-saeid'],['--host-id','wrong']]){
+      const bad=base.slice();bad[bad.indexOf(arg)+1]=value;
+      const denied=spawnSync(process.execPath,bad,{encoding:'utf8'});
+      assert.notEqual(denied.status,0);
+      assert.match(denied.stderr,/Profile identity map rejected/u);
+    }
+  } finally {fs.rmSync(tmp,{recursive:true,force:true});}
+});
+
+test('mapped technical aliases retain one stable per-account plugin identity',()=>{
+  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'rc-device-plugin-alias-'));
+  const idFile=path.join(tmp,'map.json');
+  const map={schema:1,hosts:[{hostId:'host-demo',hostLabel:'Example Device',profiles:[
+    {accountId:'acct-demo',profileId:'default',
+     tunnelProfile:'chatgpt-remote-commander',
+     displayName:'Remote Commander · Example · Device',
+     aliases:['older-technical-alias']}
+  ]}]};
+  fs.writeFileSync(idFile,JSON.stringify(map));
+  const generate=(technical,suffix)=>{
+    const out=path.join(tmp,suffix),zip=path.join(tmp,suffix+'.zip');
+    const args=[generator,'--template',template,'--output',out,'--zip',zip,
+      '--app-id','asdk_app_TESTDEVICE123','--identity-map',idFile,
+      '--host-id','host-demo','--account-id','acct-demo','--profile',technical];
+    const r=spawnSync(process.execPath,args,{encoding:'utf8'});
+    assert.equal(r.status,0,r.stderr);
+    return JSON.parse(r.stdout);
+  };
+  try{
+    const a=generate('default','a');
+    const b=generate('chatgpt-remote-commander','b');
+    const c=generate('older-technical-alias','c');
+    assert.equal(a.pluginName,b.pluginName);
+    assert.equal(b.pluginName,c.pluginName);
+    assert.equal(a.fingerprint,b.fingerprint);
+    assert.equal(b.fingerprint,c.fingerprint);
+    assert.equal(a.displayName,c.displayName);
+  }finally{fs.rmSync(tmp,{recursive:true,force:true});}
+});

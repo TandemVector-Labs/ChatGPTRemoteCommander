@@ -1,0 +1,16 @@
+{
+  "schema": "commander-unsigned-windows-release-v1",
+  "version": "0.10.25",
+  "tag": "v0.10.25",
+  "allowUnsignedWithGitHubAttestation": true,
+  "scope": "only-this-version",
+  "publishedInstallerSignature": "NotSigned",
+  "verification": "GitHub Sigstore build provenance + exact source tag/commit + SHA256SUMS.txt",
+  "riskAcknowledgement": "On 2026-10-20 the user expressly authorized an UNSIGNED public v0.10.25 Preview because trusted Windows Authenticode signing is not currently available in Iran. Windows may display Unknown publisher and Microsoft SmartScreen or Smart App Control may warn or block. TandemVector Labs branding, SHA256SUMS.txt and GitHub Sigstore provenance do not replace Authenticode. Do not disable or bypass OS security features.",
+  "ownerApproval": "Explicit version-specific user request on 2026-10-20 for unsigned v0.10.25 Preview; this does not represent the named source author personally signing or providing an independent review.",
+  "releaseChannel": "public-prerelease-not-stable",
+  "organizationBrand": "TandemVector Labs (GitHub Usefull-Skills)",
+  "primarySourceMaintainer": "Dr. Aliakbar Emadoddin (@GOD13emad)",
+  "supportingSourceMaintainer": "MMZ (@mohammadmohammadzadeh19960-code)",
+  "stableAutoUpdateAllowed": false
+}

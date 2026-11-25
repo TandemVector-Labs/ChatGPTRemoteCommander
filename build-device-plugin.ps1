@@ -2,6 +2,9 @@ param(
   [Parameter(Mandatory=$true)][string]$AppId,
   [string]$DeviceName = $env:COMPUTERNAME,
   [string]$Profile = 'chatgpt-remote-commander',
+  [string]$IdentityMap = '',
+  [string]$HostId = '',
+  [string]$AccountId = '',
   [string]$OutputDirectory = '',
   [switch]$KeepDirectory
 )
@@ -27,7 +30,8 @@ try{$machineGuid=[string](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptograph
 if([string]::IsNullOrWhiteSpace($machineGuid)){$machineGuid="$env:COMPUTERNAME|$env:PROCESSOR_IDENTIFIER"}
 $sha=[Security.Cryptography.SHA256]::Create()
 try{
-  $seedText=([string]$machineGuid)+[char]0+([string]$Profile)
+  $fingerprintSeed=if($IdentityMap){$AccountId}else{$Profile}
+  $seedText=([string]$machineGuid)+[char]0+([string]$fingerprintSeed)
   $bytes=[Text.Encoding]::UTF8.GetBytes($seedText)
   $digest=$sha.ComputeHash($bytes)
   $fingerprint=([Convert]::ToHexString($digest)).ToLowerInvariant().Substring(0,10)
@@ -38,7 +42,18 @@ $stage=Join-Path $temp 'plugin'
 New-Item -ItemType Directory -Force -Path $temp | Out-Null
 try{
   $preZip=Join-Path $temp 'device-plugin.zip'
-  $json=& $node.Source $Generator --template $Template --output $stage --zip $preZip --app-id $AppId --device-name $DeviceName --profile $Profile --fingerprint $fingerprint
+  $generatorArgs=@('--template',$Template,'--output',$stage,'--zip',$preZip,
+    '--app-id',$AppId,'--profile',$Profile,'--fingerprint',$fingerprint)
+  if($IdentityMap -or $HostId -or $AccountId){
+    if(-not($IdentityMap -and $HostId -and $AccountId)){
+      throw 'IdentityMap, HostId and AccountId are required together'
+    }
+    $generatorArgs+=@('--identity-map',$IdentityMap,'--host-id',$HostId,'--account-id',$AccountId)
+    if($PSBoundParameters.ContainsKey('DeviceName')){$generatorArgs+=@('--device-name',$DeviceName)}
+  }else{
+    $generatorArgs+=@('--device-name',$DeviceName)
+  }
+  $json=& $node.Source $Generator @generatorArgs
   if($LASTEXITCODE -ne 0){throw "device plugin generator failed: $LASTEXITCODE"}
   $result=$json | ConvertFrom-Json
   if(-not $result.ok){throw 'device plugin generator returned non-PASS result'}

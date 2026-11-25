@@ -16,8 +16,21 @@ function parse(argv){
   }
   if(!o.url||!o.config)fail('SELFTEST_REQUIRED');
   if(!Number.isSafeInteger(o.timeoutMs)||o.timeoutMs<500||o.timeoutMs>60000)fail('SELFTEST_TIMEOUT');
-  const u=new URL(o.url);
-  if(!['127.0.0.1','localhost','::1','[::1]'].includes(u.hostname)||!u.pathname.endsWith('/mcp'))fail('SELFTEST_LOOPBACK_ONLY');
+  let u;
+  try{u=new URL(o.url);}catch{fail('SELFTEST_URL_INVALID');}
+  if(!['http:','https:'].includes(u.protocol)
+    ||!['127.0.0.1','localhost','[::1]'].includes(u.hostname)
+    ||u.username||u.password||u.search||u.hash||u.pathname!=='/mcp'
+    ||!u.port||!Number.isSafeInteger(Number(u.port))
+    ||Number(u.port)<1||Number(u.port)>65535)
+    fail('SELFTEST_LOOPBACK_ONLY');
+  const scheme=u.protocol==='http:'?'http':'https';
+  const host=u.hostname==='127.0.0.1'?'127.0.0.1'
+    :u.hostname==='localhost'?'localhost':'[::1]';
+  // Distinguish untrusted caller text from the only network destination.
+  // URL is reconstructed from literal allowlisted parts plus a numeric port.
+  o.endpoint=new URL(scheme+'://'+host+':'+Number(u.port)+'/mcp');
+  delete o.url;
   return o;
 }
 async function readBounded(r){
@@ -39,7 +52,7 @@ const o=parse(process.argv.slice(2));
 const selftestRequestId=(label)=>`hardware-selftest-${process.pid}-${label}`;
 const config=JSON.parse(fs.readFileSync(o.config,'utf8'));
 let id=1;
-const status=await tool(o.url,'system_status',{},id++,o.timeoutMs);
+const status=await tool(o.endpoint,'system_status',{},id++,o.timeoutMs);
 if(o.expectedVersion&&status.version!==o.expectedVersion)fail('SELFTEST_VERSION');
 if(o.expectedDevice&&status.deviceName!==o.expectedDevice)fail('SELFTEST_DEVICE');
 const profile=config.instance?.profile??'default';
@@ -55,28 +68,28 @@ if(config.capabilityProfile?.tier==='FULL_POWER'){
   expect('shell.execute',status.powerMode?.allowShell,'SELFTEST_SHELL');
   expect('process.control',status.powerMode?.allowProcessControl,'SELFTEST_PROCESS');
   expect('filesystem.permanent_delete',status.powerMode?.allowPermanentDelete,'SELFTEST_DELETE');
-  await tool(o.url,'power_status',{},id++,o.timeoutMs);pass('power_status');
-  await tool(o.url,'file_info',{path:os.tmpdir()},id++,o.timeoutMs);pass('file_info');
-  await tool(o.url,'system_info',{},id++,o.timeoutMs);pass('system_info');
-  await tool(o.url,'list_processes',{},id++,o.timeoutMs);pass('list_processes');
+  await tool(o.endpoint,'power_status',{},id++,o.timeoutMs);pass('power_status');
+  await tool(o.endpoint,'file_info',{path:os.tmpdir()},id++,o.timeoutMs);pass('file_info');
+  await tool(o.endpoint,'system_info',{},id++,o.timeoutMs);pass('system_info');
+  await tool(o.endpoint,'list_processes',{},id++,o.timeoutMs);pass('list_processes');
   if(!disabled.has('shell.execute')){
     const marker='RC_HARDWARE_SELFTEST_PASS';
     const cmd=status.platform==='win32'?'Write-Output '+marker:'printf '+marker;
-    const sh=await tool(o.url,'run_shell',{requestId:selftestRequestId('run-shell'),command:cmd,timeoutMs:10000},id++,o.timeoutMs);
+    const sh=await tool(o.endpoint,'run_shell',{requestId:selftestRequestId('run-shell'),command:cmd,timeoutMs:10000},id++,o.timeoutMs);
     if(!String(sh?.stdout??'').includes(marker))fail('SELFTEST_SHELL_E2E');
     pass('run_shell');
   }
   if(config.powerMode?.guiControl?.enabled===true&&status.guiControl?.backendSupported===true){
-    await tool(o.url,'gui_status',{},id++,o.timeoutMs);pass('gui_status');
+    await tool(o.endpoint,'gui_status',{},id++,o.timeoutMs);pass('gui_status');
   }else if(config.powerMode?.guiControl?.enabled===true){
     pass('gui_status','authorized but backend unavailable on this platform');
   }
   if(config.powerMode?.browserControl?.enabled===true){
-    const bs=await tool(o.url,'browser_status',{},id++,o.timeoutMs);
+    const bs=await tool(o.endpoint,'browser_status',{},id++,o.timeoutMs);
     if(bs?.available===true){
-      const begun=await tool(o.url,'browser_session_begin',{requestId:selftestRequestId('browser-begin'),mode:'isolated',profile:'hardware',ttlSeconds:30},id++,Math.max(o.timeoutMs,30000));
+      const begun=await tool(o.endpoint,'browser_session_begin',{requestId:selftestRequestId('browser-begin'),mode:'isolated',profile:'hardware',ttlSeconds:30},id++,Math.max(o.timeoutMs,30000));
       if(begun?.background!==true||begun?.userDesktopTouched!==false||begun?.savedPasswordStoreAccess!==false)fail('SELFTEST_BROWSER_POLICY');
-      await tool(o.url,'browser_session_end',{requestId:selftestRequestId('browser-end'),lease:begun.lease},id++,Math.max(o.timeoutMs,30000));
+      await tool(o.endpoint,'browser_session_end',{requestId:selftestRequestId('browser-end'),lease:begun.lease},id++,Math.max(o.timeoutMs,30000));
       pass('browser_background',bs.backend??'available');
     }else{
       pass('browser_background','authorized but Chromium background backend unavailable on this host');
@@ -84,7 +97,7 @@ if(config.capabilityProfile?.tier==='FULL_POWER'){
   }
 }
 if(config.durableWorkflows?.enabled===true){
-  const wf=await tool(o.url,'workflow_health',{},id++,o.timeoutMs);
+  const wf=await tool(o.endpoint,'workflow_health',{},id++,o.timeoutMs);
   if(wf?.ok!==true||wf?.databaseIntegrity!=='ok')fail('SELFTEST_WORKFLOW_HEALTH');
   pass('workflow_health','schema='+wf.databaseSchemaVersion);
 }

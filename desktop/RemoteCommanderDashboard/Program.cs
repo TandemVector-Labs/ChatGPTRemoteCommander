@@ -16,7 +16,11 @@ internal sealed record ProfileRow(
     int RouterPort,
     int RouterPid,
     DateTimeOffset? UpdatedAt,
-    string ProjectDir);
+    string ProjectDir,
+    string BackendConfigSha256,
+    string RouterSourceSha256,
+    bool IsolatedInstance = false,
+    string DisplayName = "");
 
 internal sealed class DashboardForm : Form
 {
@@ -124,8 +128,8 @@ internal sealed class DashboardForm : Form
         var actions = new FlowLayoutPanel
         {
             Dock = DockStyle.Top,
-            Height = 96,
-            AutoScroll = true,
+            Height = 108,
+            AutoScroll = false,
             WrapContents = true,
             Padding = new Padding(20, 8, 20, 8),
             FlowDirection = FlowDirection.LeftToRight
@@ -142,7 +146,36 @@ internal sealed class DashboardForm : Form
         if (ToolInstalled("admin-runtime-windows.ps1"))
             actions.Controls.Add(Button("Admin Runtime", (_, _) => LaunchPowerShellTool("admin-runtime-windows.ps1", "Admin Runtime")));
         actions.Controls.Add(Button("Browser", (_, _) => LaunchBrowser()));
+        actions.Controls.Add(Button("Optional Add-ons", (_, _) =>
+        {
+            using var dialog = new OptionalAddonsForm();
+            dialog.ShowDialog(this);
+        }));
+        actions.Controls.Add(Button("Notion Connection", (_, _) =>
+        {
+            using var wizard = new NotionSetupForm();
+            wizard.ShowDialog(this);
+        }));
         actions.Controls.Add(Button("Copy Diagnostics", (_, _) => CopyDiagnostics()));
+        // Keep every action fully visible on narrow windows and non-default DPI.
+        void FitActions()
+        {
+            var usable = Math.Max(1, actions.ClientSize.Width - actions.Padding.Horizontal - 6);
+            var occupied = 0;
+            var rows = 1;
+            foreach (var button in actions.Controls.OfType<Button>())
+            {
+                var width = button.Width + button.Margin.Horizontal;
+                if (occupied > 0 && occupied + width > usable) { rows++; occupied = 0; }
+                occupied += width;
+            }
+            var rowHeight = actions.Controls.OfType<Button>()
+                .Select(button => button.Height + button.Margin.Vertical).DefaultIfEmpty(40).Max();
+            var desired = Math.Max(70, actions.Padding.Vertical + rows * rowHeight + 6);
+            if (actions.Height != desired) actions.Height = desired;
+        }
+        actions.ClientSizeChanged += (_, _) => FitActions();
+        FitActions();
 
         chrome.Attach(cards);
         Controls.Add(cards);
@@ -206,7 +239,7 @@ internal sealed class DashboardForm : Form
         {
             cards.Controls.Clear();
             summary.Text = profiles.Count == 0
-                ? "No routing profiles discovered."
+                ? "No verified profile records discovered."
                 : $"{profiles.Count} profile(s) • read-only dashboard • {Environment.MachineName}";
             cards.Controls.AddRange(rendered.ToArray());
             chrome.Update(profiles);
@@ -218,12 +251,41 @@ internal sealed class DashboardForm : Form
         }
     }
 
+    private Dictionary<string, string> ReadDisplayNames()
+    {
+        var labels = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var file = Path.Combine(stateRoot, "profile-display-names.json");
+        try
+        {
+            if (!File.Exists(file) ||
+                (File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0 ||
+                new FileInfo(file).Length > 32768) return labels;
+            using var doc = JsonDocument.Parse(File.ReadAllText(file));
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("schema", out var schema) || schema.GetInt32() != 1 ||
+                !root.TryGetProperty("profiles", out var profiles) ||
+                profiles.ValueKind != JsonValueKind.Object) return labels;
+            foreach (var item in profiles.EnumerateObject())
+            {
+                var name = item.Name;
+                if (name.Length is < 1 or > 64 || name.Contains("..") ||
+                    name.Any(c => !(char.IsAsciiLetterOrDigit(c) || c is '.' or '_' or '-')) ||
+                    item.Value.ValueKind != JsonValueKind.String) return new(StringComparer.OrdinalIgnoreCase);
+                var label = item.Value.GetString();
+                if (string.IsNullOrWhiteSpace(label) || label.Length > 80 ||
+                    label.Trim() != label || label.Any(char.IsControl)) return new(StringComparer.OrdinalIgnoreCase);
+                labels[name] = label;
+            }
+        }
+        catch { return new(StringComparer.OrdinalIgnoreCase); }
+        return labels;
+    }
+
     private List<ProfileRow> LoadProfiles()
     {
         var routing = Path.Combine(stateRoot, "routing");
         var result = new List<ProfileRow>();
-        if (!Directory.Exists(routing)) return result;
-
+        if (Directory.Exists(routing))
         foreach (var runtimePath in Directory.EnumerateFiles(routing, "*.runtime.json")
                      .OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
         {
@@ -258,19 +320,36 @@ internal sealed class DashboardForm : Form
                 var commit = active.TryGetProperty("commit", out var sha) ? sha.GetString() ?? "" : "";
                 var backendPort = active.TryGetProperty("port", out var bp) ? bp.GetInt32() : 0;
                 var projectDir = active.TryGetProperty("projectDir", out var pd) ? pd.GetString() ?? "" : "";
+                var backendConfigSha = active.TryGetProperty("configSha256", out var conf)
+                    ? conf.GetString() ?? "" : "";
+                var routerSourceSha = rr.TryGetProperty("sourceSha256", out var source)
+                    ? source.GetString() ?? "" : "";
                 DateTimeOffset? updated = root.TryGetProperty("updatedAt", out var ua) &&
                                       DateTimeOffset.TryParse(ua.GetString(), out var parsed) ? parsed : null;
                 var routerPort = rr.TryGetProperty("port", out var rp) ? rp.GetInt32() : 0;
                 var routerPid = rr.TryGetProperty("pid", out var pid) ? pid.GetInt32() : 0;
 
-                result.Add(new ProfileRow(name, generation, version, commit, backendPort, routerPort, routerPid, updated, projectDir));
+                result.Add(new ProfileRow(name, generation, version, commit, backendPort, routerPort, routerPid,
+                    updated, projectDir, backendConfigSha, routerSourceSha));
             }
             catch
             {
                 // Fail closed: only a canonical state/runtime pair is rendered.
             }
         }
-        return result;
+        foreach (var item in IsolatedProfileInventory.Discover(stateRoot))
+        {
+            if (result.Any(p => string.Equals(p.Name, item.Name, StringComparison.OrdinalIgnoreCase)))
+                continue;
+            result.Add(new ProfileRow(item.Name, 0, "unknown", "", item.Port, 0, 0,
+                null, "", item.ConfigSha256, "", true));
+        }
+        var labels = ReadDisplayNames();
+        return result.OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(p => p with
+            {
+                DisplayName = labels.TryGetValue(p.Name, out var display) ? display : p.Name
+            }).ToList();
     }
 
     private async Task<Control> ProfileCardAsync(ProfileRow p)
@@ -282,37 +361,44 @@ internal sealed class DashboardForm : Form
             Margin = new Padding(0, 0, 0, 12),
             Padding = new Padding(18),
             BackColor = Color.FromArgb(12, 34, 65),
-            Tag = p.Name
+            Tag = p.Name + " " + p.DisplayName
         };
 
         DashboardChrome.RoundCard(card, 16);
-        var online = await IsHealthyAsync(p.RouterPort, p.RouterPid);
+        var verified = await IsVerifiedAsync(p);
         var dot = new Label
         {
-            Text = online ? "● ROUTER RESPONDS / IDENTITY UNVERIFIED" : "● NOT RESPONDING / UNVERIFIED",
-            ForeColor = online ? Color.FromArgb(80, 220, 150) : Color.FromArgb(255, 164, 92),
+            Text = p.IsolatedInstance
+                ? (verified ? "● ISOLATED MCP IDENTITY VERIFIED" : "● ISOLATED MCP UNVERIFIED")
+                : (verified ? "● ROUTER + BACKEND IDENTITY VERIFIED" : "● ROUTER / BACKEND UNVERIFIED"),
+            ForeColor = verified ? Color.FromArgb(80, 220, 150) : Color.FromArgb(255, 164, 92),
             AutoSize = true,
             Font = new Font("Segoe UI Semibold", 9.5f),
             Location = new Point(18, 18)
         };
         var name = new Label
         {
-            Text = p.Name,
-            AutoSize = true,
+            Text = string.IsNullOrWhiteSpace(p.DisplayName) ? p.Name : p.DisplayName,
+            AutoSize = false, AutoEllipsis = true,
+            Size = new Size(Math.Max(570, card.Width - 40), 30),
             Font = new Font("Segoe UI Semibold", 14f),
             ForeColor = Color.White,
             Location = new Point(18, 44)
         };
         var version = new Label
         {
-            Text = $"v{p.Version} • generation {p.Generation} • backend {p.BackendPort} • router {p.RouterPort}",
+            Text = p.IsolatedInstance
+                ? $"Profile ID: {p.Name} • Isolated instance • MCP {p.BackendPort}"
+                : $"Profile ID: {p.Name} • v{p.Version} • generation {p.Generation} • backend {p.BackendPort} • router {p.RouterPort}",
             AutoSize = true,
             ForeColor = Color.FromArgb(190, 207, 229),
             Location = new Point(20, 75)
         };
         var commit = new Label
         {
-            Text = string.IsNullOrWhiteSpace(p.Commit) ? "commit unknown" : $"commit {p.Commit[..Math.Min(12, p.Commit.Length)]}",
+            Text = p.IsolatedInstance
+                ? $"Config SHA-256 {p.BackendConfigSha256[..Math.Min(12, p.BackendConfigSha256.Length)]}"
+                : (string.IsNullOrWhiteSpace(p.Commit) ? "commit unknown" : $"commit {p.Commit[..Math.Min(12, p.Commit.Length)]}"),
             AutoSize = true,
             ForeColor = Color.FromArgb(139, 166, 200),
             Location = new Point(20, 99)
@@ -324,15 +410,48 @@ internal sealed class DashboardForm : Form
         return card;
     }
 
-    private async Task<bool> IsHealthyAsync(int routerPort, int pid)
+    private async Task<bool> IsVerifiedAsync(ProfileRow profile)
     {
-        if (routerPort <= 0 || pid <= 0) return false;
+        // A healthy response on a reused local port is not proof of this profile's identity.
+        if (profile.IsolatedInstance)
+        {
+            if (profile.BackendPort is < 1024 or > 65535 ||
+                profile.BackendConfigSha256.Length != 64) return false;
+            try
+            {
+                using var response = await http.GetAsync(
+                    $"http://127.0.0.1:{profile.BackendPort}/health");
+                if (!response.IsSuccessStatusCode ||
+                    response.Content.Headers.ContentLength is > 16384) return false;
+                var body = await response.Content.ReadAsStringAsync();
+                if (body.Length > 16384) return false;
+                using var doc = JsonDocument.Parse(body);
+                var root = doc.RootElement;
+                return root.TryGetProperty("ok", out var ok) && ok.ValueKind == JsonValueKind.True &&
+                    root.TryGetProperty("configSha256", out var sha) &&
+                    sha.ValueKind == JsonValueKind.String &&
+                    string.Equals(sha.GetString(), profile.BackendConfigSha256, StringComparison.Ordinal) &&
+                    root.TryGetProperty("instance", out var inst) &&
+                    inst.ValueKind == JsonValueKind.Object &&
+                    inst.TryGetProperty("profile", out var name) && name.ValueKind == JsonValueKind.String &&
+                    string.Equals(name.GetString(), profile.Name, StringComparison.Ordinal) &&
+                    inst.TryGetProperty("isolated", out var isolated) &&
+                    isolated.ValueKind == JsonValueKind.True;
+            }
+            catch { return false; }
+        }
+        if (!ProfileHealthEvidence.Plausible(profile)) return false;
         try
         {
-            using var process = Process.GetProcessById(pid);
+            using var process = Process.GetProcessById(profile.RouterPid);
             if (process.HasExited) return false;
-            using var response = await http.GetAsync($"http://127.0.0.1:{routerPort}/health");
-            return response.IsSuccessStatusCode;
+            using var router = await http.GetAsync($"http://127.0.0.1:{profile.RouterPort}/router/status");
+            if (!router.IsSuccessStatusCode) return false;
+            using var backend = await http.GetAsync($"http://127.0.0.1:{profile.BackendPort}/health");
+            if (!backend.IsSuccessStatusCode) return false;
+            var routeJson = await router.Content.ReadAsStringAsync();
+            var backendJson = await backend.Content.ReadAsStringAsync();
+            return ProfileHealthEvidence.Matches(profile, routeJson, backendJson);
         }
         catch { return false; }
     }
@@ -407,7 +526,9 @@ internal sealed class DashboardForm : Form
     private void CopyDiagnostics()
     {
         var lines = LoadProfiles().Select(p =>
-            $"{p.Name}: v{p.Version}, generation={p.Generation}, backend={p.BackendPort}, router={p.RouterPort}, commit={p.Commit}");
+            p.IsolatedInstance
+                ? $"{p.Name}: isolated, mcp={p.BackendPort}, configSha256={p.BackendConfigSha256}"
+                : $"{p.Name}: v{p.Version}, generation={p.Generation}, backend={p.BackendPort}, router={p.RouterPort}, commit={p.Commit}");
         Clipboard.SetText(string.Join(Environment.NewLine, lines));
         MessageBox.Show(this, "Profile diagnostics copied to clipboard.", "Remote Commander",
             MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -423,9 +544,15 @@ internal sealed class DashboardForm : Form
 internal static class Program
 {
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
         ApplicationConfiguration.Initialize();
+        if (args.Length == 1 && args[0] == "--notion-connect")
+        {
+            using var wizard = new NotionSetupForm();
+            Application.Run(wizard);
+            return;
+        }
         Application.Run(new DashboardForm());
     }
 }

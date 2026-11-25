@@ -6,6 +6,7 @@ import os from 'node:os';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { requireNonElevatedLegacyHttp } from './fixtures/legacy-http-token-admission.mjs';
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function freePort() {
@@ -27,7 +28,7 @@ async function rawPost(port, id, name, args) {
   return { response, text, body: JSON.parse(text), elapsedMs: Date.now() - started };
 }
 
-test('HTTP retry hardening rejects long sync work before effect and bounds oversized responses', async () => {
+test('HTTP retry hardening rejects long sync work before effect and bounds oversized responses', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rc-retry-http-'));
   const serverRoot = path.join(root, 'server');
   const dataRoot = path.join(root, 'data');
@@ -46,6 +47,7 @@ test('HTTP retry hardening rejects long sync work before effect and bounds overs
     await fs.writeFile(largeSafe, 'x'.repeat(5 * 1024 * 1024));
     await fs.writeFile(largeOversize, 'x'.repeat(9 * 1024 * 1024));
     const config = {
+      capabilityProfile: { tier: 'STANDARD' },
       host: '127.0.0.1', port, allowedRoots: [canonicalDataRoot], allowedPrograms: ['node'],
       maxReadBytes: 16 * 1024 * 1024, maxWriteBytes: 1024 * 1024, maxCommandMs: 300000,
       auditLog: 'var/audit.jsonl', asyncOperations: { enabled: true, backgroundFirst: true },
@@ -63,6 +65,10 @@ test('HTTP retry hardening rejects long sync work before effect and bounds overs
       await wait(25);
     }
     assert.equal(healthy, true, `retry fixture server did not become healthy within 30000ms; stderr=${stderr}`);
+    if(!(await requireNonElevatedLegacyHttp(t,port))){
+      await assert.rejects(fs.stat(effect),{code:'ENOENT'});
+      return;
+    }
 
     const direct = await rawPost(port, 1, 'run_project_command', { program: 'node', args: [fixture], cwd: canonicalDataRoot, timeoutMs: 15001 });
     assert.equal(direct.response.status, 200);

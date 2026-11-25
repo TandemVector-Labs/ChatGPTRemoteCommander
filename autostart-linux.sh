@@ -85,8 +85,19 @@ start_mcp() {
 }
 
 profile_matches() {
-  local file="$1"
-  grep -q 'http://127\.0\.0\.1:47831/mcp' "$file"
+  local file="$1" profile rule
+  local -a private_targets=()
+  grep -q 'http://127\.0\.0\.1:47831/mcp' "$file" && return 0
+  profile="${file##*/}"
+  profile="${profile%.yaml}"
+  [[ "$profile" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
+  IFS=',' read -r -a private_targets <<< "${REMOTE_COMMANDER_TUNNEL_PRIVATE_TARGETS:-}"
+  for rule in "${private_targets[@]}"; do
+    [[ "$rule" =~ ^([A-Za-z0-9][A-Za-z0-9._-]*):([0-9]{4,5})$ ]] || continue
+    [[ "${BASH_REMATCH[1]}" == "$profile" ]] || continue
+    grep -Fq "http://127.0.0.1:${BASH_REMATCH[2]}/mcp" "$file" && return 0
+  done
+  return 1
 }
 
 profile_health_port() {
@@ -107,8 +118,34 @@ network_route_present() {
   ip route show default 2>/dev/null | grep -q .
 }
 
+
+# Restart churn control for an ALREADY RUNNING, ready Tunnel whose Control Plane
+# poll is stale. Broken/missing Tunnel children remain immediately restartable.
+# Persistent, profile-scoped epochs survive supervisor restarts but never share
+# Tunnel credentials, process identities or per-account routing.
+stale_restart_budget() {
+  local profile="$1" mode="${2:-restart}" interval="${REMOTE_COMMANDER_TUNNEL_STALE_RESTART_MIN_INTERVAL:-900}"
+  local marker tmp last="" now
+  [[ "$mode" == restart || "$mode" == preserved ]] || return 1
+  [[ "$interval" =~ ^[1-9][0-9]{1,4}$ ]] || interval=900
+  marker="$VAR_DIR/tunnel-stale-${mode}-$(safe_profile "$profile").epoch"
+  now="$(date +%s)"
+  [[ "$now" =~ ^[0-9]{10,12}$ ]] || return 1
+  if [[ -f "$marker" ]]; then
+    last="$(cat "$marker" 2>/dev/null || true)"
+    if [[ "$last" =~ ^[0-9]{10,12}$ ]] && (( now >= last && now - last < interval )); then
+      return 1
+    fi
+  fi
+  tmp="$(mktemp "$VAR_DIR/.tunnel-stale-epoch.XXXXXXXX")" || return 1
+  if ! printf '%s\n' "$now" > "$tmp"; then rm -f -- "$tmp"; return 1; fi
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -fT -- "$tmp" "$marker" || { rm -f -- "$tmp"; return 1; }
+  return 0
+}
+
 control_plane_fresh() {
-  local port="$1" limit="${REMOTE_COMMANDER_TUNNEL_STALE_SECONDS:-90}" metrics last started now base
+  local port="$1" limit="${2:-${REMOTE_COMMANDER_TUNNEL_STALE_SECONDS:-90}}" metrics last started now base
   [[ "$limit" =~ ^[1-9][0-9]{1,3}$ ]] || limit=90
   metrics="$(curl -fsS --max-time 2 "http://127.0.0.1:$port/metrics" 2>/dev/null || true)"
   [[ -n "$metrics" ]] || return 0
@@ -119,6 +156,47 @@ control_plane_fresh() {
   awk -v v="$base" 'BEGIN{exit !((v+0)>0)}' || base="$started"
   [[ -n "$base" ]] || return 0
   awk -v n="$now" -v b="$base" -v l="$limit" 'BEGIN{age=n-b; exit !((age>=0)&&(age<=l))}'
+}
+
+# A peer is trusted only with a RECENT actual successful Control Plane poll.
+# Missing metrics, readyz or mere process-start timestamps must not permit a kill.
+control_plane_recent_success() {
+  local port="$1" limit="${2:-120}" metrics last now
+  [[ "$port" =~ ^[0-9]{4,5}$ ]] || return 1
+  [[ "$limit" =~ ^[1-9][0-9]{1,3}$ ]] || return 1
+  metrics="$(curl -fsS --max-time 2 "http://127.0.0.1:$port/metrics" 2>/dev/null)" || return 1
+  [[ -n "$metrics" ]] || return 1
+  last="$(printf '%s\n' "$metrics" | awk '/^commands_poll_last_successful_timestamp_seconds([{ ]|$)/{print $NF;exit}')"
+  now="$(date +%s)"
+  awk -v v="$last" -v n="$now" -v l="$limit" 'BEGIN {
+    numeric=(v ~ /^[0-9]+([.][0-9]+)?([eE][+-]?[0-9]+)?$/);
+    age=n-(v+0);
+    exit !(numeric && (v+0)>0 && age>=0 && age<=l)
+  }'
+}
+
+# Only an isolated, prolonged stall can justify recycling a live Tunnel.
+# If the shared LTE/VPN uplink is degraded, all local profiles lose polls
+# together; a default route and a local /readyz response do NOT prove WAN health.
+# Require TWO independent local peer profiles with recent successful control-plane
+# polls before considering one profile stuck; no owner identity is shared.
+fresh_owner_peer_tunnels() {
+  local profile="$1" current_port="$2" file peer port count=0
+  [[ -d "$PROFILE_DIR" ]] || return 1
+  for file in "$PROFILE_DIR"/*.yaml; do
+    [[ -f "$file" && ! -L "$file" ]] || continue
+    peer="${file##*/}"
+    peer="${peer%.yaml}"
+    [[ "$peer" != "$profile" ]] || continue
+    profile_matches "$file" || continue
+    port="$(profile_health_port "$file" 2>/dev/null || true)"
+    [[ "$port" =~ ^[0-9]{4,5}$ && "$port" != "$current_port" ]] || continue
+    tunnel_ready "$port" || continue
+    control_plane_recent_success "$port" || continue
+    count=$((count+1))
+    ((count >= 2)) && return 0
+  done
+  return 1
 }
 
 cred_path() {
@@ -173,7 +251,7 @@ launch_tunnel_with_exe() {
   status_file="$VAR_DIR/tunnel-$(safe_profile "$profile").log.rotation.json"
   runner="$ROOT/tools/tunnel-log-runner.mjs"
   [[ -f "$runner" ]] || { log "TUNNEL_LOG_RUNNER_MISSING profile=$profile"; return 1; }
-  env -u OPENAI_API_KEY CONTROL_PLANE_API_KEY="$(cat "$cred")"     nohup node "$runner"       --log-file "$log_file"       --status-file "$status_file"       --max-bytes 8388608       --max-files 3       -- "$exe" run --profile "$profile" --profile-dir "$PROFILE_DIR" --log.file stdout >/dev/null 2>&1 &
+  env -u OPENAI_API_KEY CONTROL_PLANE_API_KEY="$(cat "$cred")"     nohup node "$runner"       --log-file "$log_file"       --status-file "$status_file"       --max-bytes 8388608       --max-files 3       -- "$exe" run --profile "$profile" --profile-dir "$PROFILE_DIR" --log.file stdout --log.level warn >/dev/null 2>&1 &
   STARTED_TUNNEL_PID=$!
   log "TUNNEL_STARTED profile=$profile pid=$STARTED_TUNNEL_PID exe=$exe logRotation=8MiB/3"
 }
@@ -190,7 +268,7 @@ wait_tunnel_ready() {
 
 start_tunnel() {
   local profile="$1" cred="$2" profile_file="$3"
-  local desired health reject_file previous="" pid exe fallback external=0
+  local desired health reject_file previous="" pid exe fallback external=0 stale_owned=0
   [[ -f "$cred" ]] || { log "CREDENTIAL_MISSING profile=$profile"; return 0; }
   health="$(profile_health_port "$profile_file" 2>/dev/null || true)"
   [[ -n "$health" ]] || { log "TUNNEL_HEALTH_PORT_MISSING profile=$profile"; return 1; }
@@ -206,20 +284,37 @@ start_tunnel() {
     fi
     [[ "$exe" == "$desired" ]] || [[ -n "$previous" ]] || previous="$exe"
     if [[ "$exe" == "$desired" ]] && tunnel_ready "$health"; then
-      if control_plane_fresh "$health"; then
-        rm -f "$reject_file"
+      # A 30s long-poll, WAN backoff and VPN churn make a 90s age
+      # inadequate evidence for an irreversible process replacement.
+      if control_plane_fresh "$health" "${REMOTE_COMMANDER_TUNNEL_ISOLATED_STALE_SECONDS:-180}"; then
+        # Preserve rejected candidate quarantine while fallback is healthy.
         return 0
       fi
       if ! network_route_present; then
         return 0
       fi
-      log "TUNNEL_CONTROL_PLANE_STALE profile=$profile port=$health exe=$desired"
+      stale_owned=1
     fi
   done < <(profile_tunnel_rows "$profile")
 
   if (( external > 0 )); then
     log "TUNNEL_EXTERNAL_PROFILE_CONFLICT profile=$profile count=$external"
     return 1
+  fi
+
+  # Do NOT kill all owner-private tunnels because their shared LTE link is
+  # stale. The tunnel client retries failed long-polls with backoff internally.
+  # Recycle only a single isolated >180s stall while two independent peers are
+  # actively polling the control plane. Dead/missing children remain recoverable.
+  if (( stale_owned > 0 )); then
+    if ! fresh_owner_peer_tunnels "$profile" "$health"; then
+      if stale_restart_budget "$profile" preserved; then
+        log "TUNNEL_SHARED_CONTROL_PLANE_STALE_PRESERVED profile=$profile port=$health"
+      fi
+      return 0
+    fi
+    stale_restart_budget "$profile" || return 0
+    log "TUNNEL_ISOLATED_CONTROL_PLANE_STALE_RECYCLE profile=$profile port=$health exe=$desired"
   fi
 
   stop_owned_profile_tunnels "$profile"
@@ -230,7 +325,7 @@ start_tunnel() {
 
   STARTED_TUNNEL_PID=""
   if launch_tunnel_with_exe "$profile" "$cred" "$desired" && wait_tunnel_ready "$health" "$STARTED_TUNNEL_PID"; then
-    rm -f "$reject_file"
+    # Keep rejected candidate quarantined after fallback succeeds.
     log "TUNNEL_READY profile=$profile pid=$STARTED_TUNNEL_PID port=$health exe=$desired"
     return 0
   fi

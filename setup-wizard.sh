@@ -7,9 +7,17 @@ SKIP_PREREQS=0
 SKIP_INSTALL=0
 SKIP_CONNECT=0
 SKIP_PLUGIN=0
+PRODUCT_ALL=0
+PRODUCT_LIST=0
+PRODUCT_PLAN_ONLY=0
+PRODUCT_REQUESTS=()
+PRODUCT_SELECTION_EXPLICIT=0
+BROWSER_SELECTED=0
+BROWSER_EXPLICIT_ALL=0
 TUNNEL_ID=""
 APP_ID=""
 PROFILE="chatgpt-remote-commander"
+DISPLAY_NAME=""
 DEVICE_NAME="${HOSTNAME:-$(hostname 2>/dev/null || echo device)}"
 PLUGIN_OUTPUT=""
 
@@ -22,22 +30,149 @@ while [[ $# -gt 0 ]]; do
     --skip-install) SKIP_INSTALL=1; shift ;;
     --skip-connect) SKIP_CONNECT=1; shift ;;
     --skip-plugin) SKIP_PLUGIN=1; shift ;;
+    --all) PRODUCT_ALL=1; BROWSER_EXPLICIT_ALL=1; PRODUCT_SELECTION_EXPLICIT=1; shift ;;
+    --product) [[ $# -ge 2 ]] || { echo '--product requires an id' >&2; exit 2; }; PRODUCT_REQUESTS+=("$2"); PRODUCT_SELECTION_EXPLICIT=1; shift 2 ;;
+    --list-products) PRODUCT_LIST=1; shift ;;
+    --plan-only) PRODUCT_PLAN_ONLY=1; shift ;;
     --tunnel-id) TUNNEL_ID="$2"; shift 2 ;;
     --app-id) APP_ID="$2"; shift 2 ;;
     --profile) PROFILE="$2"; shift 2 ;;
+    --display-name) DISPLAY_NAME="$2"; shift 2 ;;
     --device-name) DEVICE_NAME="$2"; shift 2 ;;
     --plugin-output-directory) PLUGIN_OUTPUT="$2"; shift 2 ;;
     -h|--help)
       cat <<'EOF'
 Usage: setup-wizard.sh [--standard-mode|--power-mode] [--gui-control]
+  [--list-products] [--all | --product ID...] [--plan-only]
   [--skip-prerequisites] [--skip-install] [--skip-connect] [--skip-plugin]
-  [--tunnel-id ID] [--app-id ID] [--profile NAME] [--device-name NAME]
+  [--tunnel-id ID] [--app-id ID] [--profile NAME] [--display-name LABEL] [--device-name NAME]
   [--plugin-output-directory DIR]
 EOF
       exit 0 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+# Product selection runs before any installer, network access or state mutation.
+# This table must match installer/products.json; unavailable components always fail closed.
+list_products(){
+  cat <<'PRODUCTS'
+core              available          Remote Commander Core (required)
+control-center    unavailable        Native GTK Control Center is a read-only preview; no qualified installer
+browser           conditional        Browser v0.8.1 (online 367 MB, Linux x86_64 X11 and sudo required)
+work-plugin       pending-activation ChatGPT Work Plugin setup; needs App ID after enrollment
+companion         unavailable        Private experimental companions are not public installer products
+PRODUCTS
+}
+if [[ "$PRODUCT_LIST" -eq 1 ]]; then
+  list_products
+  exit 0
+fi
+if [[ "$PRODUCT_ALL" -eq 1 && "${#PRODUCT_REQUESTS[@]}" -gt 0 ]]; then
+  echo '--all conflicts with --product' >&2; exit 2
+fi
+if [[ "$PRODUCT_SELECTION_EXPLICIT" -eq 0 && ( -n "${DISPLAY:-}" || -n "${WAYLAND_DISPLAY:-}" ) ]] && command -v zenity >/dev/null 2>&1; then
+  # Core is mandatory. Browser requires opt-in and a verified, sudo-configured X11 runtime.
+  # GUI cancel must fail closed before any installer/prerequisite or credential action.
+  if gui_choice="$(zenity --list --checklist \
+      --title='Remote Commander — Select products' \
+      --text='Remote Commander Core is required. Choose optional setup steps (not a promise of ChatGPT App activation).' \
+      --column='Include' --column='Product' --column='Details' \
+      TRUE 'work-plugin' 'ChatGPT Work Plugin — activation requires registered App ID' \
+      FALSE 'browser' 'Browser v0.8.1 — 367 MB online, X11, sudo sandbox' \
+      --separator='|' --width=690 --height=270)"; then
+    # Zenity returns a delimited string. Accept exact choices only.
+    case "$gui_choice" in
+      '') PRODUCT_REQUESTS=(core) ;;
+      'work-plugin') PRODUCT_REQUESTS=(core work-plugin) ;;
+      'browser') PRODUCT_REQUESTS=(core browser) ;;
+      'work-plugin|browser'|'browser|work-plugin') PRODUCT_REQUESTS=(core work-plugin browser) ;;
+      *) echo 'INVALID_GUI_PRODUCT_SELECTION' >&2; exit 2 ;;
+    esac
+  else
+    echo 'GUI_PRODUCT_SELECTION_CANCELLED' >&2
+    exit 2
+  fi
+elif [[ "$PRODUCT_SELECTION_EXPLICIT" -eq 0 && -t 0 ]]; then
+  echo 'Select products available in the Linux public installer:'
+  echo '  1) Core only'
+  echo '  2) Core + ChatGPT Work Plugin setup (activation requires App ID)'
+  echo '  3) List all products and availability'
+  read -r -p 'Selection [2]: ' product_choice
+  case "${product_choice:-2}" in
+    1) PRODUCT_REQUESTS=(core) ;;
+    2) PRODUCT_ALL=1 ;;
+    3) list_products; exit 0 ;;
+    *) echo 'INVALID_PRODUCT_SELECTION' >&2; exit 2 ;;
+  esac
+elif [[ "$PRODUCT_SELECTION_EXPLICIT" -eq 0 ]]; then
+  # A desktop launch without any selectable UI must not silently install software.
+  if [[ -n "${DISPLAY:-}" || -n "${WAYLAND_DISPLAY:-}" ]]; then
+    echo 'GUI_PRODUCT_CHOOSER_UNAVAILABLE: install zenity or run with --all / --product core' >&2
+    exit 2
+  fi
+  # Preserve existing headless / automation onboarding defaults and --skip-plugin.
+  if [[ "$SKIP_PLUGIN" -eq 1 ]]; then PRODUCT_REQUESTS=(core)
+  else PRODUCT_ALL=1
+  fi
+fi
+if [[ "$PRODUCT_ALL" -eq 1 ]]; then
+  PRODUCT_REQUESTS=(core work-plugin)
+  # Only an explicit --all on an X11 desktop adds the separately hosted Browser.
+  # Legacy headless automation must never trigger a 367 MB download and sudo.
+  if [[ "$BROWSER_EXPLICIT_ALL" -eq 1 && -n "${DISPLAY:-}" ]]; then
+    PRODUCT_REQUESTS+=(browser)
+  fi
+fi
+WIZARD_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+SELECTED_PLUGIN=0
+SEEN_CORE=0
+for product in "${PRODUCT_REQUESTS[@]}"; do
+  case "$product" in
+    core) [[ "$SEEN_CORE" -eq 0 ]] || { echo 'DUPLICATE_PRODUCT_SELECTION core' >&2; exit 2; }; SEEN_CORE=1 ;;
+    work-plugin) [[ "$SELECTED_PLUGIN" -eq 0 ]] || { echo 'DUPLICATE_PRODUCT_SELECTION work-plugin' >&2; exit 2; }; SELECTED_PLUGIN=1 ;;
+    browser)
+      [[ "$BROWSER_SELECTED" -eq 0 ]] || { echo 'DUPLICATE_PRODUCT_SELECTION browser' >&2; exit 2; }
+      [[ -f "$WIZARD_SCRIPT_DIR/tools/install-browser-linux.sh" ]] ||
+        { echo 'PRODUCT_NOT_BUNDLED browser installer component missing' >&2; exit 2; }
+      BROWSER_SELECTED=1 ;;
+    control-center|companion)
+      echo "PRODUCT_UNAVAILABLE $product: not a qualified standalone Linux installer artifact" >&2; exit 2 ;;
+    *) echo "UNKNOWN_PRODUCT $product" >&2; exit 2 ;;
+  esac
+done
+if [[ "$SELECTED_PLUGIN" -eq 1 && "$SKIP_PLUGIN" -eq 1 ]]; then
+  echo 'PRODUCT_SELECTION_CONFLICT work-plugin and --skip-plugin' >&2; exit 2
+fi
+if [[ "$SELECTED_PLUGIN" -eq 0 ]]; then SKIP_PLUGIN=1; fi
+SELECTED_PRODUCTS='core'
+if [[ "$SELECTED_PLUGIN" -eq 1 ]]; then SELECTED_PRODUCTS='core,work-plugin'; fi
+if [[ "$BROWSER_SELECTED" -eq 1 ]]; then SELECTED_PRODUCTS="$SELECTED_PRODUCTS,browser"; fi
+if [[ "$PRODUCT_PLAN_ONLY" -eq 1 ]]; then
+  echo "INSTALL_PLAN platform=linux selected=$SELECTED_PRODUCTS changesApplied=false"
+  if [[ "$SELECTED_PLUGIN" -eq 1 ]]; then echo 'WORK_PLUGIN_PENDING_APP_ID'; fi
+  if [[ "$BROWSER_SELECTED" -eq 1 ]]; then
+    echo 'BROWSER_REQUIRES_LINUX_X86_64_X11_INTERACTIVE_SUDO_ONLINE_367MB'
+  fi
+  exit 0
+fi
+# Selected Browser runtime requires a supported local X11 host. Check before
+# Core prerequisites, any downloads, state writes or credential enrollment.
+if [[ "$BROWSER_SELECTED" -eq 1 ]]; then
+  [[ "$(uname -m)" == x86_64 ]] ||
+    { echo 'BROWSER_LINUX_UNSUPPORTED_ARCH' >&2; exit 2; }
+  [[ -n "${DISPLAY:-}" ]] ||
+    { echo 'BROWSER_LINUX_X11_REQUIRED' >&2; exit 2; }
+  for tool in curl tar sha256sum sudo stat; do
+    command -v "$tool" >/dev/null 2>&1 ||
+      { echo "BROWSER_MISSING_PREREQUISITE $tool" >&2; exit 2; }
+  done
+  [[ ! -e "$HOME/.local/share/chatgpt-cef-v2/runtime-v0.8.1" &&
+     ! -L "$HOME/.local/share/chatgpt-cef-v2/runtime-v0.8.1" &&
+     ! -e "$HOME/.local/bin/chatgpt-cef-v2" &&
+     ! -L "$HOME/.local/bin/chatgpt-cef-v2" ]] ||
+    { echo 'BROWSER_EXISTING_RUNTIME_PRESERVED: separately verify repair' >&2; exit 2; }
+fi
+
 if [[ "$MODE_SET" -eq 0 && -t 0 ]]; then
   echo 'Choose installation mode:'
   echo '  1) Standard — restricted project/file access'
@@ -78,6 +213,9 @@ resolve_installer(){
   printf '%s\n' "$TMP/install.sh"
 }
 
+if [[ -z "$DISPLAY_NAME" && -t 0 ]]; then
+  read -r -p "Display name for profile $PROFILE (Enter to keep technical name): " DISPLAY_NAME
+fi
 echo "Remote Commander setup wizard — device=$DEVICE_NAME profile=$PROFILE mode=$MODE"
 if [[ "$SKIP_INSTALL" -eq 0 ]]; then
   INSTALLER="$(resolve_installer)"
@@ -92,6 +230,11 @@ HEALTH="$(curl -fsS --max-time 4 http://127.0.0.1:47831/health)"
 HEALTH="$HEALTH" node --input-type=module <<'NODE'
 const j=JSON.parse(process.env.HEALTH); if(!j.ok) process.exit(2);
 NODE
+
+if [[ "$BROWSER_SELECTED" -eq 1 ]]; then
+  echo 'Installing selected checksum-pinned Browser separately (interactive sudo, X11 required)...'
+  bash "$WIZARD_SCRIPT_DIR/tools/install-browser-linux.sh" --install
+fi
 
 if [[ "$SKIP_CONNECT" -eq 0 ]]; then
   connect="$INSTALL_ROOT/enable-autostart-linux.sh"
@@ -112,6 +255,72 @@ fi
 TUNNEL_READY=false
 if [[ "$HEALTH_PORT" -gt 0 ]] && [[ "$(curl -fsS --max-time 3 "http://127.0.0.1:$HEALTH_PORT/readyz" 2>/dev/null || true)" == "ready" ]]; then
   TUNNEL_READY=true
+fi
+
+# Presentation metadata is optional and saved only for a verified, ready
+# enrolled profile. It never replaces the technical profile name or credentials.
+if [[ -n "$DISPLAY_NAME" ]]; then
+  [[ "$TUNNEL_READY" == true ]] || {
+    echo 'Display name not saved: enrolled Tunnel is not ready.' >&2; exit 2;
+  }
+  PROFILE_FOR_LABEL="$PROFILE" DISPLAY_NAME_FOR_LABEL="$DISPLAY_NAME" python3 - <<'LABEL_PY'
+import fcntl, json, os, pathlib, re, stat, tempfile, unicodedata
+name=os.environ["PROFILE_FOR_LABEL"]
+label=os.environ["DISPLAY_NAME_FOR_LABEL"]
+if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}",name) or ".." in name:
+    raise SystemExit("PROFILE_DISPLAY_TECHNICAL_NAME_INVALID")
+if (not label or len(label)>80 or label!=label.strip()
+        or any(unicodedata.category(c) in ("Cc","Cf") for c in label)):
+    raise SystemExit("PROFILE_DISPLAY_LABEL_INVALID")
+root=pathlib.Path(os.environ.get("XDG_STATE_HOME") or pathlib.Path.home()/".local/state")/"chatgpt-remote-commander"
+root.mkdir(mode=0o700,parents=True,exist_ok=True)
+info=root.lstat()
+if (not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid() or info.st_mode & 0o022):
+    raise SystemExit("PROFILE_DISPLAY_ROOT_UNTRUSTED")
+store=root/"profile-display-names.json"
+lock=os.open(str(store)+".lock",os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
+try:
+    fcntl.flock(lock,fcntl.LOCK_EX)
+    labels={}
+    if store.exists() or store.is_symlink():
+        meta=store.lstat()
+        if (not stat.S_ISREG(meta.st_mode) or meta.st_uid!=os.getuid()
+                or meta.st_mode & 0o022 or meta.st_size>32768):
+            raise SystemExit("PROFILE_DISPLAY_STORE_UNTRUSTED")
+        doc=json.loads(store.read_text(encoding="utf-8"))
+        if (not isinstance(doc,dict) or set(doc)!={"schema","profiles"}
+                or type(doc["schema"]) is not int or doc["schema"]!=1
+                or not isinstance(doc["profiles"],dict) or len(doc["profiles"])>128):
+            raise SystemExit("PROFILE_DISPLAY_STORE_INVALID")
+        labels=doc["profiles"]
+        profile_names=set()
+        distinct_labels=set()
+        for k,v in labels.items():
+            if (not isinstance(k,str) or
+                not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}",k) or ".." in k or
+                not isinstance(v,str) or not v or v!=v.strip() or len(v)>80 or
+                any(unicodedata.category(c) in ("Cc","Cf") for c in v) or
+                k.casefold() in profile_names or v.casefold() in distinct_labels):
+                raise SystemExit("PROFILE_DISPLAY_STORE_INVALID")
+            profile_names.add(k.casefold())
+            distinct_labels.add(v.casefold())
+    if any(k.casefold()!=name.casefold() and v.casefold()==label.casefold()
+           for k,v in labels.items()):
+        raise SystemExit("PROFILE_DISPLAY_LABEL_COLLISION")
+    labels[name.casefold()]=label
+    fd,tmp=tempfile.mkstemp(prefix=".profile-display-",suffix=".tmp",dir=root)
+    try:
+        with os.fdopen(fd,"w",encoding="utf-8") as f:
+            json.dump({"schema":1,"profiles":labels},f,ensure_ascii=False,sort_keys=True,separators=(",",":"))
+            f.write(chr(10));f.flush();os.fsync(f.fileno())
+        os.chmod(tmp,0o600)
+        os.replace(tmp,store)
+    finally:
+        if os.path.exists(tmp):os.unlink(tmp)
+    print("PROFILE_DISPLAY_NAME_SAVED")
+finally:
+    os.close(lock)
+LABEL_PY
 fi
 
 PLUGIN_STATUS="SKIPPED"
@@ -139,7 +348,7 @@ VERSION="$(HEALTH="$HEALTH" node --input-type=module <<'NODE'
 const j=JSON.parse(process.env.HEALTH); process.stdout.write(String(j.version||''));
 NODE
 )"
-PLUGIN_STATUS="$PLUGIN_STATUS" PLUGIN_JSON="$PLUGIN_JSON" VERSION="$VERSION" DEVICE_NAME="$DEVICE_NAME" PROFILE="$PROFILE" MODE="$MODE" TUNNEL_READY="$TUNNEL_READY" node --input-type=module - "$WIZARD_STATE/latest.json" <<'NODE'
+SELECTED_PRODUCTS="$SELECTED_PRODUCTS" PLUGIN_STATUS="$PLUGIN_STATUS" PLUGIN_JSON="$PLUGIN_JSON" VERSION="$VERSION" DEVICE_NAME="$DEVICE_NAME" PROFILE="$PROFILE" MODE="$MODE" TUNNEL_READY="$TUNNEL_READY" node --input-type=module - "$WIZARD_STATE/latest.json" <<'NODE'
 import fs from 'node:fs';
 const plugin=process.env.PLUGIN_JSON ? JSON.parse(process.env.PLUGIN_JSON) : null;
 const state={
@@ -153,6 +362,8 @@ const state={
   mcpHealthy:true,
   tunnelReady:process.env.TUNNEL_READY==='true',
   pluginStatus:process.env.PLUGIN_STATUS,
+  selectedProducts:process.env.SELECTED_PRODUCTS.split(','),
+  pendingProducts:process.env.PLUGIN_STATUS==='WAITING_APP_ID'?['work-plugin']:[],
   pluginName:plugin?.pluginName??null,
   pluginZip:plugin?.zip??null,
   pluginSha256:plugin?.zipSha256??null,

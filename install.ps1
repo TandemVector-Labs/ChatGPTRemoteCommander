@@ -10,8 +10,13 @@ param(
   [switch]$StartServer,
   [switch]$SkipTunnelClient,
   [string]$TunnelClientVersion = '0.0.15',
-  [string]$SourceRef = 'v0.10.23',
-  [string]$ExpectedCommit = ''
+  [string]$SourceRef = 'v0.12.0',
+  [string]$ExpectedCommit = '',
+  [string]$SourceBundle = '',
+  [string]$SourceBundleSha256 = '',
+  [string]$SourceSnapshot = '',
+  [string]$SourceSnapshotSha256 = '',
+  [string]$WindowsJobRunnerPath = ''
 )
 $ErrorActionPreference = 'Stop'
 
@@ -32,7 +37,52 @@ if ($SourceRef -notmatch '^[A-Za-z0-9._/-]{1,128}$') {
 if ($ExpectedCommit -and $ExpectedCommit -notmatch '^[0-9a-fA-F]{40}$') {
   throw 'Invalid -ExpectedCommit SHA.'
 }
-
+# Verify SHA and archive paths before prerequisites; helper owns the detail.
+if($SourceSnapshot){if($SourceBundle){throw 'SHALLOW_SOURCE_AND_BUNDLE_MUTUALLY_EXCLUSIVE'};$sourceHelper=Join-Path $PSScriptRoot 'offline-shallow-source.ps1';if(-not(Test-Path -LiteralPath $sourceHelper -PathType Leaf)){$sourceHelper=Join-Path $PSScriptRoot 'tools\offline-shallow-source.ps1'};& pwsh.exe -NoLogo -NoProfile -NonInteractive -File $sourceHelper -Mode Preflight -SourceRef $SourceRef -ExpectedCommit $ExpectedCommit -Archive $SourceSnapshot -ArchiveSha256 $SourceSnapshotSha256 | Out-Null;if($LASTEXITCODE -ne 0){throw 'SHALLOW_SOURCE_PREFLIGHT_FAILED'}}elseif($SourceSnapshotSha256){throw 'SHALLOW_SOURCE_SHA_WITHOUT_ARCHIVE'}
+# Persist an exact-commit source bundle at one stable per-user path. The installer
+# temp directory is ephemeral; the Git remote must remain usable for later updates.
+if($SourceBundle){
+  if($SourceBundleSha256 -notmatch '^[0-9a-fA-F]{64}$'){throw 'Source bundle SHA-256 is required.'}
+  if(-not $ExpectedCommit -or $ExpectedCommit -notmatch '^[0-9a-fA-F]{40}$'){throw 'Source bundle requires an exact ExpectedCommit.'}
+  if(-not [IO.Path]::IsPathFullyQualified($SourceBundle)){throw 'Source bundle path must be absolute.'}
+  if(-not(Get-Command git.exe -ErrorAction SilentlyContinue)){throw 'GIT_REQUIRED_FOR_SOURCE_BUNDLE'}
+  $file=Get-Item -LiteralPath $SourceBundle -ErrorAction Stop
+  if($file.PSIsContainer -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+      [IO.Path]::GetExtension($file.FullName) -ne '.bundle'){throw 'SOURCE_BUNDLE_PATH_UNTRUSTED'}
+  $digest=(Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+  if($digest -ne $SourceBundleSha256.ToLowerInvariant()){throw 'SOURCE_BUNDLE_SHA256_MISMATCH'}
+  $heads=@(& git.exe bundle list-heads $file.FullName)
+  if($LASTEXITCODE -ne 0 -or -not($heads|Where-Object{$_ -match ('^'+[regex]::Escape($ExpectedCommit.ToLowerInvariant())+'\s+refs/heads/')})){
+    throw 'SOURCE_BUNDLE_EXPECTED_COMMIT_MISSING'
+  }
+  $bundleRoot=Join-Path $env:LOCALAPPDATA 'ChatGPTRemoteCommander\source-bundles'
+  if(-not(Test-Path -LiteralPath $bundleRoot)){New-Item -ItemType Directory -Force -Path $bundleRoot|Out-Null}
+  $bundleRootItem=Get-Item -LiteralPath $bundleRoot -Force
+  if(($bundleRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'SOURCE_BUNDLE_STORE_REPARSE_REJECTED'}
+  $persistentBundle=Join-Path $bundleRoot 'core.bundle'
+  $storedSha=''
+  if(Test-Path -LiteralPath $persistentBundle -PathType Leaf){
+    $stored=Get-Item -LiteralPath $persistentBundle -Force
+    if(($stored.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'SOURCE_BUNDLE_STORE_FILE_REPARSE_REJECTED'}
+    $storedSha=(Get-FileHash -LiteralPath $persistentBundle -Algorithm SHA256).Hash.ToLowerInvariant()
+  }
+  if($storedSha -cne $digest){
+    $bundleTemp=$persistentBundle+'.stage-'+$PID
+    if(Test-Path -LiteralPath $bundleTemp){throw 'SOURCE_BUNDLE_STAGE_COLLISION'}
+    try{
+      Copy-Item -LiteralPath $file.FullName -Destination $bundleTemp
+      $stagedSha=(Get-FileHash -LiteralPath $bundleTemp -Algorithm SHA256).Hash.ToLowerInvariant()
+      if($stagedSha -cne $digest){throw 'SOURCE_BUNDLE_STAGE_SHA_MISMATCH'}
+      Move-Item -LiteralPath $bundleTemp -Destination $persistentBundle -Force
+    }finally{
+      if(Test-Path -LiteralPath $bundleTemp){Remove-Item -LiteralPath $bundleTemp -Force -ErrorAction SilentlyContinue}
+    }
+  }
+  $storedSha=(Get-FileHash -LiteralPath $persistentBundle -Algorithm SHA256).Hash.ToLowerInvariant()
+  if($storedSha -cne $digest){throw 'SOURCE_BUNDLE_PERSISTED_SHA_MISMATCH'}
+  $Repo=$persistentBundle
+  Write-Host ('SOURCE_BUNDLE_PERSISTED path='+$Repo+' sha256='+$digest)
+}elseif($SourceBundleSha256){throw 'SOURCE_BUNDLE_SHA_WITHOUT_FILE'}
 function Refresh-Path {
   $machine = [Environment]::GetEnvironmentVariable('Path','Machine')
   $user = [Environment]::GetEnvironmentVariable('Path','User')
@@ -110,14 +160,25 @@ function Ensure-Command([string]$Name, [string]$WingetId) {
   }
 }
 
+function Test-PatchedNodeVersion([string]$Version) {
+  if ($Version -notmatch '^v(22|24|26)\.[0-9]{1,3}\.[0-9]{1,3}$') { return $false }
+  try { $parsed = [version]::Parse($Version.Substring(1)) } catch { return $false }
+  switch ($parsed.Major) {
+    22 { return ($parsed -ge [version]'22.23.4') }
+    24 { return ($parsed -ge [version]'24.22.1') }
+    26 { return ($parsed -ge [version]'26.12.1') }
+    default { return $false }
+  }
+}
+
 function Ensure-Prerequisites {
   Ensure-Command 'git.exe' 'Git.Git'
   Ensure-Command 'node.exe' 'OpenJS.NodeJS.LTS'
   Ensure-Command 'pwsh.exe' 'Microsoft.PowerShell'
 
-  $nodeMajor = [int]((& node.exe --version).Trim().TrimStart('v').Split('.')[0])
-  if ($nodeMajor -lt 22) {
-    throw "Node.js 22+ is required; found $nodeMajor."
+  $nodeVersion = (& node.exe --version).Trim()
+  if (-not (Test-PatchedNodeVersion $nodeVersion)) {
+    throw "Patched supported Node.js LTS is required (22.23.4+, 24.22.1+, or 26.12.1+); found $nodeVersion."
   }
 }
 
@@ -138,10 +199,22 @@ function Invoke-ExistingSafeUpdate {
     }
     & git.exe -C $temp checkout --detach $commit | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'updater checkout failed' }
+    $candidatePackage=Get-Content -LiteralPath (Join-Path $temp 'package.json') -Raw | ConvertFrom-Json
+    if([string]$candidatePackage.version -like '0.12.*'){
+      Push-Location $temp
+      try{
+        & node.exe '.\tools\verify-v012-publish-readiness.mjs' ([string]$candidatePackage.version) $SourceRef | Out-Null
+        $admissionExit=$LASTEXITCODE
+        if($admissionExit -ne 0){throw 'V012_INSTALL_RELEASE_TRAIN_NOT_APPROVED'}
+      }finally{Pop-Location}
+    }
 
     $updater = Join-Path $temp 'auto-update-windows.ps1'
     if (-not (Test-Path -LiteralPath $updater -PathType Leaf)) { throw 'candidate auto-update-windows.ps1 missing' }
     $args = @('-NoLogo','-NoProfile','-ExecutionPolicy','Bypass','-File',$updater,'-InstallDir',$InstallDir,'-SourceRef',$SourceRef,'-ExpectedCommit',$commit,'-Force')
+    if ($SourceBundle) { $args += @('-SourceBundle',$Repo,'-SourceBundleSha256',$SourceBundleSha256) }
+    if ($SourceSnapshot) { $args += @('-SourceSnapshotRepo',$Repo) }
+    if ($WindowsJobRunnerPath) { $args += @('-WindowsJobRunnerPath',$WindowsJobRunnerPath) }
     if ($PowerMode) { $args += '-PowerMode' }
     if ($StandardMode) { $args += '-StandardMode' }
     if ($GuiControl) { $args += '-GuiControl' }
@@ -151,6 +224,11 @@ function Invoke-ExistingSafeUpdate {
 
     & pwsh.exe @args
     if ($LASTEXITCODE -ne 0) { throw "candidate-first update failed: $LASTEXITCODE" }
+    & git.exe -C $InstallDir remote set-url origin $Repo
+    if ($LASTEXITCODE -ne 0) { throw 'SOURCE_REMOTE_UPDATE_FAILED' }
+    if ($WindowsJobRunnerPath) {
+      Install-WindowsJobRunner -SourcePath $WindowsJobRunnerPath -ManifestRoot $temp
+    }
     Write-Host "SAFE_UPDATE_PASS commit=$commit"
   } finally {
     if (Test-Path -LiteralPath $temp) {
@@ -246,6 +324,13 @@ function Install-Source {
     throw "Installed HEAD $head does not match ExpectedCommit $ExpectedCommit."
   }
   Write-Host "Source commit: $head"
+}
+
+function Install-WindowsJobRunner([string]$SourcePath = '', [string]$ManifestRoot = $InstallDir) {
+  $helper=Join-Path $ManifestRoot 'tools\windows-job-runner\install-windows-job-runner.ps1'
+  if(-not(Test-Path -LiteralPath $helper -PathType Leaf)){throw 'WINDOWS_JOB_RUNNER_INSTALL_HELPER_MISSING'}
+  . $helper
+  Install-CommanderWindowsJobRunner -InstallDir $InstallDir -SourcePath $SourcePath -ManifestRoot $ManifestRoot
 }
 
 function Write-TunnelClientState([string]$ExePath) {
@@ -485,6 +570,7 @@ $InstallDir = Resolve-InstallDir
 $canonicalLiveInstall=[IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'ChatGPTRemoteCommander\app'))
 $isCanonicalLiveInstall=([IO.Path]::GetFullPath($InstallDir).TrimEnd('\') -ieq $canonicalLiveInstall.TrimEnd('\'))
 Ensure-Prerequisites
+if($SourceSnapshot){$store=Join-Path $env:LOCALAPPDATA 'ChatGPTRemoteCommander\source-snapshots';$receipt=@(& pwsh.exe -NoLogo -NoProfile -NonInteractive -File $sourceHelper -Mode Import -SourceRef $SourceRef -ExpectedCommit $ExpectedCommit -Archive $SourceSnapshot -ArchiveSha256 $SourceSnapshotSha256 -StoreRoot $store);if($LASTEXITCODE -ne 0){throw 'SHALLOW_SOURCE_IMPORT_FAILED'};$record=$receipt|Select-Object -Last 1|ConvertFrom-Json;if($record.status -notin @('SHALLOW_SOURCE_IMPORTED','SHALLOW_SOURCE_ALREADY_IMPORTED') -or -not $record.repoRoot){throw 'SHALLOW_SOURCE_IMPORT_RECEIPT_INVALID'};$Repo=[string]$record.repoRoot}
 
 $existingInstall = Test-Path -LiteralPath (Join-Path $InstallDir '.git')
 if ($existingInstall -and $isCanonicalLiveInstall) {
@@ -506,6 +592,18 @@ if ($existingInstall -and $isCanonicalLiveInstall) {
   }
   if ($GuiControl -and -not $PowerMode) { throw '-GuiControl requires -PowerMode for a fresh installation.' }
   Install-Source
+  if($StartServer){
+    $candidatePackage=Get-Content -LiteralPath (Join-Path $InstallDir 'package.json') -Raw | ConvertFrom-Json
+    if([string]$candidatePackage.version -like '0.12.*'){
+      Push-Location $InstallDir
+      try{
+        & node.exe '.\tools\verify-v012-publish-readiness.mjs' ([string]$candidatePackage.version) $SourceRef | Out-Null
+        $admissionExit=$LASTEXITCODE
+        if($admissionExit -ne 0){throw 'V012_INSTALL_RELEASE_TRAIN_NOT_APPROVED'}
+      }finally{Pop-Location}
+    }
+  }
+  Install-WindowsJobRunner -SourcePath $WindowsJobRunnerPath
   Install-TunnelClient
   Ensure-ProjectProvider
   Configure-LocalPolicy
@@ -517,6 +615,8 @@ if ($existingInstall -and $isCanonicalLiveInstall) {
     $head = (& git.exe -C $InstallDir rev-parse HEAD).Trim().ToLowerInvariant()
     $updater = Join-Path $InstallDir 'auto-update-windows.ps1'
     $args = @('-NoLogo','-NoProfile','-ExecutionPolicy','Bypass','-File',$updater,'-InstallDir',$InstallDir,'-SourceRef',$SourceRef,'-ExpectedCommit',$head,'-Force')
+    if ($SourceBundle) { $args += @('-SourceBundle',$Repo,'-SourceBundleSha256',$SourceBundleSha256) }
+    if ($SourceSnapshot) { $args += @('-SourceSnapshotRepo',$Repo) }
     if ($PowerMode) { $args += '-PowerMode' }
     if ($StandardMode) { $args += '-StandardMode' }
     if ($GuiControl) { $args += '-GuiControl' }

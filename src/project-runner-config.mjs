@@ -1,21 +1,17 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { codexLaunchAuthorized, isCodexExecutable } from './no-codex-policy.mjs';
 
 const RUNNER_ALLOWED_TOOLS = Object.freeze([
   'list_directory','read_text','file_info','write_text','create_directory'
 ]);
-const RUNNER_TEAM = Object.freeze({
-  workers: [
-    { id: 'builder', role: 'Propose the safest bounded next step using current evidence.' },
-    { id: 'reviewer', role: 'Check missing prerequisites, evidence and failure risks before the coordinator acts.' }
-  ],
-  maxParallel: 2
-});
 
 function clone(value) { return JSON.parse(JSON.stringify(value ?? {})); }
 
 function executableFile(file, platform = process.platform) {
-  if (typeof file !== 'string' || !file || file.includes('\0')) return false;
+  // Config-time fail-closed guard: a relative file resolves through ambient cwd.
+  // A privileged owner provider must use an exact absolute executable path.
+  if (typeof file !== 'string' || !path.isAbsolute(file) || file.includes('\0')) return false;
   try {
     const stat = fs.statSync(file);
     if (!stat.isFile()) return false;
@@ -77,11 +73,17 @@ function normalizedExplicitRunner(existing) {
       maxExtensions: Number.isSafeInteger(Number(current.adaptive?.maxExtensions))
         ? Number(current.adaptive.maxExtensions) : 4
     },
-    team: current.team ?? clone(RUNNER_TEAM),
+    // Absence of team means single-planner mode. Never silently add workers
+    // during configuration migration, update, or normalization.
+    ...(current.team == null ? {} : { team: current.team }),
     worker: {
       enabled: current.worker?.enabled !== false,
-      maxArtifactBytes: Number.isSafeInteger(Number(current.worker?.maxArtifactBytes))
-        ? Number(current.worker.maxArtifactBytes) : 65_536
+      // Preserve an omitted optional limit exactly. Adding a new default here
+      // changes an authorized running policy and blocks candidate continuity.
+      ...(Object.hasOwn(current.worker ?? {}, 'maxArtifactBytes')
+        ? {maxArtifactBytes:Number.isSafeInteger(current.worker.maxArtifactBytes)
+          ? current.worker.maxArtifactBytes : 65_536}
+        : {})
     }
   };
 }

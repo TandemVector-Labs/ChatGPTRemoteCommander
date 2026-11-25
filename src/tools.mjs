@@ -1,4 +1,5 @@
 import path from 'node:path';
+import {boundedCommandTimeout} from './command-timeout-limits.mjs';
 import { appendFile, copyFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
@@ -103,8 +104,9 @@ export async function runProjectCommand(ctx, input) {
   const info = await stat(cwd);
   if (!info.isDirectory()) throw new Error('cwd is not a directory');
   const args = validateCommandArgs(program, input.args ?? [], cwd, ctx.roots);
-  const requested = Number(input.timeoutMs ?? ctx.config.maxCommandMs);
-  const timeoutMs = Math.max(1000, Math.min(requested, ctx.config.maxCommandMs));
+  // The legacy project-command route must share the fail-closed timer policy
+  // with current Power Shell and project commands before process creation.
+  const timeoutMs = boundedCommandTimeout(input.timeoutMs, ctx.config.maxCommandMs ?? 300000);
   const command = `& ${psQuote(program)} ${args.map(psQuote).join(' ')}; exit $LASTEXITCODE`;
   const child = spawn('pwsh.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], {
     cwd,

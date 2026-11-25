@@ -28,6 +28,19 @@ test('desktop access and operations UI is wired to real guarded backends',()=>{
     'workflow.scheduler','workflow.project_engine','lifecycle.auto_update','lifecycle.zero_downtime_update'
   ]) assert.ok(profiles.includes(cap),cap);
 
+  // Regression: preserve improved profile-manager visual contrast, focus
+  // selection and safe argument-vector child process handling across promotion.
+  for(const marker of [
+    '$grid.EnableHeadersVisualStyles=$false',
+    '$script:selected.Profile',
+    'ProcessStartInfo',
+    '$psi.ArgumentList.Add',
+    'ReadToEndAsync()',
+    '[Environment]::ExpandEnvironmentVariables',
+    '[IO.Path]::IsPathFullyQualified'
+  ]) assert.ok(profiles.includes(marker),'profile manager regression '+marker);
+  assert.equal(profiles.includes('Start-Process -FilePath $pwsh -ArgumentList $all -WindowStyle Hidden -Wait'),false,
+    'error-obscuring legacy profile launcher must not be restored');
   const monitor=read('desktop/operations-monitor-windows.ps1');
   assert.ok(monitor.includes('tools\\workflow-cli.mjs'));
   assert.ok(monitor.includes('persisted workflow records'));
@@ -56,8 +69,15 @@ test('desktop access and operations UI is wired to real guarded backends',()=>{
   assert.ok(entry.includes("autostart-windows.ps1"));
 
   const build=read('desktop/build-windows.ps1');
+  for(const marker of ['Convert-DesktopNumericVersion',
+    'DESKTOP_BUILD_SOURCE_VERSION_INVALID','DESKTOP_BUILD_FILE_VERSION_RANGE_INVALID',
+    'DESKTOP_BUILD_OUTPUT_EXISTS_NO_DESTRUCTIVE_CLEANUP',
+    '-p:FileVersion=$FileVersion','-p:AssemblyVersion=$FileVersion'])
+      assert.ok(build.includes(marker),'Windows numeric version safety '+marker);
+  assert.equal(build.includes('Remove-Item -LiteralPath $OutputDir -Recurse -Force'),false);
+  assert.equal(build.includes('-p:FileVersion="$Version.0"'),false);
   for(const file of [
-    'profile-manager-windows.ps1','profile-enrollment-windows.ps1',
+    'profile-manager-windows.ps1','profile-enrollment-windows.ps1','profile-display-names.ps1',
     'operations-monitor-windows.ps1','admin-runtime-windows.ps1'
   ]) assert.ok(build.includes(file),file);
 
@@ -81,6 +101,31 @@ test('desktop access and operations UI is wired to real guarded backends',()=>{
     'Add Profiles','Profiles & Access','Operations Monitor','Admin Runtime',
     'ToolInstalled','LaunchPendingProfileOnboarding','requested-profiles.txt'
   ]) assert.ok(dashboard.includes(marker),marker);
+});
+
+test('Windows Control Center optional add-ons are checksum-embedded and noninstalling',()=>{
+  const project=read('desktop/RemoteCommanderDashboard/RemoteCommanderDashboard.csproj');
+  const form=read('desktop/RemoteCommanderDashboard/OptionalAddonsForm.cs');
+  const program=read('desktop/RemoteCommanderDashboard/Program.cs');
+  const catalog=JSON.parse(read('installer/products.json')).controlCenterAddons;
+  assert.ok(project.includes('EmbeddedResource Include="../../installer/products.json" LogicalName="RemoteCommander.OptionalProducts"'));
+  assert.ok(program.includes('Button("Optional Add-ons"'));
+  for(const marker of [
+    'GetManifestResourceStream(ResourceName)',
+    'defaultAutoInstall',
+    'DISCOVERY_ONLY_UNTIL_SIGNED_ARTIFACT_AND_OWNER_GRANT',
+    'GetProperty("downloadDefault")',
+    'GetProperty("admission")',
+    '"planned"',
+    'Planned — disabled',
+    'Uri.TryCreate',
+    'return Array.Empty<OptionalAddonView>();'
+  ]) assert.ok(form.includes(marker),'noninstalling add-on guard '+marker);
+  for(const forbidden of ['Process.Start','ProcessStartInfo','HttpClient','WebRequest','Registry.SetValue','File.WriteAllBytes'])
+    assert.ok(!form.includes(forbidden),'Control Center add-on dialog cannot install: '+forbidden);
+  assert.equal(catalog.defaultAutoInstall,false);
+  assert.equal(catalog.items.length,8);
+  assert.ok(catalog.items.every(item=>item.admission==='planned'&&item.downloadDefault===false));
 });
 
 test('Windows updater can target one named profile without changing default all-profile semantics',()=>{
@@ -136,7 +181,7 @@ test('workflow CLI opens a real store from full Commander config and expands env
 test('new Windows desktop/admin scripts parse without execution',t=>{
   if(process.platform!=='win32'){t.skip('Windows-only parser gate');return;}
   for(const script of [
-    'desktop/profile-manager-windows.ps1','desktop/profile-enrollment-windows.ps1',
+    'desktop/profile-manager-windows.ps1','desktop/profile-enrollment-windows.ps1','desktop/profile-display-names.ps1',
     'desktop/operations-monitor-windows.ps1','desktop/admin-runtime-windows.ps1',
     'desktop/build-windows.ps1','desktop/install-windows.ps1','installer/build-setup.ps1',
     'server-install-windows.ps1','install.ps1','enable-autostart.ps1',

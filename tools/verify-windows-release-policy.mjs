@@ -8,7 +8,7 @@ export function evaluateWindowsRelease({signed,version,tag,policy,releaseNotes})
   if (signed === 'true') return {mode:'AUTHENTICODE_SIGNED',allowed:true};
   if (signed !== 'false') throw new Error('WINDOWS_RELEASE_SIGNATURE_STATUS_UNVERIFIED');
   if (policy?.schema !== 'commander-unsigned-windows-release-v1' ||
-      policy.version !== '0.10.23' || policy.tag !== 'v0.10.23' ||
+      !['0.10.24','0.10.25','0.10.26','0.12.0'].includes(version) ||
       policy.version !== version || policy.tag !== tag ||
       policy.allowUnsignedWithGitHubAttestation !== true ||
       policy.scope !== 'only-this-version' ||
@@ -17,6 +17,17 @@ export function evaluateWindowsRelease({signed,version,tag,policy,releaseNotes})
       !policy.riskAcknowledgement?.includes('do not replace Authenticode') ||
       !policy.verification?.includes('GitHub Sigstore'))
     throw new Error('WINDOWS_UNSIGNED_RELEASE_NOT_AUTHORIZED');
+  // Explicit v0.12.0-only owner authorization waives Authenticode, not other release gates.
+  if (version==='0.12.0' && (
+      policy.releaseChannel !== 'public-stable-after-independent-acceptance' ||
+      policy.stableAutoUpdateAllowed !== false ||
+      policy.releaseEligibility !== 'NO_PROMOTE_UNTIL_RELEASE_TRAIN_AND_HOSTED_CI_PASS' ||
+      !/^[0-9a-f]{40}$/.test(policy.evidenceSourceCommit??'') ||
+      !policy.ownerApproval?.includes('2026-11-10') ||
+      !policy.riskAcknowledgement?.includes('Smart App Control') ||
+      !releaseNotes.includes('NO_PROMOTE') &&
+      !releaseNotes.includes('NoPromote')
+    )) throw new Error('WINDOWS_UNSIGNED_STABLE_RELEASE_ADMISSION_NOT_READY');
   if (!releaseNotes.includes('Windows installer: UNSIGNED') ||
       !releaseNotes.includes('SmartScreen') ||
       !releaseNotes.includes('GitHub attestation'))
@@ -30,7 +41,11 @@ if (ownScript) {
     const version=process.env.RELEASE_VERSION??'';
     const tag=process.env.RELEASE_TAG??'';
     const signed=process.env.SETUP_SIGNED??'';
-    const policy=JSON.parse(readFileSync('docs/UNSIGNED_WINDOWS_RELEASE_POLICY.json','utf8'));
+    if(!/^\d+\.\d+\.\d+$/.test(version))throw new Error('WINDOWS_RELEASE_VERSION_INVALID');
+    const policyPath=['0.10.25','0.10.26','0.12.0'].includes(version)
+      ? `docs/UNSIGNED_WINDOWS_RELEASE_POLICY_${version}.json`
+      : 'docs/UNSIGNED_WINDOWS_RELEASE_POLICY.json';
+    const policy=JSON.parse(readFileSync(policyPath,'utf8'));
     const releaseNotes=readFileSync(`docs/RELEASE_${version}.md`,'utf8');
     const decision=evaluateWindowsRelease({signed,version,tag,policy,releaseNotes});
     console.log('WINDOWS_RELEASE_DISTRIBUTION_POLICY_PASS mode='+decision.mode+' tag='+tag);

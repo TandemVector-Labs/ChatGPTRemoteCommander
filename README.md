@@ -1,5 +1,9 @@
 # ChatGPT Remote Commander
 
+> **Current development identity (2026-11-22):** `0.12.0-dev.9` is the next dev23-based integration candidate (NoPromote), not an accepted release or Stable. Commander 2 / `dev19` remains a separate source lineage until its capabilities are reconciled and accepted into the unified tree. The suite has **no currently accepted Stable**. Prior GitHub releases remain historical artifacts; a GitHub `Latest` badge is not full-product acceptance. `1.0.0` remains reserved for the first fully verified Stable. See [0.12 release train](docs/RELEASE_TRAIN_0.12.md).
+
+> **Official project brand:** **[TandemVector Labs](https://github.com/Usefull-Skills)**. Lead source/release maintainer: [Aliakbar Emadoddin](https://github.com/GOD13emad); supporting collaborator: [MMZ](https://github.com/mohammadmohammadzadeh19960-code). [Maintainer credits](docs/PUBLISHER_AND_MAINTAINERS.md). Windows v0.10.24 preview is **UNSIGNED**; checksums and GitHub provenance do not replace Authenticode or remove SmartScreen warnings. The previous historically published Core release was v0.10.20 (not accepted as integrated-suite Stable).
+
 > **Current published Core is [v0.10.20](docs/RELEASE_0.10.20.md).** [Release authority and open gates](docs/RELEASE_AUTHORITY.md) distinguish stable Core, separate Browser stable, and unaccepted UI/Updater drafts. `main` is not itself a release.
 
 ![ChatGPT Remote Commander icon](assets/plugin-icon.png)
@@ -10,7 +14,7 @@ Cross-platform Windows + Linux MCP server for controlled remote project and mach
 
 **Setup guides in 10 languages:** [English](docs/SETUP.en.md) · [فارسی](docs/SETUP.fa.md) · [العربية](docs/SETUP.ar.md) · [Türkçe](docs/SETUP.tr.md) · [Español](docs/SETUP.es.md) · [Français](docs/SETUP.fr.md) · [Deutsch](docs/SETUP.de.md) · [Русский](docs/SETUP.ru.md) · [简体中文](docs/SETUP.zh-CN.md) · [日本語](docs/SETUP.ja.md)
 
-[Documentation index](docs/README.md) · [Server install](docs/SERVER_INSTALL.md) · [Current release: v0.10.20](docs/RELEASE_0.10.20.md) · [Project status](docs/PROJECT_CONTROL_STATE.md) · [Development roadmap](docs/PROJECT_ENGINE_ROADMAP.md)
+[Unified product architecture (accepted design; runtime gates open)](docs/COMMANDER_ARCHITECTURE.md) · [Documentation index](docs/README.md) · [Server install](docs/SERVER_INSTALL.md) · [Current release: v0.10.20](docs/RELEASE_0.10.20.md) · [Project status](docs/PROJECT_CONTROL_STATE.md) · [Development roadmap](docs/PROJECT_ENGINE_ROADMAP.md)
 
 [Finite companion 1.0.0 source-review snapshot](experimental/finite-companion-v1.0.0/README.md) · [گزارش فارسی همراه](docs/COMPANION_1.0.0_20261003_FA.md). This separate, owner-scoped companion was privately accepted on core 0.10.6; it is not a public installer, core upgrade, or general autonomous agent. Compatibility with the current core and same-chat retry recovery remain unproven.
 
@@ -154,6 +158,29 @@ For Plugin packaging, icons, app binding, and private/workspace distribution, se
 
 Legacy-safe tools: `system_status`, `list_directory`, `read_text`, `write_text`, `run_project_command`. Power Mode can also expose the direct-session background browser tools (`browser_status`, session begin/renew/end, navigate, snapshot, screenshot, fill, click, wait, foreground-requirement coordination, and explicit same-profile foreground begin/end). These browser tools are not part of autonomous workflow execution. Power Mode adds `power_status`, `file_info`, `read_file`, `write_file`, `create_directory`, `copy_path`, `move_path`, `delete_path`, `search_files`, `run_shell`, `system_info`, `list_processes`, `kill_process`, and persistent terminal tools (`start_terminal`, `read_terminal`, `send_terminal`, `stop_terminal`).
 
+## Owner-directed persistent project roadmap
+
+ChatGPT and Remote Commander can manage one durable end-to-end project map
+without inventing another Project Brain or moving work to ChatGPT Work.
+The native roadmap interface exposes accepted goal/criteria, ordered step IDs,
+dependencies, blockers and next ready step through `workflow_roadmap`.
+An approved new step can be placed with `workflow_plan_insert` and user
+priority among independent pending steps can be changed with
+`workflow_plan_prioritize`. Pending task labels may also be edited with
+`workflow_plan_edit` without changing IDs or dependencies.
+Replays return receipts; unchanged edits are
+NO_OP and stale/conflicting edits are rejected. The existing
+`workflow_revise` handles goal/criteria changes.
+
+This is the **current ChatGPT + Commander conversation**, not a new Work app.
+If runnerConfigured=false, unattended execution is unavailable; ChatGPT
+can work through authorized ready steps with Commander, verify effects and
+advance the persistent plan. Full Power does not grant root, consent or
+cross-account authorization. See
+[Owner-directed workflow roadmap](docs/OWNER_ROADMAP.md). For strictly
+bounded, trusted non-Codex steps with actual native scheduler readback,
+see [ChatGPT + Commander automatic execution](docs/RUNNER_CHAT_COMMANDER_ONLY.md).
+
 ## Security
 
 Filesystem containment is enforced, but command execution is **not an OS sandbox**. An allowlisted executable or project script may itself access resources beyond the configured roots. Treat command execution as privileged. See [SECURITY.md](SECURITY.md) and the point-in-time [SECURITY_AUDIT.md](SECURITY_AUDIT.md).
@@ -222,7 +249,7 @@ Enroll another Linux account once:
 ./enable-autostart-linux.sh --profile friend-pro
 ```
 
-Each account must use its own tunnel and Runtime API key. The supervisor automatically starts every enrolled profile that points to this local MCP. For one account controlling multiple computers, repeat the installation/enrollment on each computer with a distinct tunnel so each device appears separately in ChatGPT.
+**Canonical per-account/per-system connection (Commander 1 and 2):** For each `(ChatGPT account, target computer)` pair, create **one distinct ChatGPT Plugin/App connection and one exclusively dedicated Secure MCP Tunnel**. No Tunnel ID may be reused by a different user or for another computer. Enroll a **separate Runtime API key by default**; the same user may deliberately reuse **their own** Runtime API key across their own computers, but every pair still has its own Plugin/App and Tunnel. Never reuse another person's key. The local supervisor keeps these account/device profiles separate and forwards each authorized tunnel to **one shared Commander installation on that host**. **Core, Desktop/GUI, Browser, Plugin functionality, and other MCP tools all use that same per-pair connection**; do not create additional tunnels for individual capabilities. The same Plugin can expose enabled Full Access tools when explicitly authorized by the local owner and policy; a Tunnel/API key alone does not grant OS Administrator privileges or bypass GUI consent. **Separate Keycloak/Auth0/public OAuth is not mandatory for the ordinary private-tunnel setup.**
 
 v0.8.25 fixes Windows multi-account update isolation: a drain or persistent terminal owned by one ChatGPT profile defers only that profile, while independently healthy profiles can promote without terminating the blocked profile's workload.
 

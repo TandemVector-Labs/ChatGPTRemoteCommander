@@ -19,8 +19,16 @@ const child=spawn(process.execPath,[helper,'--server'],{stdio:['pipe','pipe','pi
 let stderr='';child.stderr.on('data',c=>stderr+=c.toString('utf8'));
 const rl=createInterface({input:child.stdout,crlfDelay:Infinity});
 const it=rl[Symbol.asyncIterator]();
+async function bounded(promise,ms,code){
+ let timer;
+ try{
+  return await Promise.race([promise,new Promise((_,reject)=>{
+   timer=setTimeout(()=>reject(Error(code)),ms);
+  })]);
+ }finally{clearTimeout(timer);}
+}
 const next=async()=>{
- const result=await Promise.race([it.next(),new Promise((_,reject)=>setTimeout(()=>reject(Error('HELPER_LINE_TIMEOUT')),30000))]);
+ const result=await bounded(it.next(),30000,'HELPER_LINE_TIMEOUT');
  if(result.done)throw Error('HELPER_EOF '+stderr.slice(-500));
  return JSON.parse(result.value);
 };
@@ -53,7 +61,7 @@ try{
   const port=Number(fs.readFileSync(portFile,'utf8').trim().split(/\r?\n/)[0]);
   if(!Number.isInteger(port)||port<1)throw Error('DEVTOOLS_PORT_INVALID');
   child.stdin.end();
-  await Promise.race([once(child,'close'),new Promise((_,reject)=>setTimeout(()=>reject(Error('HELPER_CLOSE_TIMEOUT')),25000))]);
+  await bounded(once(child,'close'),25000,'HELPER_CLOSE_TIMEOUT');
   let removed=false;
   for(let i=0;i<80;i++){if(!fs.existsSync(profile)){removed=true;break;}await new Promise(r=>setTimeout(r,50));}
   if(!removed)throw Error('ISOLATED_PROFILE_NOT_REMOVED_AFTER_EOF');

@@ -21,6 +21,11 @@ if (mode === 'bad') console.log('PRIVATE_CONTEXT not JSON');
 if (mode === 'schema') console.log(JSON.stringify({...proposal, authority:true}));
 if (mode === 'array') console.log(JSON.stringify({...proposal,argumentsJson:'[]'}));
 if (mode === 'exit') { console.error('PRIVATE_CREDENTIAL'); process.exitCode=7; }
+if (mode === 'local-ollama-error') { console.error('LOCAL_OLLAMA_HTTP_UNAVAILABLE'); process.exitCode=1; }
+if (mode === 'local-ollama-timeout') { console.error('LOCAL_OLLAMA_REQUEST_TIMEOUT'); process.exitCode=1; }
+if (mode === 'local-ollama-owner-key') { console.error('LOCAL_OLLAMA_OWNER_KEY_UNAVAILABLE'); process.exitCode=1; }
+if (mode === 'local-ollama-secret') { console.error('LOCAL_OLLAMA_HTTP_UNAVAILABLE token=PRIVATE_CREDENTIAL'); process.exitCode=1; }
+if (mode === 'local-ollama-unknown') { console.error('LOCAL_OLLAMA_UNEXPECTED'); process.exitCode=1; }
 if (mode === 'stderr') { console.error('x'.repeat(10000)); setInterval(()=>{},1000); }
 if (mode === 'flood') { console.log('x'.repeat(10000)); setInterval(()=>{},1000); }
 if (mode === 'wait') setInterval(()=>{},1000);
@@ -79,8 +84,15 @@ test('delegate proposal cannot smuggle an executable tool', async t => {
   await assert.rejects(planner.plan({worker:{enabled:true}}),{code:'PLANNER_INVALID_PROPOSAL'});
 });
 
-for (const [mode, code] of [['bad','PLANNER_INVALID_JSON'],['schema','PLANNER_INVALID_PROPOSAL'],['array','PLANNER_INVALID_PROPOSAL'],['exit','PLANNER_EXIT_FAILED'],['flood','PLANNER_OUTPUT_LIMIT'],['stderr','PLANNER_OUTPUT_LIMIT']]) {
-  test('fail closed and redact provider diagnostics: ' + mode, async t => {
+for (const [mode, code] of [
+  ['bad','PLANNER_INVALID_JSON'],['schema','PLANNER_INVALID_PROPOSAL'],['array','PLANNER_INVALID_PROPOSAL'],
+  ['exit','PLANNER_EXIT_FAILED'],['local-ollama-error','PLANNER_LOCAL_OLLAMA_HTTP_UNAVAILABLE'],
+  ['local-ollama-timeout','PLANNER_LOCAL_OLLAMA_REQUEST_TIMEOUT'],
+   ['local-ollama-owner-key','PLANNER_LOCAL_OLLAMA_OWNER_KEY_UNAVAILABLE'],
+  ['local-ollama-secret','PLANNER_EXIT_FAILED'],['local-ollama-unknown','PLANNER_EXIT_FAILED'],
+  ['flood','PLANNER_OUTPUT_LIMIT'],['stderr','PLANNER_OUTPUT_LIMIT']
+]) {
+  test('fail closed and expose only allowlisted provider diagnostics: ' + mode, async t => {
     const { planner } = fixture(t, mode, { maxOutputBytes: 4096 });
     await assert.rejects(planner.plan({}), error => error.code === code && !String(error).includes('PRIVATE'));
   });
@@ -112,8 +124,29 @@ test('missing executable fails without returning operating system details', asyn
 });
 
 test('legacy configured provider timeout remains loadable but runtime stays transport-bounded', () => {
-  const planner = createCommandPlanner({ kind: 'command', executable: 'x', timeoutMs: 120000 });
+  const planner = createCommandPlanner({ kind: 'command', executable: process.execPath, timeoutMs: 120000 });
   assert.equal(planner.describe().timeoutMs, 30000);
+});
+
+test('provider descriptor exposes explicit hardware/model execution-profile metadata',()=>{
+  const planner=createCommandPlanner({kind:'command',executable:process.execPath,
+    model:'gemma4:12b',modelFamily:'gemma4',reasoningEffort:'none',
+    executionMode:'project-agent',profileVersion:'2026-11'});
+  const description=planner.describe();
+  assert.equal(description.model,'gemma4:12b');
+  assert.equal(description.modelFamily,'gemma4');
+  assert.equal(description.reasoningEffort,'none');
+  assert.equal(description.executionMode,'project-agent');
+  assert.equal(description.profileVersion,'2026-11');
+  assert.equal(description.mode,'proposal-only');
+  assert.equal(JSON.stringify(description).includes(process.execPath),false);
+});
+
+test('provider rejects malformed model-profile metadata before launch',()=>{
+  for(const field of ['modelFamily','reasoningEffort','executionMode','profileVersion']){
+    assert.throws(()=>createCommandPlanner({kind:'command',executable:process.execPath,[field]:''}),
+      error=>error?.code==='PLANNER_INVALID_CONFIG');
+  }
 });
 
 test('input/configuration are bounded and command description hides argv', async t => {
@@ -146,4 +179,51 @@ test('explicitly authorized Codex planner remains proposal-only', () => {
   assert.equal(description.kind,'codex');
   assert.equal(description.mode,'proposal-only');
   assert.equal(description.controls,'read-only-disabled-action-features-and-event-validation');
+});
+
+
+test('relative owner-approved Codex selector remains descriptive but cannot launch',async()=>{
+  const planner=createCommandPlanner({kind:'codex',executable:'codex.exe',args:[]},
+    {allowCodex:true});
+  assert.equal(planner.describe().kind,'codex');
+  await assert.rejects(planner.plan({}),{code:'PLANNER_INVALID_CONFIG'});
+});
+test('runtime floor matches unflagged node:sqlite availability',()=>{
+  const manifest=JSON.parse(fs.readFileSync(new URL('../package.json',import.meta.url),'utf8'));
+  assert.equal(manifest.engines?.node,'>=22.13.0');
+  const [major,minor]=process.versions.node.split('.').map(Number);
+  assert.ok(major>22||(major===22&&minor>=13),
+    'Node 22.13+ is required for the unflagged built-in node:sqlite module');
+});
+
+test('Windows termination helpers pin taskkill to trusted machine path even if SystemRoot is forged',async()=>{
+  const platform=await import('../src/platform.mjs');
+  const expected=path.win32.join('C:\\Windows','System32','taskkill.exe');
+  assert.equal(platform.WINDOWS_SYSTEM_TASKKILL_EXE,expected);
+  const previous=process.env.SystemRoot;
+  try{
+    for(const forged of ['Z:\\untrusted\\windows',
+      'C:\\Users\\attacker\\windows','..\\outside','']){
+      process.env.SystemRoot=forged;
+      assert.equal(platform.WINDOWS_SYSTEM_TASKKILL_EXE,expected);
+    }
+  }finally{
+    if(previous===undefined)delete process.env.SystemRoot;
+    else process.env.SystemRoot=previous;
+  }
+  const sourcePlatform=fs.readFileSync(new URL('../src/platform.mjs',import.meta.url),'utf8');
+  const sourcePlanner=fs.readFileSync(new URL('../src/project-planner.mjs',import.meta.url),'utf8');
+  assert.match(sourcePlatform,/spawnSync\(WINDOWS_SYSTEM_TASKKILL_EXE,/);
+  assert.match(sourcePlanner,/spawn\(WINDOWS_SYSTEM_TASKKILL_EXE,/);
+  assert.doesNotMatch(sourcePlatform,/path\.join\(process\.env\.SystemRoot/);
+  assert.doesNotMatch(sourcePlanner,/path\.join\(process\.env\.SystemRoot/);
+});
+
+test('trusted command planner rejects relative or ambient PATH-selected executables', () => {
+  for (const executable of ['node','./node','../bin/node','subdir/node','node.exe','./planner']) {
+    assert.throws(() => createCommandPlanner({kind:'command',executable,args:[]}),
+      /PLANNER_INVALID_CONFIG/, 'untrusted executable selector '+executable);
+  }
+  const planner=createCommandPlanner({kind:'command',executable:process.execPath,args:[]});
+  assert.equal(planner.describe().controls,'trusted-command-process');
 });

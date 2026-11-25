@@ -240,14 +240,14 @@ test('actual isolated private profile supports immutable no-clobber exports', as
   }
 });
 
-test('real isolated modern MCP server supplies exact snapshot without workflow revision mutation', async () => {
+test('real isolated modern MCP enforces anonymous quarantine or verifies authorized snapshot without mutation', async t => {
   const owned = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'rc-companion-http-test-')));
   const app = path.join(owned, 'app'), project = path.join(owned, 'project');
   const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   let child;
   try {
     fs.mkdirSync(app); fs.mkdirSync(project);
-    fs.cpSync(path.join(repository, 'src'), path.join(app, 'src'), { recursive: true });
+    fs.cpSync(path.join(repository, '..', '..', 'src'), path.join(app, 'src'), { recursive: true });
     const reservation = net.createServer(); await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
     const port = reservation.address().port; await new Promise(resolve => reservation.close(resolve));
     const localBinding = { ...binding, projectRoot: project };
@@ -262,19 +262,38 @@ test('real isolated modern MCP server supplies exact snapshot without workflow r
       env: { ...process.env, REMOTE_COMMANDER_CONFIG: configPath }, windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = ''; child.stdout.on('data', data => output = (output + data).slice(-16384)); child.stderr.on('data', data => output = (output + data).slice(-16384));
     const endpoint = `http://127.0.0.1:${port}/mcp`, deadline = Date.now() + 10000;
-    let healthy = false;
+    let healthy = false, verifiedHealth;
     while (Date.now() < deadline) {
       if (child.exitCode !== null) throw new Error('ISOLATED_SERVER_EXITED ' + output);
       try { const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(300) });
-        const health = await response.json(); if (health.configSha256 === (await import('node:crypto')).createHash('sha256').update(JSON.stringify(config)).digest('hex')) { healthy = true; break; }
+        const health = await response.json(); if (health.configSha256 === (await import('node:crypto')).createHash('sha256').update(JSON.stringify(config)).digest('hex')) { verifiedHealth = health; healthy = true; break; }
       } catch { /* short bounded startup observation */ }
       await new Promise(resolve => setTimeout(resolve, 30));
     }
     assert.equal(healthy, true, output);
+    if (verifiedHealth.privilegedLegacyHttpQuarantined === true) {
+      // The hosted/native security policy must not be bypassed by this fixture.
+      // This branch validates a real denial, NOT the positive trusted-transport gate.
+      for (const headers of [
+        { 'content-type': 'application/json' },
+        { 'content-type': 'application/json', authorization: 'Bearer forged', 'x-request-id': 'forged' }
+      ]) {
+        const denial = await fetch(endpoint, { method: 'POST', headers,
+          body: JSON.stringify({jsonrpc: '2.0', id: 1, method: 'tools/call',
+            params: { name: 'workflow_create',
+              arguments: { id: binding.workflowId, root: project,
+                goal: 'Must not create', acceptance: [], steps: [] } } }),
+          signal: AbortSignal.timeout(3000) });
+        assert.equal(denial.status, 403);
+        assert.deepEqual(await denial.json(), { error: 'trusted_transport_required' });
+      }
+      t.diagnostic('TRUSTED_TRANSPORT_POSITIVE_GATE_NOT_RUN: anonymous privileged HTTP correctly quarantined');
+      return;
+    }
     async function call(name, args) {
       const response = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }), signal: AbortSignal.timeout(3000) });
-      const result = (await response.json()).result; assert.equal(result.isError, false, JSON.stringify(result)); return result.structuredContent;
+      const payload = await response.json(); assert.equal(response.status, 200, JSON.stringify(payload)); const result = payload.result; assert.equal(result.isError, false, JSON.stringify(result)); return result.structuredContent;
     }
     await call('workflow_create', { id: binding.workflowId, root: project, goal: 'Isolated observation only',
       acceptance: ['Observer does not alter revision'], steps: [{ id: 'inspect', title: 'Inspect only' }] });
@@ -288,5 +307,14 @@ test('real isolated modern MCP server supplies exact snapshot without workflow r
     if (child && child.exitCode === null) { const closed = once(child, 'close'); child.kill(); await closed; }
     assert.equal(fs.realpathSync.native(owned), owned); assert.match(path.basename(owned), /^rc-companion-http-test-/);
     fs.rmSync(owned, { recursive: true });
+  }
+});
+
+test('endpoint refuses port zero even on a literal loopback MCP hostname', () => {
+  for (const endpoint of [
+    'http://127.0.0.1:0/mcp',
+    'http://[::1]:0/mcp'
+  ]) {
+    assert.throws(() => companionEndpoint(endpoint), /COMPANION_ENDPOINT_INVALID/, endpoint);
   }
 });

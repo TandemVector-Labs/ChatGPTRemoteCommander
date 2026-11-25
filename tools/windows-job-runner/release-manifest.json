@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "platform": "win32",
+  "arch": "x64",
+  "framework": "net8.0",
+  "runtime": "self-contained",
+  "singleFile": true,
+  "runner": "dist/win-x64/CommanderWindowsJobRunner.exe",
+  "runnerSha256": "57b50598798c328ee6fb06c926e8eb16b4da71dc83ac76344e41952383a848d4",
+  "sourceSha256": "c11ac3481ca0210837f82fb7b0511042229f13a123df181568d4def9c54e3a7b",
+  "projectSha256": "5054b937d77555e32827889c3c25cf5f8e359dc8cf879c03c183bbcecb95f698"
+}

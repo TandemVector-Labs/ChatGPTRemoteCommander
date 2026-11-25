@@ -1,17 +1,19 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { mkdir, readFile, rm } from 'node:fs/promises';
+import os from 'node:os';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import {
-  canonicalizeRoots, isWithin, safeWritablePath,
+  canonicalizeRoots, isWithin, safeExistingPath, safeWritablePath,
   validateCommandArgs, validateProgram
 } from '../src/security-v0.3.mjs';
 import {
   listDirectory, readText, runProjectCommand, writeText
 } from '../src/tools-v0.3.mjs';
 
-const root = path.resolve('test', '.tmp-v03-root');
-await rm(root, { recursive: true, force: true });
-await mkdir(root, { recursive: true });
+const root = await mkdtemp(path.join(os.tmpdir(), 'rc-v03-smoke-'));
+const alias = root + '-alias';
+const outsideRoot = root + '-outside';
+try {
 const roots = await canonicalizeRoots([root]);
 const ctx = {
   roots,
@@ -19,11 +21,36 @@ const ctx = {
     maxReadBytes: 1024 * 1024, maxWriteBytes: 1024 * 1024,
     maxCommandMs: 10000, allowedPrograms: ['git', 'node']
   },
-  auditLog: path.resolve('test', '.tmp-v03-audit.jsonl')
+  auditLog: path.join(root, 'audit.jsonl')
 };
 
 assert.equal(isWithin(path.join(root, 'a.txt'), roots), true);
 assert.equal(isWithin(path.resolve(root, '..', 'escape.txt'), roots), false);
+
+// Real Windows Junction / POSIX symlink roots retain their configured alias
+// for lexical checks, then enforce the canonical resolved boundary.
+await symlink(root, alias, process.platform === 'win32' ? 'junction' : 'dir');
+const aliasRoots = await canonicalizeRoots([alias]);
+assert.equal(isWithin(path.join(alias, 'alias-child.txt'), aliasRoots), true);
+assert.equal(isWithin(path.resolve(alias, '..', 'outside.txt'), aliasRoots), false);
+const aliasWritable = await safeWritablePath(path.join(alias, 'alias-created.txt'), aliasRoots, alias);
+assert.equal(aliasWritable, path.join(alias, 'alias-created.txt'));
+await writeFile(path.join(root, 'alias-existing.txt'), 'inside', 'utf8');
+assert.equal(
+  await safeExistingPath(path.join(alias, 'alias-existing.txt'), aliasRoots, alias),
+  path.join(await realpath(root), 'alias-existing.txt')
+);
+await mkdir(outsideRoot, { recursive: true });
+await writeFile(path.join(outsideRoot, 'outside.txt'), 'outside', 'utf8');
+await symlink(outsideRoot, path.join(alias, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
+await assert.rejects(
+  safeExistingPath(path.join(alias, 'escape', 'outside.txt'), aliasRoots, alias),
+  /resolved path escapes allowed roots/
+);
+await assert.rejects(
+  safeWritablePath(path.join(alias, 'escape', 'new.txt'), aliasRoots, alias),
+  /parent path escapes allowed roots/
+);
 assert.throws(() => validateProgram('not-allowed', ['git']), /not allowed/);
 assert.throws(() => validateProgram('C:\\temp\\git.exe', ['git']), /bare executable name/);
 assert.throws(() => validateCommandArgs('node', ['--eval=1+1'], root, roots), /eval\/print/);
@@ -57,5 +84,8 @@ assert.equal(command.exitCode, 0);
 assert.match(command.stdout, /^v\d+/);
 
 console.log('SMOKE_V03_PASS');
-await rm(root, { recursive: true, force: true });
-await rm(path.resolve('test', '.tmp-v03-audit.jsonl'), { force: true });
+} finally {
+  await rm(alias, { recursive: true, force: true });
+  await rm(outsideRoot, { recursive: true, force: true });
+  await rm(root, { recursive: true, force: true });
+}

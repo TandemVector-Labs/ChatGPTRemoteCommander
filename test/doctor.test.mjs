@@ -24,14 +24,18 @@ test('parseArgs enforces timeout bounds and known arguments', () => {
   const parsed = parseArgs(['--expected-device', 'device-a', '--json']);
   assert.equal(parsed.expectedDevice, 'device-a');
   assert.equal(parsed.json, true);
+  assert.equal(parsed.expectAnonymousQuarantine, false);
+  assert.equal(parseArgs(['--expect-anonymous-quarantine']).expectAnonymousQuarantine, true);
 });
 
-async function withMockServer({ version = '0.8.15', deviceName = 'device-a', tools, configSha256 = null }, fn) {
+async function withMockServer({ version = '0.8.15', deviceName = 'device-a', tools, configSha256 = null,
+  deniedMethods = [], denialError = 'trusted_transport_required', healthy = true }, fn) {
   const toolNames = tools || ['system_status', 'list_directory', 'read_text', 'write_text', 'run_project_command', 'gui_status'];
   const server = http.createServer(async (req, res) => {
     res.setHeader('content-type', 'application/json');
     if (req.method === 'GET' && req.url === '/health') {
-      res.end(JSON.stringify({ status: 'ok' }));
+      if (!healthy) res.statusCode = 503;
+      res.end(JSON.stringify({ status: healthy ? 'ok' : 'not_ready' }));
       return;
     }
     if (req.method !== 'POST' || req.url !== '/mcp') {
@@ -42,6 +46,12 @@ async function withMockServer({ version = '0.8.15', deviceName = 'device-a', too
     let raw = '';
     for await (const chunk of req) raw += chunk;
     const body = JSON.parse(raw);
+    const callName = body.method === 'tools/call' ? body.params?.name : body.method;
+    if (deniedMethods.includes(callName)) {
+      res.statusCode = 403;
+      res.end(JSON.stringify({ error: denialError }));
+      return;
+    }
     if (body.method === 'tools/list') {
       res.end(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: { tools: toolNames.map((name) => ({ name })) } }));
       return;
@@ -106,4 +116,50 @@ test('runDoctor reports missing core tool', async () => {
     assert.equal(report.ok, false);
     assert.match(report.checks.find((item) => item.name === 'tools/list').detail, /missing:/);
   });
+});
+
+// An isolated unauthenticated canary is not a positive authorization or release gate.
+test('runDoctor explicitly qualifies only exact anonymous quarantine without granting MCP access', async () => {
+  await withMockServer({ deniedMethods: ['system_status', 'tools/list'] }, async (endpoint) => {
+    const probe = await runDoctor({ endpoint, expectAnonymousQuarantine: true, timeoutMs: 10000 });
+    assert.equal(probe.ok, true);
+    assert.equal(probe.qualificationScope, 'ANONYMOUS_QUARANTINE_ONLY');
+    assert.equal(probe.active, null);
+    assert.equal(probe.tools.count, 0);
+    assert.deepEqual(probe.checks.map(({ name, ok }) => [name, ok]), [
+      ['health', true], ['system_status', true], ['tools/list', true]
+    ]);
+    const normal = await runDoctor({ endpoint, timeoutMs: 10000 });
+    assert.equal(normal.ok, false, 'anonymous protection must never satisfy the regular Doctor');
+  });
+});
+
+test('anonymous quarantine probe fails closed if either protected method is accepted or denial differs', async () => {
+  for (const options of [
+    { deniedMethods: ['system_status'] },
+    { deniedMethods: ['tools/list'] },
+    { deniedMethods: [] },
+    { deniedMethods: ['system_status', 'tools/list'], denialError: 'other_denial' },
+    { deniedMethods: ['system_status', 'tools/list'], healthy: false }
+  ]) {
+    await withMockServer(options, async (endpoint) => {
+      const report = await runDoctor({ endpoint, expectAnonymousQuarantine: true, timeoutMs: 10000 });
+      assert.equal(report.ok, false, 'invalid or incomplete quarantine must never pass');
+    });
+  }
+});
+
+test('security: doctor only accepts the exact MCP path and explicit loopback port', () => {
+  for (const url of [
+    'http://127.0.0.1:47831/admin/mcp',
+    'http://127.0.0.1:47831/debug/mcp',
+    'http://127.0.0.1/mcp',
+    'http://localhost:47831/mcp/../other/mcp'
+  ]) {
+    assert.throws(() => validateEndpoint(url), /endpoint|port|path|mcp/i, url);
+  }
+  assert.equal(validateEndpoint('https://localhost:47831/mcp').href,
+    'https://localhost:47831/mcp');
+  assert.equal(validateEndpoint('http://127.0.0.1:47831/mcp').href,
+    'http://127.0.0.1:47831/mcp');
 });

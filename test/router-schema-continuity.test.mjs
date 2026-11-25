@@ -24,7 +24,7 @@ async function listen(server){
       });
       return port;
     }catch(error){
-      if(error?.code!=='EADDRINUSE')throw error;
+      if(error?.code!=='EADDRINUSE' && !(process.platform==='win32'&&error?.code==='EACCES'))throw error;
     }
   }
   throw new Error('SAFE_TEST_PORT_UNAVAILABLE');

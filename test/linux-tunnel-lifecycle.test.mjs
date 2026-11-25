@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -30,7 +31,8 @@ test('linux tunnel supervisor never self-stops its own service and scopes recycl
   assert.match(s,/rejected_tunnel_file/);
   assert.match(s,/control_plane_fresh\(\)/);
   assert.match(s,/commands_poll_last_successful_timestamp_seconds/);
-  assert.match(s,/TUNNEL_CONTROL_PLANE_STALE/);
+  assert.match(s,/TUNNEL_SHARED_CONTROL_PLANE_STALE_PRESERVED/);
+  assert.match(s,/TUNNEL_ISOLATED_CONTROL_PLANE_STALE_RECYCLE/);
   assert.match(s,/REMOTE_COMMANDER_TUNNEL_STALE_SECONDS/);
   assert.match(s,/tools\/tunnel-log-runner[.]mjs/);
   assert.match(s,/--log[.]file stdout/);
@@ -97,4 +99,37 @@ test('linux lifecycle shell files parse and tunnel installer self-test resolves 
   assert.equal(body.ok,true);
   assert.equal(body.version,'0.0.15');
   assert.equal(body.tag,'v0.0.15');
+});
+
+test('linux supervisor retains only explicit private backends and its original default route',
+  {skip:process.platform!=='linux'&&'Linux-only supervisor Bash semantics; exercised on native Linux'},()=>{
+  const shell=read('autostart-linux.sh');
+  const fn=shell.match(/^profile_matches\(\) \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(fn);
+  const bash=bashPath();
+  if(!bash)return;
+  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'rc-private-backend-fixture-'));
+  try{
+    const cases=[
+      ['emad-mmz',47831,'',true],
+      ['emad-mmz',47921,'',false],
+      ['emad-mmz',47921,'emad-mmz:47921,saeid-mmz:47922',true],
+      ['saeid-mmz',47922,'emad-mmz:47921,saeid-mmz:47922',true],
+      ['saeid-mmz',47921,'emad-mmz:47921,saeid-mmz:47922',false],
+      ['emad-mmz',47922,'emad-mmz:47921,saeid-mmz:47922',false],
+      ['unrelated',47921,'emad-mmz:47921,saeid-mmz:47922',false],
+      ['saeid-mmz',47922,'saeid-mmz:any',false],
+      ['emad-mmz',47831,'emad-mmz:47921',true],
+      ['mmz-linux',47831,'emad-mmz:47921',true],
+      ['mmz-linux',47921,'emad-mmz:47921',false]
+    ];
+    for(const [name,port,extra,accepted] of cases){
+      const target=path.join(tmp,name+'.yaml');
+      fs.writeFileSync(target,'mcp:\n  server_urls:\n    - url: "http://127.0.0.1:'+port+'/mcp"\n');
+      const p=spawnSync(bash,['-s','--',target],{input:fn+'\nprofile_matches "$1"',
+        encoding:'utf8',env:{...process.env,REMOTE_COMMANDER_TUNNEL_PRIVATE_TARGETS:extra}
+      });
+      assert.equal(p.status===0,accepted,name+' '+port+' allow='+extra+' error='+p.stderr);
+    }
+  }finally{fs.rmSync(tmp,{recursive:true,force:true});}
 });

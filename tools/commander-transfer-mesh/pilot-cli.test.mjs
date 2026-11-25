@@ -218,3 +218,31 @@ test('real child-process kill during final receive safely resumes a verified pre
   assert.match(repeated.stderr,/Destination exists/);
  });
 });
+
+test('fifth MMZ peer uses the existing authenticated transfer contract without overwrite',()=>{
+ const src=create('MMZ'),dst=create('PC');
+ try{
+  const id='five-peer-mmz-20261028',data=Buffer.from('commander-mmz-fifth-peer');
+  const input=path.join(src,'payload.txt');fs.writeFileSync(input,data);
+  const sent=run(src,'send','--peer','PC','--path',input,'--id',id);
+  assert.equal(sent.status,0,sent.stderr);
+  const receipt=JSON.parse(sent.stdout);
+  assert.equal(receipt.from,'MMZ');assert.equal(receipt.to,'PC');
+  const source=path.join(src,'pairs','PC','transfers',id);
+  const target=path.join(dst,'pairs','MMZ','transfers',id);
+  fs.mkdirSync(path.dirname(target),{recursive:true});
+  fs.cpSync(source,target,{recursive:true,errorOnExist:true,force:false});
+  const observed=run(dst,'status','--peer','MMZ','--id',id);
+  assert.equal(observed.status,0,observed.stderr);
+  assert.equal(JSON.parse(observed.stdout).status,'RECEIVED_HASH_VERIFIED');
+  const output=path.join(dst,'inbox');
+  const delivered=run(dst,'receive','--peer','MMZ','--id',id,'--dest',output);
+  assert.equal(delivered.status,0,delivered.stderr);
+  assert.equal(JSON.parse(delivered.stdout).status,'DELIVERED_HASH_VERIFIED');
+  assert.deepEqual(fs.readFileSync(path.join(output,'payload.txt')),data);
+  const again=run(dst,'receive','--peer','MMZ','--id',id,'--dest',output);
+  assert.notEqual(again.status,0,'a duplicate must never overwrite the first delivery');
+ }finally{
+  fs.rmSync(src,{recursive:true,force:true});fs.rmSync(dst,{recursive:true,force:true});
+ }
+});

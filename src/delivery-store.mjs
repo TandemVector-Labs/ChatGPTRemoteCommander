@@ -14,7 +14,59 @@ const SOURCE_KINDS = new Set(['tool', 'operation', 'project']);
 const MAX_ARTIFACT_BYTES = 16 * 1024 * 1024;
 const MAX_CHUNK_BYTES = 16 * 1024;
 const MAX_DELIVERY_ATTEMPTS = 10;
+const WORKER_ID = /^cw_[a-f0-9]{64}$/;
+const WORKER_KEY_ID = /^[a-f0-9]{64}$/;
 const fail = code => { throw Object.assign(new Error(code), { deliveryCode: code }); };
+function trustedWorkerIdentity(input) {
+  if (input === null || input === undefined) return null;
+  if (!input || typeof input !== 'object' || Array.isArray(input)
+    || Object.getPrototypeOf(input) !== Object.prototype
+    || Reflect.ownKeys(input).length !== 3)
+    fail('DELIVERY_INVALID_WORKER_IDENTITY');
+  const read = key => {
+    const d = Object.getOwnPropertyDescriptor(input,key);
+    if (!d || !d.enumerable || !Object.hasOwn(d,'value'))
+      fail('DELIVERY_INVALID_WORKER_IDENTITY');
+    return d.value;
+  };
+  const workerId=read('workerId'),workerKeyId=read('workerKeyId');
+  const workerGrantRevision=read('workerGrantRevision');
+  if (typeof workerId !== 'string' || !WORKER_ID.test(workerId)
+    || typeof workerKeyId !== 'string' || !WORKER_KEY_ID.test(workerKeyId)
+    || !Number.isSafeInteger(workerGrantRevision) || workerGrantRevision < 1)
+    fail('DELIVERY_INVALID_WORKER_IDENTITY');
+  return Object.freeze({workerId,workerKeyId,workerGrantRevision});
+}
+
+// Exact, source-only V1-05 root-lease scope carried across V1-06 receipts.
+// A syntactically valid scope is not authority: the original Host must compare
+// it against a live WorkflowStore lease before signing and publishing a receipt.
+const ID=/^[a-z][a-z0-9_-]{0,63}$/;
+const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
+const SHA=/^[a-f0-9]{64}$/;
+const FIELDS=Object.freeze([
+  'workflowId','stepId','operationId','rootFingerprint',
+  'revision','leaseId','fencingToken'
+]);
+const invalidScope=()=>fail('DELIVERY_WORKFLOW_SCOPE_INVALID');
+export function trustedWorkflowScope(input){
+  if(!input||typeof input!=='object'||Array.isArray(input)
+    ||Object.getPrototypeOf(input)!==Object.prototype
+    ||Reflect.ownKeys(input).length!==FIELDS.length)invalidScope();
+  const output={};
+  for(const key of FIELDS){
+    const descriptor=Object.getOwnPropertyDescriptor(input,key);
+    if(!descriptor||descriptor.enumerable!==true
+      ||!Object.hasOwn(descriptor,'value'))invalidScope();
+    output[key]=descriptor.value;
+  }
+  if(!ID.test(output.workflowId)||!ID.test(output.stepId)
+    ||!UUID.test(output.operationId)
+    ||!SHA.test(output.rootFingerprint)||!SHA.test(output.leaseId)
+    ||!Number.isSafeInteger(output.revision)||output.revision<1
+    ||!Number.isSafeInteger(output.fencingToken)||output.fencingToken<1)invalidScope();
+  return Object.freeze(output);
+}
 
 export function opaqueId(value) {
   if (typeof value !== 'string' || !OPAQUE_ID.test(value)) fail('DELIVERY_INVALID_ID');
@@ -166,9 +218,21 @@ export class DeliveryStore {
     if (correlationId !== undefined && item.correlationId !== correlationId) fail('DELIVERY_CORRELATION_MISMATCH');
     return item;
   }
-  publish({ eventKey, correlationId, source, sourceId, kind, code = kind, artifact = null }) {
+  publish({ eventKey, correlationId, source, sourceId, kind, code = kind, artifact = null, bindingId = null, originReceiptHash = null, workerIdentity = null, workflowScope = null }) {
     opaqueId(eventKey); opaqueId(correlationId); opaqueId(sourceId); opaqueId(code);
     if (!SOURCE_KINDS.has(source) || !KINDS.has(kind)) fail('DELIVERY_INVALID_EVENT');
+    if (bindingId !== null && (typeof bindingId !== 'string' || !/^[a-f0-9]{32,64}$/.test(bindingId)))
+      fail('DELIVERY_INVALID_CONSENT_EPOCH');
+    if (originReceiptHash !== null && (typeof originReceiptHash !== 'string' || !/^[a-f0-9]{64}$/.test(originReceiptHash)))
+      fail('DELIVERY_INVALID_ORIGIN_RECEIPT_HASH');
+    const verifiedWorkerIdentity = trustedWorkerIdentity(workerIdentity);
+    const verifiedWorkflowScope=workflowScope===null?null:trustedWorkflowScope(workflowScope);
+    if(verifiedWorkflowScope!==null && originReceiptHash===null)
+      fail('DELIVERY_WORKFLOW_SCOPE_REQUIRES_ORIGIN_RECEIPT');
+    if (originReceiptHash !== null && !verifiedWorkerIdentity)
+      fail('DELIVERY_WORKER_IDENTITY_REQUIRED');
+    if (originReceiptHash === null && verifiedWorkerIdentity)
+      fail('DELIVERY_WORKER_IDENTITY_REQUIRES_ORIGIN_RECEIPT');
     if (artifact && (
       !/^[a-f0-9]{64}$/.test(artifact.id) || !/^[a-f0-9]{64}$/.test(artifact.sha256) ||
       artifact.id !== artifact.sha256 || !Number.isSafeInteger(artifact.bytes) ||
@@ -176,6 +240,10 @@ export class DeliveryStore {
     )) fail('DELIVERY_INVALID_ARTIFACT');
     const payload = stableJson({
       correlationId, source, sourceId, kind, code,
+      ...(bindingId === null ? {} : { bindingEpochHash:digest(bindingId) }),
+      ...(originReceiptHash === null ? {} : { originReceiptHash }),
+      ...(verifiedWorkerIdentity === null ? {} : { workerIdentity:verifiedWorkerIdentity }),
+      ...(verifiedWorkflowScope === null ? {} : {workflowScope:verifiedWorkflowScope}),
       artifact: artifact ? { id: artifact.id, sha256: artifact.sha256, bytes: artifact.bytes } : null
     });
     const resultHash = digest(payload), now = new Date().toISOString();
@@ -187,12 +255,17 @@ export class DeliveryStore {
     if (row.result_hash !== resultHash) fail('DELIVERY_EVENT_CONFLICT');
     return this.decode(row);
   }
-  list({ after = 0, limit = 20, correlationId, includeDelivered = false } = {}) {
+  list({ after = 0, limit = 20, correlationId, includeDelivered = false, bindingEpochHash } = {}) {
     integer(after, 0, 0, Number.MAX_SAFE_INTEGER); integer(limit, 20, 1, 50);
     if (correlationId !== undefined) opaqueId(correlationId);
+    if (bindingEpochHash !== undefined && (typeof bindingEpochHash !== 'string'
+      || !/^[a-f0-9]{64}$/.test(bindingEpochHash))) fail('DELIVERY_INVALID_CONSENT_EPOCH');
     const rows = this.db.prepare(`SELECT * FROM deliveries WHERE scope=? AND seq>?
-      AND (? IS NULL OR correlation=?) AND (?=1 OR state NOT IN ('DELIVERED','TRANSPORT_RECEIPT')) ORDER BY seq LIMIT ?`)
-      .all(this.scope, after, correlationId ?? null, correlationId ?? null, includeDelivered ? 1 : 0, limit + 1);
+      AND (? IS NULL OR correlation=?)
+      AND (? IS NULL OR json_extract(payload,'$.bindingEpochHash')=?)
+      AND (?=1 OR state NOT IN ('DELIVERED','TRANSPORT_RECEIPT')) ORDER BY seq LIMIT ?`)
+      .all(this.scope, after, correlationId ?? null, correlationId ?? null,
+        bindingEpochHash ?? null, bindingEpochHash ?? null, includeDelivered ? 1 : 0, limit + 1);
     const items = rows.slice(0, limit).map(row => this.decode(row));
     return { items, nextCursor: rows.length > limit ? items.at(-1)?.cursor ?? null : null };
   }
@@ -501,6 +574,17 @@ export class DeliveryStore {
       logicalStateChanged: reclassified > 0, acknowledgementSynthesized: false, artifactsDeleted: 0
     };
   }
+  pendingIdentityCounts() {
+    // Epoch-bound means only that the publisher recorded an immutable consent
+    // epoch. It does NOT imply that the epoch is the currently authorized one.
+    // Keep legacy/unbound backlog visible without making it replay-eligible.
+    const counts=this.db.prepare(`SELECT
+      COALESCE(SUM(CASE WHEN json_type(payload,'$.bindingEpochHash') IS NULL THEN 1 ELSE 0 END),0) AS unbound,
+      COALESCE(SUM(CASE WHEN json_type(payload,'$.bindingEpochHash')='text' THEN 1 ELSE 0 END),0) AS epochBound
+      FROM deliveries WHERE scope=? AND state IN ('COMPLETED_UNDELIVERED','DELIVERY_PENDING')`)
+      .get(this.scope);
+    return Object.freeze({unbound:counts.unbound,epochBound:counts.epochBound});
+  }
   beacon(limit = 5) {
     integer(limit, 5, 1, 10);
     const items = this.db.prepare(`SELECT * FROM deliveries
@@ -528,6 +612,7 @@ export class DeliveryStore {
     return {
       pending: (counts.COMPLETED_UNDELIVERED ?? 0) + (counts.DELIVERY_PENDING ?? 0),
       transportReceipts: counts.TRANSPORT_RECEIPT ?? 0,
+      pendingByBinding: this.pendingIdentityCounts(),
       deadLetter: counts.DEAD_LETTER ?? 0,
       items,
       hostWakeAvailable: false,
@@ -543,6 +628,7 @@ export class DeliveryStore {
       durable: true, schema: 1, scope: this.scope, counts,
       pending: (counts.COMPLETED_UNDELIVERED ?? 0) + (counts.DELIVERY_PENDING ?? 0),
       transportReceipts: counts.TRANSPORT_RECEIPT ?? 0,
+      pendingByBinding: this.pendingIdentityCounts(),
       deadLetter: counts.DEAD_LETTER ?? 0,
       unfinishedRequests: this.db.prepare("SELECT count(*) AS n FROM requests WHERE scope=? AND status='RUNNING'")
         .get(this.scope).n,
@@ -551,6 +637,23 @@ export class DeliveryStore {
     };
   }
   health() {
-    return { ...this.summary(), storage: this.artifactStorage() };
+    // Aggregate metadata only: never disclose correlation IDs, result text, or
+    // artifact content in an unscoped global health response.
+    const pending = "WHERE scope=? AND state IN ('COMPLETED_UNDELIVERED','DELIVERY_PENDING')";
+    const byKind = Object.fromEntries(this.db.prepare(
+      `SELECT coalesce(json_extract(payload,'$.kind'),'UNKNOWN') AS value,count(*) AS n
+       FROM deliveries ${pending} GROUP BY value`
+    ).all(this.scope).map(row => [row.value, row.n]));
+    const bySource = Object.fromEntries(this.db.prepare(
+      `SELECT coalesce(json_extract(payload,'$.source'),'UNKNOWN') AS value,count(*) AS n
+       FROM deliveries ${pending} GROUP BY value`
+    ).all(this.scope).map(row => [row.value, row.n]));
+    const attempted = this.db.prepare(
+      `SELECT count(*) AS n FROM deliveries ${pending} AND attempts>0`
+    ).get(this.scope).n;
+    return {
+      ...this.summary(), storage: this.artifactStorage(),
+      pendingBreakdown: { byKind, bySource, attempted }
+    };
   }
 }

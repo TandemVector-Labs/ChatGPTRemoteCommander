@@ -1,0 +1,19 @@
+{
+  "schema": "commander-unsigned-windows-release-v1",
+  "version": "0.12.0",
+  "tag": "v0.12.0",
+  "allowUnsignedWithGitHubAttestation": true,
+  "scope": "only-this-version",
+  "publishedInstallerSignature": "NotSigned",
+  "verification": "GitHub Sigstore build provenance + exact immutable annotated source tag/commit + SHA256SUMS.txt with verified Windows/Linux artifacts",
+  "riskAcknowledgement": "On 2026-11-10 the user explicitly authorized Remote Commander 1 v0.12.0 public Stable distribution WITHOUT a Windows Authenticode code-signing certificate. Windows may show Unknown publisher and SmartScreen may warn; Smart App Control or enterprise security policy may block the unsigned program. GitHub project branding, SHA256SUMS.txt and GitHub Sigstore build attestations do not replace Authenticode or OS trust. Do not disable or bypass Windows protections or impersonate a signed publisher.",
+  "ownerApproval": "Explicit user instruction in the Commander 1 finalization conversation on 2026-11-10: release v0.12.0 unsigned as Stable when independent source/CI, exact-release provenance, product/runtime, owner authorization, installation, rollback and fleet gates pass. This is authorization for unsigned distribution only; it is not a claim that those gates have passed.",
+  "releaseChannel": "public-stable-after-independent-acceptance",
+  "organizationBrand": "TandemVector Labs (project branding; canonical repository GOD13emad/ChatGPTRemoteCommander)",
+  "primarySourceMaintainer": "Dr. Aliakbar Emadoddin (@GOD13emad)",
+  "supportingSourceMaintainer": "MMZ (@mohammadmohammadzadeh19960-code)",
+  "stableAutoUpdateAllowed": false,
+  "releaseEligibility": "NO_PROMOTE_UNTIL_RELEASE_TRAIN_AND_HOSTED_CI_PASS",
+  "evidenceSourceCommit": "8c1993eadb7d4370d90238967f0830877b1e3ab8",
+  "statement": "Owner waived publisher Authenticode only for v0.12.0. GitHub source and release integrity checks and all real runtime acceptance gates remain mandatory."
+}

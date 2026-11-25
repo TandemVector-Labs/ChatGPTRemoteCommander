@@ -33,6 +33,13 @@ hasAll(updater, [
   "finalize-workflow-schema.mjs"
 ], 'auto-update-windows.ps1');
 
+// The staged candidate's MCP system_status can be delayed by Windows cold-load
+// I/O. Allow bounded warm-up, but require both full staged Doctor checks.
+const candidateDoctorLines = updater.split('\n').filter(line=>line.includes("'tools\\doctor.mjs'"));
+if(candidateDoctorLines.length!==2 ||
+   candidateDoctorLines.some(line=>!line.includes('--timeout-ms 15000 --json')))
+  throw new Error('Windows candidate doctor must use explicit bounded 15-second readiness probes');
+
 const enable = read('enable-autostart.ps1');
 if (!enable.includes("^tunnel_[0-9a-f]{32}$")) throw new Error('Windows enrollment must enforce official tunnel ID format');
 hasAll(enable, [
@@ -97,8 +104,21 @@ hasAll(handoff, [
   "system-tunnel",
   "ChatGPTRemoteCommander\\app",
   "system-mcp",
-  "USER_SESSION_HANDOFF_PASS"
+  "USER_SESSION_HANDOFF_PASS",
+  "HANDOFF_BUSY_STATE_UNVERIFIED",
+  "HANDOFF_RESOURCE_STATE_UNVERIFIED",
+  "HANDOFF_GUI_STATE_UNVERIFIED",
+  "HANDOFF_BROWSER_STATE_UNVERIFIED",
+  "$ownerCommanderPrefix",
+  "$headlessPreload",
+  "$headlessSupervisorPids",
+  "ParentProcessId -notin $headlessSupervisorPids",
+  "return [pscustomobject]@{active=1;queued=1;leases=1}",
+  "[string]$OwnerUserProfile = $env:USERPROFILE"
 ], 'handoff-user-session-windows.ps1');
+if (handoff.includes("$commanderPattern='ChatGPTRemoteCommander'")) {
+  throw new Error('V1-08 handoff must not kill arbitrary Commander-branded Node processes');
+}
 
 const bootDisable = read('disable-boot-recovery.ps1');
 hasAll(bootDisable, [
@@ -171,8 +191,24 @@ hasAll(account, [
   "HealthPort"
 ], 'connect-chatgpt-account.ps1');
 
+const profileManager=read('desktop/profile-manager-windows.ps1');
+hasAll(profileManager, [
+  'Read-TunnelBackendPort',
+  'Shared (inherited)',
+  'Shared (unverified)',
+  'Headless worker (read-only)',
+  'Assert-EditableSelection',
+  'Selected profile is no longer uniquely present.',
+  'Profile route or permission boundary changed. Refresh first.',
+  'Profile policy changed after selection. Refresh first.',
+  '[void](Assert-EditableSelection $script:selected @(Get-Profiles) $script:selectedFingerprint)'
+], 'Windows profile manager fail-closed multi-user contract');
+if (!profileManager.includes("throw 'Shared account, headless worker, or unknown profile is read-only.'")) {
+  throw new Error('Windows profile manager cannot mutate inherited account tunnels or headless workers');
+}
+
 if (process.platform === 'win32') {
-  for (const script of ['autostart-windows.ps1','windows-supervisor-runtime.ps1','enable-boot-recovery.ps1','handoff-user-session-windows.ps1','disable-boot-recovery.ps1']) {
+  for (const script of ['autostart-windows.ps1','windows-supervisor-runtime.ps1','enable-boot-recovery.ps1','handoff-user-session-windows.ps1','disable-boot-recovery.ps1','desktop/profile-manager-windows.ps1','desktop/build-windows.ps1']) {
     const parse = spawnSync('pwsh.exe', ['-NoLogo','-NoProfile','-Command',
       '$t=$null;$e=$null;[void][System.Management.Automation.Language.Parser]::ParseFile("'+script+'",[ref]$t,[ref]$e);if($e.Count){$e|ForEach-Object{$_.Message};exit 1}'],
       { encoding:'utf8', windowsHide:true });
@@ -182,6 +218,15 @@ if (process.platform === 'win32') {
   const policy = spawnSync('pwsh.exe',['-NoLogo','-NoProfile','-File','test/supervisor-recovery-policy-windows.ps1'],{encoding:'utf8',windowsHide:true});
   if(policy.status!==0) throw new Error('supervisor recovery policy failed: '+(policy.stderr||policy.stdout));
   if(!policy.stdout.includes('SUPERVISOR_RECOVERY_POLICY_PASS')) throw new Error('supervisor recovery policy marker missing');
+  const desktopNative = spawnSync('pwsh.exe',['-NoLogo','-NoProfile','-NonInteractive','-File','test/desktop-build-version-windows.ps1','-SourcePath','desktop/build-windows.ps1'],{encoding:'utf8',timeout:15000,windowsHide:true});
+  if(desktopNative.status!==0 || !desktopNative.stdout.includes('DESKTOP_BUILD_VERSION_PASS'))
+    throw new Error('desktop build version fixture failed: '+(desktopNative.stderr||desktopNative.stdout));
+  const handoffNative = spawnSync('pwsh.exe',['-NoLogo','-NoProfile','-NonInteractive','-File','test/handoff-headless-protection-windows.ps1','-SourcePath','handoff-user-session-windows.ps1'],{encoding:'utf8',timeout:15000,windowsHide:true});
+  if(handoffNative.status!==0 || !handoffNative.stdout.includes('HANDOFF_HEADLESS_PROTECTION_PASS'))
+    throw new Error('handoff native protection fixture failed: '+(handoffNative.stderr||handoffNative.stdout));
+  const crossSession = spawnSync('pwsh.exe',['-NoLogo','-NoProfile','-NonInteractive','-File','test/supervisor-cross-session-guard.test.ps1'],{encoding:'utf8',timeout:10000,windowsHide:true});
+  if(crossSession.status!==0) throw new Error('cross-session supervisor guard failed: '+(crossSession.stderr||crossSession.stdout));
+  if(!crossSession.stdout.includes('REGRESSION_PASS cases=7')) throw new Error('cross-session supervisor guard marker missing');
   const stale = spawnSync('pwsh.exe',['-NoLogo','-NoProfile','-NonInteractive','-File','test/stale-drain-policy-windows.ps1'],{encoding:'utf8',windowsHide:true});
   if(stale.status!==0) throw new Error('stale drain policy failed: '+(stale.stderr||stale.stdout));
   if(!stale.stdout.includes('STALE_DRAIN_POLICY_PASS')) throw new Error('stale drain policy marker missing');
@@ -210,4 +255,9 @@ for (const file of headlessFiles) {
   }
 }
 console.log('HEADLESS_PROCESS_LAUNCH_POLICY_PASS');
+const pollObserver = spawnSync(process.execPath,['--test','test/tunnel-control-plane-observer.test.mjs'],{
+  cwd:process.cwd(),encoding:'utf8',timeout:25000,windowsHide:true
+});
+if(pollObserver.status!==0)throw new Error('Windows tunnel control-plane observer regression failed: '+
+  (pollObserver.stderr||pollObserver.stdout));
 console.log('WINDOWS_RUNTIME_CONTRACT_PASS');

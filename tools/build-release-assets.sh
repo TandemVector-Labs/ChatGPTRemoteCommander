@@ -11,8 +11,9 @@ trap 'rm -rf "$TMP"' EXIT
 
 for f in \
   install.ps1 install.sh install-work-plugin.ps1 install-work-plugin.sh \
-  setup-wizard.ps1 setup-wizard.sh build-device-plugin.ps1 build-device-plugin.sh tools/generate-device-plugin.mjs \
-  server-install-windows.ps1 server-install-linux.sh START_HERE.md WORK_SETUP.md \
+  setup-wizard.ps1 setup-wizard.sh build-device-plugin.ps1 build-device-plugin.sh tools/generate-device-plugin.mjs src/profile-identity-registry.mjs \
+  server-install-windows.ps1 server-install-linux.sh tools/workspace-owner-broker.mjs \
+  tools/launch-owner-workspace.ps1 tools/prepare-owner-workspace-candidate.ps1 START_HERE.md WORK_SETUP.md \
   assets/plugin-icon.png assets/plugin-icon.svg assets/plugin-logo.png \
   plugin-template/plugin.json plugin-template/.codex-plugin/plugin.json
 do
@@ -64,12 +65,41 @@ zip_tree "$plugin_stage" "$OUT/plugin-template.zip"
 cp "$OUT/plugin-template.zip" "$OUT/plugin-template-v$VERSION.zip"
 
 installer_stage="$TMP/installer"
-mkdir -p "$installer_stage/tools"
-for f in install.ps1 install.sh install-work-plugin.ps1 install-work-plugin.sh setup-wizard.ps1 setup-wizard.sh build-device-plugin.ps1 build-device-plugin.sh server-install-windows.ps1 server-install-linux.sh START_HERE.md WORK_SETUP.md; do
+mkdir -p "$installer_stage/tools" "$installer_stage/src"
+for f in install.ps1 install.sh install-work-plugin.ps1 install-work-plugin.sh setup-wizard.ps1 setup-wizard.sh build-device-plugin.ps1 build-device-plugin.sh server-install-windows.ps1 server-install-linux.sh tools/workspace-owner-broker.mjs tools/launch-owner-workspace.ps1 tools/prepare-owner-workspace-candidate.ps1 START_HERE.md WORK_SETUP.md; do
   cp "$ROOT/$f" "$installer_stage/$f"
 done
 cp "$ROOT/tools/generate-device-plugin.mjs" "$installer_stage/tools/generate-device-plugin.mjs"
+cp "$ROOT/src/profile-identity-registry.mjs" "$installer_stage/src/profile-identity-registry.mjs"
 cp "$OUT/plugin-template.zip" "$installer_stage/plugin-template.zip"
+# Versioned release ZIP wizards must bind the SAME immutable source identity
+# as the self-extracting Linux .run and compiled Windows EXE.
+python3 - "$installer_stage" "$VERSION" "$COMMIT" <<'PIN_WIZARDS'
+from pathlib import Path
+import re, sys
+stage, version, commit = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+assert re.fullmatch(r"[0-9a-f]{40}", commit), "release commit required"
+assert re.fullmatch(r"[0-9]+[.][0-9]+[.][0-9]+", version), "release version required"
+pw = stage / "setup-wizard.ps1"
+script = pw.read_text()
+old = "$args=@('-StartServer')"
+new = "$args=@('-StartServer','-SourceRef','v" + version + "','-ExpectedCommit','" + commit + "')"
+assert script.count(old) == 1, "Windows wizard install invocation changed"
+pw.write_text(script.replace(old,new))
+sh = stage / "setup-wizard.sh"
+script = sh.read_text()
+header = "#!/usr/bin/env bash\n"
+assert script.startswith(header), "Linux wizard shebang changed"
+assert "REMOTE_COMMANDER_SOURCE_REF=" not in script and "REMOTE_COMMANDER_EXPECTED_COMMIT=" not in script
+pinned = ("export REMOTE_COMMANDER_SOURCE_REF='v" + version + "'\n"
+          "export REMOTE_COMMANDER_EXPECTED_COMMIT='" + commit + "'\n")
+# Some standard ZIP extractors do not restore executable permission bits.
+# Execute the Bash installer via the interpreter, independent of chmod.
+call = '  "$INSTALLER" "$' + '{args[@]}"'
+assert script.count(call) == 1, "Linux installer invocation changed"
+script = script.replace(call, '  bash "$INSTALLER" "$' + '{args[@]}"')
+sh.write_text(header + pinned + script[len(header):])
+PIN_WIZARDS
 cat > "$installer_stage/README-INSTALL.txt" <<EOF
 ChatGPT Remote Commander v$VERSION
 Release commit: $COMMIT
@@ -102,7 +132,7 @@ EOF
 (
   cd "$installer_stage"
   sha256sum install.ps1 install.sh install-work-plugin.ps1 install-work-plugin.sh \
-    setup-wizard.ps1 setup-wizard.sh build-device-plugin.ps1 build-device-plugin.sh tools/generate-device-plugin.mjs \
+    setup-wizard.ps1 setup-wizard.sh build-device-plugin.ps1 build-device-plugin.sh tools/generate-device-plugin.mjs src/profile-identity-registry.mjs \
     server-install-windows.ps1 server-install-linux.sh plugin-template.zip START_HERE.md WORK_SETUP.md README-INSTALL.txt \
     | LC_ALL=C sort -k2 > SHA256SUMS-INSTALLER.txt
   sha256sum -c SHA256SUMS-INSTALLER.txt
@@ -111,7 +141,7 @@ zip_tree "$installer_stage" "$OUT/ChatGPT-Remote-Commander-v$VERSION-Installer.z
 
 windows_stage="$TMP/windows-setup"
 mkdir -p "$windows_stage"
-cp "$ROOT/setup-wizard.ps1" "$windows_stage/setup-wizard.ps1"
+cp "$installer_stage/setup-wizard.ps1" "$windows_stage/setup-wizard.ps1"
 cp "$ROOT/install.ps1" "$windows_stage/install.ps1"
 cat > "$windows_stage/SETUP.cmd" <<'CMD'
 @echo off
@@ -149,7 +179,7 @@ cp "$OUT/ChatGPT-Remote-Commander-Windows-Setup-v$VERSION.zip" "$OUT/ChatGPT-Rem
 
 linux_stage="$TMP/linux-setup"
 mkdir -p "$linux_stage"
-cp "$ROOT/setup-wizard.sh" "$linux_stage/setup-wizard.sh"
+cp "$installer_stage/setup-wizard.sh" "$linux_stage/setup-wizard.sh"
 cp "$ROOT/install.sh" "$linux_stage/install.sh"
 cat > "$linux_stage/SETUP.sh" <<'SH'
 #!/usr/bin/env bash
@@ -174,6 +204,8 @@ unique deterministic icon/logo, and no Runtime API key or tunnel credential.
 EOF
 zip_tree "$linux_stage" "$OUT/ChatGPT-Remote-Commander-Linux-Setup-v$VERSION.zip"
 cp "$OUT/ChatGPT-Remote-Commander-Linux-Setup-v$VERSION.zip" "$OUT/ChatGPT-Remote-Commander-Linux-Setup.zip"
+
+python3 "$ROOT/tools/check-public-release-boundary.py" "$OUT"
 
 (
   cd "$OUT"

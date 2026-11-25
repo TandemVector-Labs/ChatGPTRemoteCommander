@@ -2,6 +2,7 @@ param(
   [string]$QueueFile = ''
 )
 $ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot 'profile-display-names.ps1')
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Windows.Forms.Application]::EnableVisualStyles()
@@ -33,8 +34,8 @@ function Save-Queue([string[]]$Names){
 $form=New-Object Windows.Forms.Form
 $form.Text='Remote Commander — Profile Setup'
 $form.StartPosition='CenterScreen'
-$form.Size=New-Object Drawing.Size(780,610)
-$form.MinimumSize=New-Object Drawing.Size(700,560)
+$form.Size=New-Object Drawing.Size(780,700)
+$form.MinimumSize=New-Object Drawing.Size(700,660)
 $form.BackColor=[Drawing.Color]::FromArgb(16,23,34)
 $form.ForeColor=[Drawing.Color]::Gainsboro
 $form.Font=New-Object Drawing.Font('Segoe UI',10)
@@ -49,49 +50,67 @@ $hint.Text='Add one or more ChatGPT tunnel profiles. Runtime API keys stay in me
 $hint.AutoSize=$false;$hint.Size=New-Object Drawing.Size(720,55);$hint.Location=New-Object Drawing.Point(26,58);$hint.ForeColor=[Drawing.Color]::FromArgb(155,180,210);$form.Controls.Add($hint)
 
 $list=New-Object Windows.Forms.ListBox
-$list.Location=New-Object Drawing.Point(24,120);$list.Size=New-Object Drawing.Size(280,300);$form.Controls.Add($list)
+$list.Location=New-Object Drawing.Point(24,120);$list.Size=New-Object Drawing.Size(280,370);$form.Controls.Add($list)
 
 $profileLabel=New-Object Windows.Forms.Label;$profileLabel.Text='Profile name';$profileLabel.AutoSize=$true;$profileLabel.Location=New-Object Drawing.Point(330,125);$form.Controls.Add($profileLabel)
 $profile=New-Object Windows.Forms.TextBox;$profile.Location=New-Object Drawing.Point(330,150);$profile.Size=New-Object Drawing.Size(410,30);$form.Controls.Add($profile)
 
-$tunnelLabel=New-Object Windows.Forms.Label;$tunnelLabel.Text='OpenAI tunnel_id';$tunnelLabel.AutoSize=$true;$tunnelLabel.Location=New-Object Drawing.Point(330,200);$form.Controls.Add($tunnelLabel)
-$tunnel=New-Object Windows.Forms.TextBox;$tunnel.Location=New-Object Drawing.Point(330,225);$tunnel.Size=New-Object Drawing.Size(410,30);$form.Controls.Add($tunnel)
+$displayLabel=New-Object Windows.Forms.Label
+$displayLabel.Text='Display name (editable later)';$displayLabel.AutoSize=$true
+$displayLabel.Location=New-Object Drawing.Point(330,198);$form.Controls.Add($displayLabel)
+$display=New-Object Windows.Forms.TextBox
+$display.Location=New-Object Drawing.Point(330,223);$display.Size=New-Object Drawing.Size(410,30)
+$display.MaxLength=80;$form.Controls.Add($display)
 
-$keyLabel=New-Object Windows.Forms.Label;$keyLabel.Text='Runtime API key';$keyLabel.AutoSize=$true;$keyLabel.Location=New-Object Drawing.Point(330,275);$form.Controls.Add($keyLabel)
-$key=New-Object Windows.Forms.TextBox;$key.Location=New-Object Drawing.Point(330,300);$key.Size=New-Object Drawing.Size(410,30);$key.UseSystemPasswordChar=$true;$form.Controls.Add($key)
+$tunnelLabel=New-Object Windows.Forms.Label;$tunnelLabel.Text='OpenAI tunnel_id';$tunnelLabel.AutoSize=$true;$tunnelLabel.Location=New-Object Drawing.Point(330,269);$form.Controls.Add($tunnelLabel)
+$tunnel=New-Object Windows.Forms.TextBox;$tunnel.Location=New-Object Drawing.Point(330,294);$tunnel.Size=New-Object Drawing.Size(410,30);$form.Controls.Add($tunnel)
 
-$power=New-Object Windows.Forms.CheckBox;$power.Text='Full Power for isolated secondary profile';$power.AutoSize=$true;$power.Location=New-Object Drawing.Point(330,350);$form.Controls.Add($power)
-$gui=New-Object Windows.Forms.CheckBox;$gui.Text='GUI control';$gui.AutoSize=$true;$gui.Location=New-Object Drawing.Point(330,382);$gui.Enabled=$false;$form.Controls.Add($gui)
+$keyLabel=New-Object Windows.Forms.Label;$keyLabel.Text='Runtime API key';$keyLabel.AutoSize=$true;$keyLabel.Location=New-Object Drawing.Point(330,344);$form.Controls.Add($keyLabel)
+$key=New-Object Windows.Forms.TextBox;$key.Location=New-Object Drawing.Point(330,369);$key.Size=New-Object Drawing.Size(410,30);$key.UseSystemPasswordChar=$true;$form.Controls.Add($key)
+
+$power=New-Object Windows.Forms.CheckBox;$power.Text='Full Power for isolated secondary profile';$power.AutoSize=$true;$power.Location=New-Object Drawing.Point(330,420);$form.Controls.Add($power)
+$gui=New-Object Windows.Forms.CheckBox;$gui.Text='GUI control';$gui.AutoSize=$true;$gui.Location=New-Object Drawing.Point(330,452);$gui.Enabled=$false;$form.Controls.Add($gui)
 $power.Add_CheckedChanged({$gui.Enabled=$power.Checked;if(-not $power.Checked){$gui.Checked=$false}})
 
 function Button([string]$Text,[int]$X,[int]$Y,[int]$W=130){
   $b=New-Object Windows.Forms.Button;$b.Text=$Text;$b.Location=New-Object Drawing.Point($X,$Y);$b.Size=New-Object Drawing.Size($W,36);$b.FlatStyle='Flat';$b.BackColor=[Drawing.Color]::FromArgb(34,48,70);$b.ForeColor=[Drawing.Color]::White;$form.Controls.Add($b);return $b
 }
-$add=Button 'Add profile' 24 438 130
-$remove=Button 'Remove' 164 438 120
-$provision=Button 'Connect selected' 330 438 180
-$done=Button 'Finish' 520 438 110
-$status=New-Object Windows.Forms.Label;$status.AutoSize=$false;$status.Location=New-Object Drawing.Point(24,500);$status.Size=New-Object Drawing.Size(716,58);$status.ForeColor=[Drawing.Color]::FromArgb(120,195,245);$form.Controls.Add($status)
+$add=Button 'Add profile' 24 505 130
+$remove=Button 'Remove' 164 505 120
+$provision=Button 'Connect selected' 330 505 180
+$done=Button 'Finish' 520 505 110
+$status=New-Object Windows.Forms.Label;$status.AutoSize=$false;$status.Location=New-Object Drawing.Point(24,565);$status.Size=New-Object Drawing.Size(716,58);$status.ForeColor=[Drawing.Color]::FromArgb(120,195,245);$form.Controls.Add($status)
 
 function Refresh-List([string[]]$Names){
   $list.Items.Clear();foreach($n in $Names){[void]$list.Items.Add($n)}
   if($list.Items.Count -gt 0){$list.SelectedIndex=0}
 }
 $script:names=@(Load-Queue)
+$script:pendingLabels=@{}
+$list.Add_SelectedIndexChanged({
+  if($list.SelectedItem){
+    $n=[string]$list.SelectedItem
+    $profile.Text=$n
+    $display.Text=if($script:pendingLabels.ContainsKey($n)){$script:pendingLabels[$n]}else{Get-ProfileDisplayName $n}
+  }
+})
 Refresh-List $script:names
-$list.Add_SelectedIndexChanged({if($list.SelectedItem){$profile.Text=[string]$list.SelectedItem}})
 $add.Add_Click({
   $n=$profile.Text.Trim()
   if(-not(Valid-Profile $n)){$status.Text='Invalid profile name.';return}
+  try{[void](Assert-ProfileDisplayAvailable $n $display.Text)}catch{$status.Text=$_.Exception.Message;return}
+  $script:pendingLabels[$n]=$display.Text
   if($script:names -notcontains $n){$script:names+=@($n);Save-Queue $script:names;Refresh-List $script:names;$list.SelectedItem=$n}
 })
 $remove.Add_Click({
   if(-not $list.SelectedItem){return}
-  $n=[string]$list.SelectedItem;$script:names=@($script:names|Where-Object{$_ -ne $n});Save-Queue $script:names;Refresh-List $script:names
+  $n=[string]$list.SelectedItem;[void]$script:pendingLabels.Remove($n);$script:names=@($script:names|Where-Object{$_ -ne $n});Save-Queue $script:names;Refresh-List $script:names
 })
 $provision.Add_Click({
   $n=$profile.Text.Trim();$tid=$tunnel.Text.Trim()
   if(-not(Valid-Profile $n)){$status.Text='Invalid profile name.';return}
+  $displayName=$display.Text
+  try{[void](Assert-ProfileDisplayAvailable $n $displayName)}catch{$status.Text=$_.Exception.Message;return}
   if($tid -notmatch '^tunnel_[0-9a-f]{32}$'){$status.Text='Invalid tunnel_id format.';return}
   if([string]::IsNullOrWhiteSpace($key.Text)){$status.Text='Runtime API key is required.';return}
   $provision.Enabled=$false;$status.Text="Connecting $n ...";$form.Refresh()
@@ -106,7 +125,10 @@ $provision.Add_Click({
       & $Isolate @args
       if($LASTEXITCODE -and $LASTEXITCODE -ne 0){throw "Profile isolation failed: $LASTEXITCODE"}
     }
+    # Label persistence is separate from the successful Tunnel/Core setup.
+    [void](Set-ProfileDisplayName $n $displayName)
     $key.Clear();$secure=$null
+    [void]$script:pendingLabels.Remove($n)
     $script:names=@($script:names|Where-Object{$_ -ne $n});Save-Queue $script:names;Refresh-List $script:names
     $status.Text="PROFILE_SETUP_PASS profile=$n"
   }catch{

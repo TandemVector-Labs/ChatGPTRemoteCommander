@@ -1,0 +1,333 @@
+name: Unified Installer Pilot (NoPromote)
+on:
+  pull_request:
+    paths:
+      - "packaging/unified/**"
+      - "test/unified-*"
+      - "test/verify-compiled-core.test.mjs"
+      - "test/native-compiled-core-verifier.mjs"
+      # PRIVATE pair ingress and the installed Core tool surface are part of
+      # the shipped package, even when packaging scripts are unchanged.
+      - "src/server-v0.3.mjs"
+      - "src/v2-private-*.mjs"
+      - "src/v101-private-*.mjs"
+      - "src/v101-g1-loopback-runtime.mjs"
+      - "src/v012-private-core-runtime.mjs"
+      - "src/v012-private-*.mjs"
+      - "test/v012-private-*.test.mjs"
+      - "tools/provision-owner-worker-key-linux.mjs"
+      - "src/v2-native-owner-session-bindings.mjs"
+      - "src/v2-authorized-operation.mjs"
+      - "src/worker-identity-authority.mjs"
+      - "src/full-access-http-quarantine.mjs"
+      - "test/v2-private-*.test.mjs"
+      - "test/v101-private-*.test.mjs"
+      - ".github/workflows/unified-installer-pilot.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: unified-pilot-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  package:
+    name: ${{ matrix.os }} — source-pinned installer
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Assert exact proposed source commit (never PR merge ref)
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+      - name: Prepare exact committed Core
+        run: node packaging/unified/prepare.mjs
+      - name: Reject mutated native Core manifests and extraction paths (synthetic negatives)
+        run: node --test test/verify-compiled-core.test.mjs
+      - name: Preserve exact native Core inventory for cross-OS byte comparison
+        uses: actions/upload-artifact@v4
+        with:
+          name: rc012-native-core-${{ runner.os }}
+          path: packaging/unified/.stage/core/source-manifest.json
+          # Explicit single-file path lives inside hidden .stage; upload-artifact
+          # v4.4+ ignores it without this opt-in. No secrets or other files sent.
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: error
+      - name: Install pinned packaging tools
+        working-directory: packaging/unified
+        run: npm ci --no-audit --no-fund
+      - name: Prefetch signed Ubuntu GUI dependencies before long packaging build
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          test -n "${RUNNER_TEMP:-}"
+          cat > "$RUNNER_TEMP/rc012-official-ubuntu.sources" <<'SOURCES'
+          Types: deb
+          URIs: https://archive.ubuntu.com/ubuntu
+          Suites: noble noble-updates noble-backports
+          Components: main restricted universe multiverse
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+          Types: deb
+          URIs: https://security.ubuntu.com/ubuntu
+          Suites: noble-security
+          Components: main restricted universe multiverse
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          SOURCES
+          sudo apt-get -o Dir::Etc::sourcelist="$RUNNER_TEMP/rc012-official-ubuntu.sources" -o Dir::Etc::sourceparts=- -o Acquire::Retries=3 update -qq
+          sudo apt-get -o Dir::Etc::sourcelist="$RUNNER_TEMP/rc012-official-ubuntu.sources" -o Dir::Etc::sourceparts=- -o Acquire::Retries=3 install -y -qq --no-install-recommends xvfb xauth libnotify4 libsecret-1-0
+      - name: Build pinned native Linux Core, Node and Tunnel DEB
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash tools/build-native-linux-package.sh
+      - name: Build package (Linux)
+        if: runner.os == 'Linux'
+        working-directory: packaging/unified
+        run: npm run build:linux
+      - name: Merge native Core, Tunnel and GUI into a single DEB
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash packaging/unified/merge-native-deb.sh
+      - name: Upgrade same-name native package, test GUI, then rollback on disposable Ubuntu
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash test/unified-native-upgrade-smoke.sh
+      - name: Build package (Windows)
+        if: runner.os == 'Windows'
+        working-directory: packaging/unified
+        run: npm run build:win
+      - name: Reject legacy Inno installation on ephemeral Windows runner
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./test/unified-nsis-migration-guard.ps1
+      - name: Transactionally migrate legacy GUI to single Windows NSIS and restore original
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./test/unified-windows-owner-migration.ps1
+      - name: Test exact source, privilege boundaries and embedded runtime
+        run: node --test test/unified-packaging.test.mjs test/unified-electron-runtime.test.mjs test/unified-migration-preflight.test.mjs test/unified-profile-recovery.test.mjs
+      - name: Real Windows Electron GUI and restricted Core Start/Stop
+        if: runner.os == 'Windows'
+        env:
+          RC_TEST_PACKAGED_GUI: '1'
+        run: node --test test/unified-electron-gui.test.mjs
+      - name: Verify Linux package replaces legacy identity
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb=(dist/unified/*.deb)
+          test "${#deb[@]}" -eq 1
+          test "$(dpkg-deb --field "${deb[0]}" Package)" = "chatgpt-remote-commander"
+          dpkg --compare-versions "$(dpkg-deb --field "${deb[0]}" Version)" gt "0.12.0~dev1-2"
+      - name: Verify actual Linux DEB embeds SHA-pinned public Core
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb=(dist/unified/*.deb)
+          test "${#deb[@]}" -eq 1
+          dest="$RUNNER_TEMP/rc012-compiled-deb-verify"
+          mkdir -p "$dest"
+          dpkg-deb -x "${deb[0]}" "$dest"
+          node test/native-compiled-core-verifier.mjs \
+            --core-root "$dest/opt/Remote Commander/resources/core" \
+            --source-manifest "$(pwd)/packaging/unified/.stage/core/source-manifest.json" \
+            --expected-commit "${{ github.event.pull_request.head.sha || github.sha }}"
+      - name: Verify actual Windows NSIS embeds SHA-pinned public Core
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exes = @(Get-ChildItem dist/unified/*.exe -File)
+          if ($exes.Count -ne 1) { throw 'NATIVE_CORE_ONE_WINDOWS_INSTALLER_REQUIRED' }
+          $zip = Get-Command 7z.exe -ErrorAction SilentlyContinue
+          $zipPath = if ($zip) { $zip.Source } else { Join-Path $env:ProgramFiles '7-Zip\7z.exe' }
+          if (-not (Test-Path -LiteralPath $zipPath)) { throw 'NATIVE_CORE_NATIVE_7Z_MISSING' }
+          $dest = Join-Path $env:RUNNER_TEMP 'rc012-compiled-nsis-verify'
+          New-Item -ItemType Directory -Path $dest -Force | Out-Null
+          & $zipPath x -t7z -y "-o$dest" $exes[0].FullName 'resources\core\*'
+          if ($LASTEXITCODE -ne 0) { throw 'NATIVE_CORE_NSIS_EXTRACT_FAILED' }
+          node test/native-compiled-core-verifier.mjs --core-root (Join-Path $dest 'resources/core') --source-manifest (Join-Path (Get-Location) 'packaging/unified/.stage/core/source-manifest.json') --expected-commit '${{ github.event.pull_request.head.sha || github.sha }}'
+      - name: Artifact fingerprint (Linux)
+        if: runner.os == 'Linux'
+        run: sha256sum dist/unified/*.deb
+      - name: Artifact fingerprint (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-ChildItem dist/unified/*.exe | ForEach-Object {
+            Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256 |
+              Select-Object Path,Hash | Format-List
+          }
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: rc-unified-linux-deb-qa
+          path: dist/unified/*.deb
+          retention-days: 7
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: rc-unified-windows-nsis-qa
+          path: dist/unified/*.exe
+          retention-days: 7
+          if-no-files-found: error
+
+
+  exact-source-parity:
+    name: Windows + Linux - same Core source, zero live deployment
+    needs: [package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/download-artifact@v4
+        with:
+          name: rc012-native-core-Windows
+          path: ${{ runner.temp }}/windows-source
+      - uses: actions/download-artifact@v4
+        with:
+          name: rc012-native-core-Linux
+          path: ${{ runner.temp }}/linux-source
+      - name: Prove native Core source files are byte-equivalent across OS
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+          node tools/universal-install/verify-native-parity.mjs --windows "$RUNNER_TEMP/windows-source/source-manifest.json" --linux "$RUNNER_TEMP/linux-source/source-manifest.json" --expected-commit "${{ github.event.pull_request.head.sha || github.sha }}"
+
+
+  qa-provenance:
+    # Reuse the already-qualified repository standard GitHub/Sigstore action.
+    # Dispatch-only: untrusted pull requests cannot request attestation
+    # publication, and exact GITHUB_SHA binds the built Core and packages.
+    name: Source-pinned native QA provenance (NoPromote)
+    if: github.event_name == 'workflow_dispatch'
+    needs: [package, exact-source-parity]
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: rc-unified-windows-nsis-qa
+          path: dist/qa-provenance/windows
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: rc-unified-linux-deb-qa
+          path: dist/qa-provenance/linux
+      - name: Verify exactly two same-run native QA assets and immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          version="$(node -p "require('./package.json').version")"
+          test "$version" = "$(node -p "require('./docs/release-train-0.12.json').sourceVersion")"
+          [[ "$version" =~ ^0\.12\.0-dev\.[1-9][0-9]*$ ]]
+          win="dist/qa-provenance/windows/Remote-Commander-Unified-$version-Windows-x64.exe"
+          linux="dist/qa-provenance/linux/Remote-Commander-Unified-$version-Linux-amd64.deb"
+          test -s "$win" && test -s "$linux"
+          test "$(find dist/qa-provenance -type f | wc -l)" -eq 2
+          sha256sum "$win" "$linux"
+          echo "RC012_NATIVE_QA_PROVENANCE_INPUTS_VERIFIED sha=$GITHUB_SHA"
+      - name: Attest immutable native QA package bytes (not Stable or installed)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # official v4
+        with:
+          subject-path: 'dist/qa-provenance/*/*'
+          create-storage-record: false
+      - name: Verify GitHub Sigstore provenance for both exact QA assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          for asset in "dist/qa-provenance/windows/Remote-Commander-Unified-$version-Windows-x64.exe" \
+                       "dist/qa-provenance/linux/Remote-Commander-Unified-$version-Linux-amd64.deb"; do
+            gh attestation verify "$asset" --repo "$GH_REPO" \
+              --source-ref "$GITHUB_REF" --source-digest "$GITHUB_SHA" \
+              --signer-workflow "$GH_REPO/.github/workflows/unified-installer-pilot.yml" >/dev/null
+          done
+          echo "RC012_NATIVE_QA_PROVENANCE_VERIFIED_NO_PROMOTE sha=$GITHUB_SHA"
+
+
+  native-windows-same-family-cycle:
+    # Exact real dev.8/dev.9 native binaries; no owner host affected.
+    name: Windows NSIS old-to-candidate-to-old rollback (NoPromote)
+    if: github.event_name == 'workflow_dispatch'
+    needs: [qa-provenance]
+    runs-on: windows-latest
+    timeout-minutes: 18
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # official v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # official v7
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # official v8
+        with:
+          name: rc-unified-windows-nsis-qa
+          path: ${{ runner.temp }}/rc012-new-nsis
+      - name: Fetch old exact-source built NSIS from previous qualified run
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $run=44910083231
+          $oldCommit='d7b1251f8d6c8ce48bca675bc624d5c7643b33ae'
+          $record=gh run view $run --repo $env:GITHUB_REPOSITORY --json headSha,conclusion | ConvertFrom-Json
+          if($LASTEXITCODE -ne 0 -or $record.headSha -cne $oldCommit -or $record.conclusion -ne 'success'){
+            throw 'RC012_NSIS_OLD_NATIVE_SOURCE_UNVERIFIED'
+          }
+          gh run download $run --repo $env:GITHUB_REPOSITORY --name rc-unified-windows-nsis-qa --dir (Join-Path $env:RUNNER_TEMP 'rc012-old-nsis')
+          if($LASTEXITCODE -ne 0){throw 'RC012_NSIS_OLD_ASSET_UNAVAILABLE'}
+      - name: Prove actual same-family NSIS upgrade and rollback without live owner effects
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $version=(node -p 'require("./package.json").version').Trim()
+          $old=Join-Path $env:RUNNER_TEMP 'rc012-old-nsis/Remote-Commander-Unified-0.12.0-dev.8-Windows-x64.exe'
+          $new=Join-Path $env:RUNNER_TEMP ('rc012-new-nsis/Remote-Commander-Unified-'+$version+'-Windows-x64.exe')
+          & ./test/unified-windows-same-family-upgrade-smoke.ps1 -OldInstaller $old -CandidateInstaller $new
+          if($LASTEXITCODE -ne 0){throw 'RC012_NSIS_SAME_FAMILY_NATIVE_QA_FAILED'}

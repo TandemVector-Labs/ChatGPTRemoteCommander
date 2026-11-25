@@ -7,6 +7,7 @@ import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
+import { probeWindowsAdministrator } from '../src/windows-admin-token.mjs';
 
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
 async function freePort(){
@@ -29,7 +30,7 @@ async function call(port,id,name,args){
   return result.structuredContent;
 }
 
-test('HTTP conversation continuation binds without opening a tab and queues terminal handoff safely',async()=>{
+test('HTTP conversation continuation binds without opening a tab and queues terminal handoff safely',async t=>{
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'rc-conversation-http-'));
   const serverRoot=path.join(root,'server'),dataRoot=path.join(root,'data'),toolsRoot=path.join(serverRoot,'tools');
   const stateRoot=path.join(root,'operations');
@@ -43,6 +44,7 @@ test('HTTP conversation continuation binds without opening a tab and queues term
     const fixture=path.join(canonical,'fixture.mjs');
     await fs.copyFile(new URL('./async-operation-fixture.mjs',import.meta.url),fixture);
     const config={
+      capabilityProfile:{tier:'STANDARD'},
       host:'127.0.0.1',port,allowedRoots:[canonical],allowedPrograms:['node'],
       maxReadBytes:1024*1024,maxWriteBytes:1024*1024,maxCommandMs:10000,auditLog:'var/audit.jsonl',
       asyncOperations:{enabled:true,backgroundFirst:true,stateDir:stateRoot,maxOutputBytes:65536},
@@ -61,6 +63,24 @@ test('HTTP conversation continuation binds without opening a tab and queues term
       await wait(25);
     }
     assert.equal(healthy,true,stderr||`server exit=${child.exitCode}`);
+
+    // Hosted Windows CI can run elevated: never reopen legacy unauthenticated
+    // MCP for an Administrator/SYSTEM token merely to satisfy this fixture.
+    const nativeToken=process.platform==='win32'
+      ? await probeWindowsAdministrator() : null;
+    if(process.platform==='win32' &&
+       !(nativeToken?.ok===true && nativeToken.isAdmin===false &&
+         nativeToken.isSystem===false && nativeToken.elevation==='standard')) {
+      const health=await (await fetch(`http://127.0.0.1:${port}/health`)).json();
+      assert.equal(health.privilegedLegacyHttpQuarantined,true);
+      const blocked=await fetch(`http://127.0.0.1:${port}/mcp`,{
+        method:'POST',headers:{'content-type':'application/json'},
+        body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/list',params:{}})
+      });
+      assert.equal(blocked.status,403);
+      assert.deepEqual(await blocked.json(),{error:'trusted_transport_required'});
+      return t.skip('elevated or unverified Windows token: unauthenticated MCP correctly quarantined');
+    }
 
     const listed=await rpc(port,1,'tools/list',{});
     const names=listed.tools.map(x=>x.name);

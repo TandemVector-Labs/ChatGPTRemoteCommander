@@ -9,6 +9,21 @@ ui = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ui)
 
 class DashboardPresentationTests(unittest.TestCase):
+    def test_addon_cards_are_read_only_and_planned(self):
+        items = [{"id": "colibri", "name": "Colibri MoE",
+                  "state": "PLANNED", "platformSupported": True,
+                  "installable": False},
+                 {"id": "ufo2", "name": "UFO2",
+                  "state": "PLANNED", "platformSupported": False,
+                  "installable": False},
+                 {"id": "untrusted", "name": "Invalid",
+                  "state": "INSTALLED", "installable": True}]
+        rows = ui.addon_rows(items)
+        self.assertEqual(len(rows), 2)
+        self.assertIn("install disabled", rows[0][1])
+        self.assertIn("not supported", rows[1][1])
+        self.assertEqual(ui.addon_rows({}), ())
+
     def test_healthy_state_exact_only(self):
         for v in ("CONNECTED", "READY", "ONLINE", "PASS"):
             self.assertEqual(ui.state_label(v)[1], "rc-success")
@@ -30,6 +45,21 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertIn("48832", rows[0][1])
         self.assertEqual(data.__repr__(), original)
         self.assertEqual(ui.profile_rows([{"id":"x","port":"48832"}])[0][1].count("UNVERIFIED"), 3)
+    def test_renamed_profile_retains_technical_identity_in_presentation(self):
+        data=[{"id":"default","displayName":"My Workstation","version":"0.12.0",
+               "port":47831,"generation":43}]
+        row=ui.profile_rows(data)[0]
+        self.assertEqual(row[0],"My Workstation")
+        self.assertIn("Profile ID: default",row[1])
+        self.assertEqual(data[0]["id"],"default")
+
+    def test_label_editor_is_independent_of_core_actions(self):
+        source=P.read_text()
+        for marker in ["display_name_updater", "Save display name",
+                       "self._save_profile_display", "Technical profile ID, Tunnel and permissions never change"]:
+            self.assertIn(marker,source)
+        self.assertNotIn("Core.Mutate",source)
+
     def test_persisted_running_is_not_live_green(self):
         rows = ui.workflow_rows([{"id":"w1","revision":4,"state":"RUNNING"}, {"id":"w2","revision":0,"state":"FAILED"}])
         self.assertEqual(rows[0][2],"rc-caution")
@@ -48,7 +78,7 @@ class DashboardPresentationTests(unittest.TestCase):
         self.assertIn('if found is not None:', source)
         self.assertIn('self._gnome_settings = None', source)
 
-    def test_balanced_two_by_two_metrics_and_four_visible_navigation_pages(self):
+    def test_balanced_two_by_two_metrics_and_six_visible_navigation_pages(self):
         source=P.read_text()
         self.assertIn("flow = Gtk.Grid()", source)
         self.assertIn("flow.set_column_homogeneous(True)", source)
@@ -100,7 +130,7 @@ class DashboardPresentationTests(unittest.TestCase):
     def test_refresh_cannot_execute_core_commands(self):
         source=P.read_text()
         self.assertIn('Gtk.SearchEntry()',source)
-        self.assertIn('self._render_profiles(profile_data)',source)
+        self.assertIn('self._render_profiles(profile_data, raw_profiles)',source)
         self.assertIn('self._render_workflows(task_data)',source)
         self.assertIn('if rows == self._workflow_rows:',source)
         self.assertNotIn("LaunchPowerShellTool",source)

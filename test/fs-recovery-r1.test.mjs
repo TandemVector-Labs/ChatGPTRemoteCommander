@@ -7,9 +7,11 @@ import {pathToFileURL} from 'node:url';
 import {createHash} from 'node:crypto';
 import {writeText} from '../src/tools-v0.3.mjs';
 import {writeAnyFile} from '../src/power-tools-v0.3.mjs';
+import { withFullPowerAccess } from './helpers/access-mode-fixtures.mjs';
 const fixture=()=>{
  const root=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'rc-integrity-')));
  const ctx={roots:[root],auditLog:path.join(root,'audit.jsonl'),config:{maxWriteBytes:524288,powerMode:{enabled:true,fullFilesystem:false,backupRoot:path.join(root,'backups')}}};
+ withFullPowerAccess(ctx);
  return{root,ctx,dispose(){fs.rmSync(root,{recursive:true,force:true});}};
 };
 for(const [name,write] of [['standard',writeText],['power',writeAnyFile]]){

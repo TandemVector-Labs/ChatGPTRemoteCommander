@@ -288,6 +288,14 @@ def handle_input(req):
         if action=='click' and e.code=='GUI_FOREGROUND_OR_GEOMETRY_CHANGED':
             return {'ok':False,'error':e.code,'effect':'NOT_APPLIED','phase':'PRE_DISPATCH_GUARD'}
         raise
+    # Validate click coordinates before constructing a Mutter input session or
+    # dispatching any pointer event. This exact error is provably NOT_APPLIED.
+    if action=='click':
+        try: guarded_click_point=point(req,observed)
+        except GuiFailure as e:
+            if e.code=='GUI_POINT_OUTSIDE_MONITOR':
+                return {'ok':False,'error':e.code,'effect':'NOT_APPLIED','phase':'PRE_DISPATCH_GUARD'}
+            raise
     with MutterInput(req,deadline) as rd:
         if action=='move': move_to(req,rd,point(req,observed),deadline); return {'ok':True,'backend':'mutter-remote-desktop'}
         if action=='moveRelative': rd.move(req['dx'],req['dy']); return {'ok':True,'backend':'mutter-remote-desktop'}
@@ -295,7 +303,7 @@ def handle_input(req):
             steps=max(1,round(abs(float(req['delta']))/120)); steps=steps if float(req['delta'])>0 else -steps
             rd.scroll(bool(req.get('horizontal')),steps); return {'ok':True,'backend':'mutter-remote-desktop'}
         if action=='click':
-            move_to(req,rd,point(req,observed),deadline); code=button_code(req.get('button'))
+            move_to(req,rd,guarded_click_point,deadline); code=button_code(req.get('button'))
             for i in range(int(req.get('clicks',1))):
                 check(req,deadline); rd.button(code,True)
                 try: rd.button(code,False)

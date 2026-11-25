@@ -12,7 +12,10 @@ try{
  const helperSource=new URL('tools/browser-control.mjs',srcRoot);
  const helperDest=path.join(toolsDir,'browser-control.mjs');
  await copyFile(helperSource,helperDest);
+ await copyFile(new URL('tools/browser-transfer-native.mjs',srcRoot),path.join(toolsDir,'browser-transfer-native.mjs'));
+ await copyFile(new URL('src/browser-file-transfer-guard.mjs',srcRoot),path.join(srcDir,'browser-file-transfer-guard.mjs'));
  await copyFile(new URL('src/browser-owned-processes.mjs',srcRoot),path.join(srcDir,'browser-owned-processes.mjs'));
+ await copyFile(new URL('src/browser-native-chat-observer.mjs',srcRoot),path.join(srcDir,'browser-native-chat-observer.mjs'));
 
  for(const rel of ['test/browser-helper-init-failure-run.mjs','test/browser-helper-lifecycle-run.mjs']){
   const source=await readFile(new URL(rel,srcRoot),'utf8');

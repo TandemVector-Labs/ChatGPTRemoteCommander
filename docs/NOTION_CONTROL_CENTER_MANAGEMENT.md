@@ -1,0 +1,21 @@
+# Notion management in Remote Commander Control Center
+
+This feature extends the existing [Native Notion Engine](./NOTION_NATIVE_ENGINE.md) in the existing opt-in feature branch. It uses Commander Core's official Notion REST client; it does **not** share or extract the ChatGPT Notion connector's token, the separately authorized hosted Notion MCP token, browser cookies, or any existing Commander profile secrets.
+
+## Windows and Linux
+
+- **Windows:** Open Remote Commander Control Center, select **Notion Connection**. Alternatively launch `RemoteCommander.exe --notion-connect`. Choose the exact Commander profile; connection status, live verify, masked token enrollment and explicitly confirmed local disconnect are in this same dialog. The token is submitted to the local importer via a child process's stdin, not command-line arguments.
+- **Linux:** Open the existing GTK4 Control Center and select **Notion** in its left sidebar. This page has per-profile connection status, live verify, masked token enrollment, and an explicit check-box required before local disconnect. The only credential-bearing operation sends the token to `tools/notion-pat-import.mjs` through stdin, not shell or argv. The existing monitoring, workflow and profile screens remain read-only.
+- **Headless Linux or Windows:** `node tools/notion-pat-import.mjs --status --profile default`, `node tools/notion-pat-import.mjs --verify --profile default`, `node tools/notion-pat-import.mjs --disconnect --confirm-disconnect --profile default`. Enrollment requires an owner-local masked input (e.g., GUI or private stdin pipe) with `--token-stdin --profile <profile>`. Never paste a credential into ChatGPT or command-line arguments.
+
+The importer **only reports bounded fixed success/status markers**. No tokens or other credentials may be returned in tool results, logs, status labels or diagnostics. Each profile has an independently keyed local REST credential in Windows DPAPI or the Linux libsecret keyring. The local disconnect operation deletes only that profile's REST credential; it **does not revoke** the underlying token at Notion, delete pages, change another profile, or sign out of hosted Notion MCP. To revoke a compromised token, use the official Notion developer portal.
+
+`--verify` performs a real read-only `GET /v1/users/me` using the already-stored credential and does not change any authorization state. `--disconnect` requires an explicit `--confirm-disconnect` action; mixed CLI modes, invalid profile names, missing vault access and unsupported actions fail closed. The core MCP tools do not expose an autonomous disconnect or arbitrary token-handling primitive.
+
+## Installation and QA
+
+The Windows executable is built from `desktop/RemoteCommanderDashboard/RemoteCommanderDashboard.csproj`, with its Notion management form compiled into the existing application. The GTK4 UI resides under `desktop/linux-control-center` and resolves the same packaged Node importer relative to the application root. Users must have Node.js available, and Linux must have a usable unlocked libsecret keyring for REST credential storage.
+
+The `.github/workflows/gtk-control-center-r32.yml` suite discovers `test_notion_panel.py` automatically, and the standard Windows R34/native UI and Node test workflows cover their respective backends. Native GUI observation and multi-DPI/Wayland owner acceptance remain independent release gates. Functional tests use synthetic credentials and mocked API responses; they must not delete or replace an owner's existing credential.
+
+All of this stays **Draft / NoPromote** until independent review, CodeQL compatibility, cross-product integration checks and explicitly authorized owner acceptance. The Notion API is not the authoritative release gate or project control-plane authority.

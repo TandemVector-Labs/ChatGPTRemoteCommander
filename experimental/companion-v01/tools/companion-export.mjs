@@ -11,9 +11,12 @@ const sha = value => createHash('sha256').update(value).digest('hex');
 export function companionEndpoint(value) {
   let url; try { url = new URL(value); } catch { fail('COMPANION_ENDPOINT_INVALID'); }
   if (url.protocol !== 'http:' || !['127.0.0.1', '[::1]'].includes(url.hostname)
-    || !url.port || url.username || url.password || url.search || url.hash || url.pathname !== '/mcp'
+    || !url.port || !Number.isSafeInteger(Number(url.port))
+    || Number(url.port) < 1 || Number(url.port) > 65535
+    || url.username || url.password || url.search || url.hash || url.pathname !== '/mcp'
     || value !== url.href) fail('COMPANION_ENDPOINT_INVALID');
-  return value;
+  const host = url.hostname === '127.0.0.1' ? '127.0.0.1' : '[::1]';
+  return 'http://' + host + ':' + Number(url.port) + '/mcp';
 }
 export function parseCompanionExportArgs(args) {
   const options = {};
@@ -49,7 +52,7 @@ function runtimePin(value) {
 /** This native observer has a closed read-only method set. It never grants the
  * web page a connection, command channel, credential, or execution permit. */
 export async function observeCompanion({ endpoint, id, binding }, { fetchImpl = fetch, now = Date.now } = {}) {
-  companionEndpoint(endpoint); validateCompanionBinding(binding);
+  const pinnedEndpoint = companionEndpoint(endpoint); validateCompanionBinding(binding);
   if (id !== binding.workflowId || !/^[a-z][a-z0-9_-]{0,63}$/.test(id)) fail('COMPANION_WORKFLOW_ID_MISMATCH');
   let serial = 0;
   async function rpc(method, params, maxBytes = 512 * 1024) {
@@ -59,7 +62,7 @@ export async function observeCompanion({ endpoint, id, binding }, { fetchImpl = 
       'io.modelcontextprotocol/clientInfo': { name: 'commander-native-observer', version: '1' } };
     const headers = { 'content-type': 'application/json', 'mcp-protocol-version': '2026-07-28', 'mcp-method': method };
     if (method === 'tools/call') headers['mcp-name'] = params.name;
-    const response = await fetchImpl(endpoint, { method: 'POST', headers, redirect: 'error', signal: AbortSignal.timeout(3000),
+    const response = await fetchImpl(pinnedEndpoint, { method: 'POST', headers, redirect: 'error', signal: AbortSignal.timeout(3000),
       body: JSON.stringify({ jsonrpc: '2.0', id: requestId, method, params: { ...params, _meta: metadata } }) });
     const value = await boundedJson(response, maxBytes);
     if (value.jsonrpc !== '2.0' || value.id !== requestId || value.error || !value.result || typeof value.result !== 'object') fail('COMPANION_RPC_INVALID');

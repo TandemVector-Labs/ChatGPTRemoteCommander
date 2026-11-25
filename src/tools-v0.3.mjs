@@ -1,10 +1,13 @@
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { synchronousCommandInput } from './retry-guard.mjs';
 import { assertNoCodexDelegatingScript, assertNoCodexExecutable, codexLaunchAuthorized, commanderChildEnv } from './no-codex-policy.mjs';
 import { appendFile, copyFile, mkdir, opendir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { terminateProcessTree } from './platform.mjs';
+import { boundedCommandTimeout } from './command-timeout-limits.mjs';
+import { runContainedProjectCommand } from './process-containment.mjs';
 import { withPathLocks } from './locks.mjs';
 import { guardFileWrite } from './file-write-guard.mjs';
 import {
@@ -16,6 +19,7 @@ import {
   validateProgram
 } from './security-v0.3.mjs';
 import { resolveExistingTarget, writeAnyFile } from './power-tools-v0.3.mjs';
+import { hasEffectiveFullFilesystem } from './effective-power-mode.mjs';
 import { assertEnumerationScope } from './filesystem-enumeration-guard.mjs';
 
 export function sha256(data) {
@@ -23,7 +27,7 @@ export function sha256(data) {
 }
 
 function legacyPowerFullFilesystem(ctx) {
-  return ctx.config.powerMode?.enabled === true && ctx.config.powerMode?.fullFilesystem === true;
+  return hasEffectiveFullFilesystem(ctx.config, { accessStatus: ctx.accessStatus });
 }
 
 async function legacyExistingPath(ctx, userPath, base = ctx.roots[0]) {
@@ -219,41 +223,124 @@ export async function prepareProjectCommand(ctx, input) {
   if (!info.isDirectory()) throw new Error('cwd is not a directory');
   const args = validateCommandArgs(program, input.args ?? [], cwd, ctx.roots, { fullFilesystem });
   await assertNoCodexDelegatingScript(program, args, cwd, { allowCodex });
-  const requested = Number(input.timeoutMs ?? ctx.config.maxCommandMs);
-  const timeoutMs = Math.max(1000, Math.min(requested, ctx.config.maxCommandMs));
+  const timeoutMs = boundedCommandTimeout(input.timeoutMs, ctx.config.maxCommandMs ?? 300000);
   return { file: program, args, cwd, timeoutMs, outputLimit: 262144, fullFilesystem };
 }
+export function v102WindowsJobReceipt(stderrTail, runnerExitCode) {
+  const unverified = () => { throw new Error('WINDOWS_JOB_RUNNER_COMPLETION_UNVERIFIED'); };
+  if (typeof stderrTail !== 'string') unverified();
+  // The native runner emits the final receipt after its child exits. Child
+  // stderr may contain arbitrary lookalike markers; accept only the last full
+  // marker, at the end of the stream, and reconcile it to the runner exit.
+  const matches = [...stderrTail.matchAll(/(?:^|\n)RC_JOB_RESULT_JSON:(\{[^\r\n]*\})(?=\r?\n|$)/g)];
+  const last = matches.at(-1);
+  if (!last || stderrTail.slice(last.index + last[0].length).trim() !== '') unverified();
+  let receipt;
+  try { receipt = JSON.parse(last[1]); } catch { unverified(); }
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)
+      || receipt.termination !== 'job-object'
+      || typeof receipt.timedOut !== 'boolean'
+      || !Number.isSafeInteger(receipt.processId) || receipt.processId <= 0
+      || !Number.isSafeInteger(runnerExitCode) || runnerExitCode < 0 || runnerExitCode > 255) {
+    unverified();
+  }
+  if (receipt.timedOut) {
+    if (runnerExitCode !== 124 || Object.hasOwn(receipt, 'exitCode')) unverified();
+  } else {
+    if (!Number.isSafeInteger(receipt.exitCode) || receipt.exitCode < 0
+        || receipt.exitCode > 0xFFFFFFFF
+        || runnerExitCode !== (receipt.exitCode > 255 ? 1 : receipt.exitCode)) unverified();
+  }
+  return receipt;
+}
+
 export async function runProjectCommand(ctx, input) {
   const prepared = await prepareProjectCommand(ctx, synchronousCommandInput(input));
   const { file: program, args, cwd, timeoutMs, fullFilesystem } = prepared;
   const outputLimit = Math.min(prepared.outputLimit, 32 * 1024);
-  const child = spawn(program, args, {
-    cwd,
-    windowsHide: true,
-    shell: false,
-    detached: process.platform !== 'win32',
+  const env = commanderChildEnv(cwd, process.env, { allowCodex: codexLaunchAuthorized(ctx) });
+  const workflowBinding = Number.isSafeInteger(ctx.workflowOperation?.fencingToken)
+    ? ctx.workflowOperation : null;
+  if (workflowBinding) {
+    const result = await runContainedProjectCommand({
+      program, args, cwd, timeoutMs, outputLimit, env, binding:workflowBinding
+    });
+    await audit(ctx, {
+      action:'run_project_command', program, args, cwd,
+      ok:!result.isError && !result.timedOut && result.exitCode===0,
+      exitCode:result.exitCode, timedOut:result.timedOut,
+      powerModeFullFilesystem:fullFilesystem,
+      containment:result.containment
+    });
+    return result;
+  }
+  const windowsJob = process.platform === 'win32';
+  const runner = path.resolve(path.dirname(fileURLToPath(import.meta.url)),
+    '../tools/windows-job-runner/dist/win-x64/CommanderWindowsJobRunner.exe');
+  // On Windows, never fall back to unmanaged spawn: taskkill /T /F may complete
+  // after a descendant already performed a delayed side effect.
+  if (windowsJob) {
+    const info = await stat(runner);
+    if (!info.isFile()) throw new Error('WINDOWS_JOB_RUNNER_NOT_INSTALLED');
+  }
+  const launchProgram = windowsJob ? runner : program;
+  const launchArgs = windowsJob
+    ? ['--timeout-ms', String(timeoutMs), '--cwd', cwd, '--', program, ...args]
+    : args;
+  const child = spawn(launchProgram, launchArgs, {
+    cwd, windowsHide: true, shell: false,
+    detached: !windowsJob,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: commanderChildEnv(cwd, process.env, { allowCodex: codexLaunchAuthorized(ctx) })
   });
   let stdout = '';
   let stderr = '';
+  let stderrTail = '';
   child.stdout.on('data', (chunk) => { if (stdout.length < outputLimit) stdout += chunk.toString('utf8'); });
-  child.stderr.on('data', (chunk) => { if (stderr.length < outputLimit) stderr += chunk.toString('utf8'); });
-  let timedOut = false;
-  const timer = setTimeout(() => { timedOut = true; terminateProcessTree(child.pid, { signal: 'SIGKILL' }); }, timeoutMs);
-  const outcome = await new Promise((resolve, reject) => {
-    child.once('error', reject);
-    child.once('close', (code, signal) => resolve({ code, signal }));
+  child.stderr.on('data', (chunk) => {
+    const text = chunk.toString('utf8');
+    if (stderr.length < outputLimit) stderr += text;
+    if (windowsJob) stderrTail = (stderrTail + text).slice(-8192);
   });
-  clearTimeout(timer);
+  let timedOut = false;
+  let timeoutTermination = null;
+  // Windows native Job Objects own their own hard deadline. Node watchdog
+  // is only a crash fallback: closing the runner kills its job descendants.
+  const watchdogMs = windowsJob ? timeoutMs + 6000 : timeoutMs;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    const startedAt = Date.now();
+    timeoutTermination = terminateProcessTree(child.pid, { signal: 'SIGKILL' });
+    timeoutTermination.elapsedMs = Date.now() - startedAt;
+  }, watchdogMs);
+  let outcome;
+  try {
+    outcome = await new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', (code, signal) => resolve({ code, signal }));
+    });
+  } finally { clearTimeout(timer); }
+  let exitCode = outcome.code;
+  if (windowsJob) {
+    const nativeResult = v102WindowsJobReceipt(stderrTail, outcome.code);
+    if (nativeResult.timedOut) {
+      timedOut = true;
+      timeoutTermination = { requested: true, method: 'job-object',
+        nativeConfirmed: true, processId: nativeResult.processId };
+    } else {
+      exitCode = nativeResult.exitCode;
+    }
+    stderr = stderr.replace(/RC_JOB_RESULT_JSON:\{[^\r\n]*\}\r?\n?/g, '');
+  }
   const result = {
     program, args, cwd, timeoutMs, timedOut,
-    exitCode: outcome.code, signal: outcome.signal, stdout, stderr,
+    ...(timedOut ? { timeoutTermination } : {}),
+    exitCode, signal: outcome.signal, stdout, stderr,
     truncated: stdout.length >= outputLimit || stderr.length >= outputLimit
   };
   await audit(ctx, {
-    action: 'run_project_command', program, args, cwd, ok: !timedOut && outcome.code === 0,
-    exitCode: outcome.code, timedOut, powerModeFullFilesystem: fullFilesystem
+    action: 'run_project_command', program, args, cwd, ok: !timedOut && exitCode === 0,
+    exitCode, timedOut, powerModeFullFilesystem: fullFilesystem
   });
   return result;
 }

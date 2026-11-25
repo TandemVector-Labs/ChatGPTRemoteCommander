@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { spawnSync } from 'node:child_process';
 import { WorkflowStore } from '../src/workflow-store.mjs';
 import { MutationIdempotencyStore } from '../src/mutation-idempotency.mjs';
@@ -10,6 +11,7 @@ import { DeliveryStore, deliveryLocation } from '../src/delivery-store.mjs';
 import { buildProfileInstance } from '../src/profile-instances.mjs';
 
 function temp(prefix='rc-cross-profile-'){return fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),prefix)));}
+const leaseKey=root=>{const resolved=path.resolve(root);return process.platform==='win32'?resolved.toLowerCase():resolved;};
 function options(root,directory,leaseDirectory,profile){
   return {
     directory,rootLeaseDirectory:leaseDirectory,allowedRoots:[root],device:'fixture',
@@ -42,13 +44,194 @@ test('machine-global root lease blocks a second profile on the same project root
     assert.equal(b.get('flowb').state.revision,1);
     assert.equal(a.schedulerStatus().currentLeases,1);
     assert.equal(b.schedulerStatus().currentLeases,1);
-    release();await first;
+    release();const firstResult=await first;
+    assert.equal(firstResult.receipt.fencingToken,1);
     assert.equal(a.schedulerStatus().currentLeases,0);
     const second=await b.call({id:'flowb',stepId:'write',expectedRevision:1,tool:'write_text',arguments:{path:path.join(project,'b.txt'),content:'b'}},
       host(async()=>{bEffects++;return{ok:true};}));
     assert.equal(second.outcome,'RECORDED_NOT_VALIDATED');
+    assert.equal(second.receipt.fencingToken,2);
     assert.equal(bEffects,1);
   }finally{a.close();b.close();fs.rmSync(root,{recursive:true,force:true});}
+});
+
+test('separate OS processes share one root lease and preserve monotonic fencing across release',async()=>{
+  const root=temp(),project=path.join(root,'project'),shared=path.join(root,'shared');
+  fs.mkdirSync(project);
+  const a=new WorkflowStore(options(root,path.join(root,'profile-parent'),shared,'profile-parent'));
+  const marker=path.join(project,'child-effect.txt');
+  const childSource=[
+    "import fs from 'node:fs';",
+    "import path from 'node:path';",
+    "const [moduleUrl,config64,project,marker]=process.argv.slice(1);",
+    "const { WorkflowStore }=await import(moduleUrl);",
+    "const config=JSON.parse(Buffer.from(config64,'base64').toString('utf8'));",
+    "const store=new WorkflowStore(config);",
+    "try {",
+    "  store.create({id:'child',root:project,goal:'separate process lease proof',acceptance:['one effect'],steps:[{id:'write',title:'Write once'}]});",
+    "  const result=await store.call({id:'child',stepId:'write',expectedRevision:1,tool:'write_text',arguments:{path:marker,content:'applied'}},",
+    "    {validate:async()=>{},dispatch:async()=>{fs.writeFileSync(marker,'applied');return{ok:true};}});",
+    "  process.stdout.write(JSON.stringify({outcome:result.outcome,fencingToken:result.receipt.fencingToken}));",
+    "} catch(error) {",
+    "  if(error?.workflowCode==='WORKFLOW_ROOT_LEASED')process.stdout.write('LEASED');",
+    "  else {process.stderr.write(String(error?.stack||error));process.exitCode=1;}",
+    "} finally {store.close();}"
+  ].join('\n');
+  const runChild=profile=>{
+    const config=options(root,path.join(root,'profile-'+profile),shared,'profile-'+profile);
+    return spawnSync(process.execPath,
+      ['--input-type=module','-e',childSource,new URL('../src/workflow-store.mjs',import.meta.url).href,
+        Buffer.from(JSON.stringify(config)).toString('base64'),project,marker],
+      {encoding:'utf8',timeout:10000,maxBuffer:1024*1024});
+  };
+  let release,started;
+  const gate=new Promise(resolve=>release=resolve),entered=new Promise(resolve=>started=resolve);
+  let first;
+  try{
+    create(a,'parent',project);
+    first=a.call({id:'parent',stepId:'write',expectedRevision:1,tool:'write_text',arguments:{path:path.join(project,'parent.txt'),content:'parent'}},
+      host(async()=>{started();await gate;return{ok:true};}));
+    await entered;
+    const blocked=runChild('blocked');
+    assert.equal(blocked.error,undefined,String(blocked.error));
+    assert.equal(blocked.status,0,blocked.stderr);
+    assert.equal(blocked.stdout,'LEASED');
+    assert.equal(fs.existsSync(marker),false);
+    release();
+    const parentResult=await first;
+    assert.equal(parentResult.receipt.fencingToken,1);
+    const accepted=runChild('accepted');
+    assert.equal(accepted.error,undefined,String(accepted.error));
+    assert.equal(accepted.status,0,accepted.stderr);
+    assert.deepEqual(JSON.parse(accepted.stdout),{outcome:'RECORDED_NOT_VALIDATED',fencingToken:2});
+    assert.equal(fs.readFileSync(marker,'utf8'),'applied');
+    const db=new DatabaseSync(path.join(shared,'root-leases.sqlite'));
+    try{
+      assert.equal(db.prepare('SELECT last_token FROM root_lease_counters WHERE root=?').get(leaseKey(project)).last_token,2);
+      assert.equal(db.prepare('SELECT count(*) AS n FROM root_leases').get().n,0);
+    }finally{db.close();}
+  }finally{
+    release();
+    if(first)await first.catch(()=>{});
+    a.close();
+    fs.rmSync(root,{recursive:true,force:true});
+  }
+});
+
+test('expired root-lease holder blocks all new effects until independent cessation reconciliation',async()=>{
+  const root=temp(),project=path.join(root,'project'),shared=path.join(root,'shared');
+  fs.mkdirSync(project);
+  const a=new WorkflowStore(options(root,path.join(root,'profile-a'),shared,'profile-a'));
+  const b=new WorkflowStore(options(root,path.join(root,'profile-b'),shared,'profile-b'));
+  const leaseDb=new DatabaseSync(path.join(shared,'root-leases.sqlite'));
+  let releaseA,first;
+  try {
+    create(a,'flowa',project);create(b,'flowb',project);
+    let enteredA;const startedA=new Promise(r=>enteredA=r);
+    const heldA=new Promise(r=>releaseA=r);
+    first=a.call({id:'flowa',stepId:'write',expectedRevision:1,tool:'write_text',arguments:{path:path.join(project,'a.txt'),content:'a'}},
+      host(async()=>{enteredA();await heldA;return{ok:true};}));
+    await startedA;
+    const key=leaseKey(project);
+    assert.equal(leaseDb.prepare('SELECT fencing_token FROM root_leases WHERE root=?').get(key).fencing_token,1);
+    leaseDb.prepare('UPDATE root_leases SET expires_at=? WHERE root=?').run('2000-01-01T00:00:00.000Z',key);
+    let effectsB=0;
+    await assert.rejects(b.call({id:'flowb',stepId:'write',expectedRevision:1,tool:'write_text',arguments:{path:path.join(project,'b.txt'),content:'b'}},
+      host(async()=>{effectsB++;return{ok:true};})),/WORKFLOW_ROOT_LEASE_EXPIRED_RECONCILIATION_REQUIRED/);
+    assert.equal(effectsB,0);
+    assert.equal(leaseDb.prepare('SELECT fencing_token FROM root_leases WHERE root=?').get(key).fencing_token,1);
+    releaseA();
+    const stale=await first;
+    assert.equal(stale.outcome,'UNCERTAIN');
+    assert.equal(stale.receipt.errorCode,'WORKFLOW_ROOT_LEASE_LOST');
+    assert.equal(a.get('flowa').state.steps[0].status,'uncertain');
+    assert.equal(leaseDb.prepare('SELECT fencing_token FROM root_leases WHERE root=?').get(key).fencing_token,1);
+  }finally{
+    releaseA?.();if(first)await first.catch(()=>{});
+    leaseDb.close();a.close();b.close();fs.rmSync(root,{recursive:true,force:true});
+  }
+});
+
+test('expired root lease before dispatch blocks the external effect',async()=>{
+  const root=temp(),project=path.join(root,'project'),shared=path.join(root,'shared');
+  fs.mkdirSync(project);
+  const store=new WorkflowStore(options(root,path.join(root,'profile-a'),shared,'profile-a'));
+  const leaseDb=new DatabaseSync(path.join(shared,'root-leases.sqlite'));
+  let effects=0;
+  try{
+    create(store,'flowpre',project);
+    leaseDb.exec(`CREATE TRIGGER expire_new_root_lease AFTER INSERT ON root_leases
+      BEGIN UPDATE root_leases SET expires_at='2000-01-01T00:00:00.000Z' WHERE root=NEW.root; END;`);
+    const result=await store.call(
+      {id:'flowpre',stepId:'write',expectedRevision:1,tool:'write_text',arguments:{path:path.join(project,'never.txt'),content:'never'}},
+      host(async()=>{effects++;return{ok:true};})
+    );
+    assert.equal(result.outcome,'UNCERTAIN');
+    assert.equal(result.receipt.errorCode,'WORKFLOW_ROOT_LEASE_LOST');
+    assert.equal(result.receipt.notDispatched,true);
+    assert.equal(result.operation.status,'UNCERTAIN');
+    assert.equal(store.get('flowpre').state.steps[0].status,'uncertain');
+    assert.equal(effects,0);
+    assert.equal(store.schedulerStatus().currentLeases,0);
+  }finally{
+    leaseDb.close();store.close();fs.rmSync(root,{recursive:true,force:true});
+  }
+});
+
+test('root fencing counters reject token rollback and deletion across profiles',async()=>{
+  const root=temp(),project=path.join(root,'project'),shared=path.join(root,'shared');
+  fs.mkdirSync(project);
+  const a=new WorkflowStore(options(root,path.join(root,'profile-a'),shared,'profile-a'));
+  const b=new WorkflowStore(options(root,path.join(root,'profile-b'),shared,'profile-b'));
+  const leaseDb=new DatabaseSync(path.join(shared,'root-leases.sqlite'));
+  const key=leaseKey(project);
+  let effects=0;
+  try{
+    create(a,'flowa',project);create(b,'flowb',project);
+    const first=await a.call({id:'flowa',stepId:'write',expectedRevision:1,tool:'write_text',arguments:{path:path.join(project,'a.txt'),content:'a'}},
+      host(async()=>{effects++;return{ok:true};}));
+    assert.equal(first.receipt.fencingToken,1);
+    assert.equal(leaseDb.prepare('SELECT last_token FROM root_lease_counters WHERE root=?').get(key).last_token,1);
+    assert.throws(()=>leaseDb.prepare('UPDATE root_lease_counters SET last_token=0 WHERE root=?').run(key),/ROOT_FENCE_TOKEN_REUSE/);
+    assert.throws(()=>leaseDb.prepare('UPDATE root_lease_counters SET last_token=1 WHERE root=?').run(key),/ROOT_FENCE_TOKEN_REUSE/);
+    assert.throws(()=>leaseDb.prepare('DELETE FROM root_lease_counters WHERE root=?').run(key),/ROOT_FENCE_COUNTER_DELETE/);
+    const second=await b.call({id:'flowb',stepId:'write',expectedRevision:1,tool:'write_text',arguments:{path:path.join(project,'b.txt'),content:'b'}},
+      host(async()=>{effects++;return{ok:true};}));
+    assert.equal(second.receipt.fencingToken,2);
+    assert.equal(leaseDb.prepare('SELECT last_token FROM root_lease_counters WHERE root=?').get(key).last_token,2);
+    assert.equal(effects,2);
+  }finally{
+    leaseDb.close();a.close();b.close();fs.rmSync(root,{recursive:true,force:true});
+  }
+});
+
+test('legacy root-lease schema migrates without discarding an active owner',async()=>{
+  const root=temp(),project=path.join(root,'project'),shared=path.join(root,'shared');
+  fs.mkdirSync(project);fs.mkdirSync(shared);
+  const legacyDb=new DatabaseSync(path.join(shared,'root-leases.sqlite'));
+  legacyDb.exec(`CREATE TABLE root_leases(
+    root TEXT PRIMARY KEY,profile TEXT NOT NULL,workflow TEXT NOT NULL,
+    owner TEXT NOT NULL,expires_at TEXT NOT NULL,revision INTEGER NOT NULL
+  );`);
+  legacyDb.prepare('INSERT INTO root_leases(root,profile,workflow,owner,expires_at,revision) VALUES(?,?,?,?,?,?)')
+    .run(path.resolve(project),'legacy-profile','legacy-flow','legacy-owner',new Date(Date.now()+300000).toISOString(),1);
+  legacyDb.close();
+  const store=new WorkflowStore(options(root,path.join(root,'profile-new'),shared,'profile-new'));
+  try{
+    create(store,'flownew',project);
+    const migrated=new DatabaseSync(path.join(shared,'root-leases.sqlite'));
+    try{
+      const columns=migrated.prepare('PRAGMA table_info(root_leases)').all().map(column=>column.name);
+      assert.ok(columns.includes('fencing_token'));
+      assert.equal(migrated.prepare('SELECT fencing_token FROM root_leases WHERE root=?').get(leaseKey(project)).fencing_token,0);
+      assert.equal(migrated.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='root_lease_counters'").get().name,'root_lease_counters');
+    }finally{migrated.close();}
+    await assert.rejects(
+      store.call({id:'flownew',stepId:'write',expectedRevision:1,tool:'write_text',arguments:{path:path.join(project,'new.txt'),content:'new'}},
+        host(async()=>({ok:true}))),
+      /WORKFLOW_ROOT_LEASED/
+    );
+  }finally{store.close();fs.rmSync(root,{recursive:true,force:true});}
 });
 
 test('machine-global root lease permits independent roots to execute concurrently',async()=>{

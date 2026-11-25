@@ -6,6 +6,7 @@ import os from 'node:os';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { requireNonElevatedLegacyHttp } from './fixtures/legacy-http-token-admission.mjs';
 
 const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const MODERN = '2026-07-28';
@@ -49,7 +50,7 @@ function modernHeaders(method, name, version = MODERN) {
   return headers;
 }
 
-test('dual-era MCP contract, tool validation, cache hints and risk annotations', async () => {
+test('dual-era MCP contract, tool validation, cache hints and risk annotations', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rc-mcp-conformance-'));
   const serverRoot = path.join(root, 'server');
   const dataRoot = path.join(root, 'data');
@@ -62,6 +63,7 @@ test('dual-era MCP contract, tool validation, cache hints and risk annotations',
     await fs.cp(new URL('../src/', import.meta.url), path.join(serverRoot, 'src'), { recursive: true });
 
     const config = {
+      capabilityProfile: { tier: 'STANDARD' },
       host: '127.0.0.1',
       port,
       allowedRoots: [dataRoot],
@@ -72,7 +74,7 @@ test('dual-era MCP contract, tool validation, cache hints and risk annotations',
       auditLog: 'var/audit.jsonl',
       durableDelivery: { directory: path.join(root, 'delivery') },
       powerMode: {
-        enabled: true,
+        enabled: false,
         fullFilesystem: false,
         allowShell: true,
         allowProcessControl: true,
@@ -106,6 +108,7 @@ test('dual-era MCP contract, tool validation, cache hints and risk annotations',
       await wait(25);
     }
     assert.equal(healthy, true, stderr);
+    if(!(await requireNonElevatedLegacyHttp(t,port)))return;
 
     const legacyInit = await post(port, {
       jsonrpc: '2.0', id: 1, method: 'initialize',

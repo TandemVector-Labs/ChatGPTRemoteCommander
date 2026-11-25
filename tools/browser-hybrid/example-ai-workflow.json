@@ -1,0 +1,15 @@
+[
+  {
+    "action": "observe",
+    "instruction": "Find the unique visible link on the Example Domain page. Return its exact selector. Do not click or type.",
+    "fallbackSelector": "a"
+  },
+  {
+    "action": "wait",
+    "selector": "@observed"
+  },
+  {
+    "action": "expectTitle",
+    "text": "Example Domain"
+  }
+]

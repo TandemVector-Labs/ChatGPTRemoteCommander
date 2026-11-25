@@ -12,7 +12,9 @@ const sha = data => createHash('sha256').update(data).digest('hex');
 function ctx(root, backups, keep = 8) {
   return {
     roots: [root],
+    accessStatus: {configuredTier:'FULL_POWER',effectiveTier:'FULL_POWER',hostExecution:{mode:'FULL_HOST_USER',hostFilesystem:true,shellAvailable:true},nativeRoot:{nonRootTokenVerified:true},nativeAdmin:{nonElevatedTokenVerified:false}},
     config: {
+      capabilityProfile: {tier:'FULL_POWER',explicitlyAuthorized:true,disabledCapabilities:[]},
       powerMode: {
         enabled: true,
         fullFilesystem: true,

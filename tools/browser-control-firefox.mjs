@@ -1,13 +1,26 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
+import { resolveBrowserStagedUpload } from '../src/browser-file-transfer-guard.mjs';
+import { downloadSameOriginCdp } from './browser-transfer-native.mjs';
 
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const safeCode=e=>/^[A-Z][A-Z0-9_]{1,79}$/.test(e?.browserCode??e?.message??'')?(e.browserCode??e.message):'BROWSER_NATIVE_FAILED';
 const fail=code=>Object.assign(new Error(code),{browserCode:code});
+function serializePageValue(value){
+  const literal=JSON.stringify(value);
+  if(typeof literal!=='string')throw fail('BROWSER_INPUT_INVALID');
+  // Escape script-breaking HTML delimiters and JS line separators AFTER JSON encoding.
+  // Based on CodeQL js/bad-code-sanitization; preserve the original string's JS value.
+  return literal.replace(/</g,'\\u003c')
+    .replace(/>/g,'\\u003e')
+    .replace(/\u2028/g,'\\u2028')
+    .replace(/\u2029/g,'\\u2029');
+}
 const redactUrl=value=>{
  try{
   const u=new URL(String(value));
@@ -27,11 +40,26 @@ function which(name){
 }
 function detectFirefox(explicit){
  if(typeof explicit==='string'&&explicit&&exists(explicit)&&/firefox/i.test(path.basename(explicit)))return path.resolve(explicit);
- for(const p of [which('firefox'),'/usr/bin/firefox','/snap/bin/firefox'])if(p&&exists(p))return path.resolve(p);
+ const winCandidates=process.platform==='win32'?[
+  path.join(process.env['ProgramFiles(x86)']||'C:\\Program Files (x86)','Mozilla Firefox','firefox.exe'),
+  path.join(process.env.ProgramFiles||'C:\\Program Files','Mozilla Firefox','firefox.exe'),
+  path.join(process.env.LOCALAPPDATA||path.join(os.homedir(),'AppData','Local'),'Mozilla Firefox','firefox.exe')
+ ]:[];
+ for(const p of [which('firefox.exe'),which('firefox'),...winCandidates,'/usr/bin/firefox','/snap/bin/firefox'])if(p&&exists(p))return path.resolve(p);
  return null;
 }
 function detectGecko(){
- for(const p of [which('geckodriver'),'/snap/bin/geckodriver','/usr/bin/geckodriver'])if(p&&exists(p))return path.resolve(p);
+ // PATH and LOCALAPPDATA are ambient input, not executable authorization.
+ // Use only owner-installed adapter locations or known OS package paths.
+ const home=os.homedir();
+ const ownerLocal=path.join(home,'.local','share','chatgpt-remote-commander','adapters','geckodriver','geckodriver');
+ const ownerBin=path.join(home,'.local','bin','geckodriver');
+ const ownerLocalWin=path.join(home,'AppData','Local','ChatGPTRemoteCommander','adapters','geckodriver','geckodriver.exe');
+ const candidates=process.platform==='win32'
+   ?[ownerLocalWin,'C:\\Program Files\\Mozilla Firefox\\geckodriver.exe',
+     'C:\\Program Files (x86)\\Mozilla Firefox\\geckodriver.exe']
+   :[ownerLocal,ownerBin,'/snap/bin/geckodriver','/usr/bin/geckodriver','/usr/local/bin/geckodriver'];
+ for(const file of candidates)if(exists(file))return path.resolve(file);
  return null;
 }
 async function freePort(){
@@ -80,7 +108,15 @@ async function startBrowser(req){
  if(!executable||!driverExecutable)throw fail('BROWSER_EXECUTABLE_NOT_FOUND');
  const profileDir=path.resolve(req.profileDir);fs.mkdirSync(profileDir,{recursive:true,mode:0o700});
  const port=await freePort();
- let driver;try{driver=spawn(driverExecutable,['--host','127.0.0.1','--port',String(port)],{stdio:'ignore',windowsHide:true,shell:false});}catch{throw fail('BROWSER_HELPER_START_FAILED');}
+ const driverArgs=['--host','127.0.0.1','--port',String(port)];
+ // Snap Firefox and geckodriver must see the same temporary profile root.
+ const snapCommon=path.join(os.homedir(),'snap','firefox','common');
+ if(process.platform==='linux'&&profileDir.startsWith(snapCommon+path.sep)){
+  const generatedRoot=path.join(snapCommon,'chatgpt-remote-commander','webdriver-profiles');
+  fs.mkdirSync(generatedRoot,{recursive:true,mode:0o700});
+  driverArgs.push('--profile-root',generatedRoot);
+ }
+ let driver;try{driver=spawn(driverExecutable,driverArgs,{stdio:'ignore',windowsHide:true,shell:false});}catch{throw fail('BROWSER_HELPER_START_FAILED');}
  browser={driver,port,sessionId:null,profileDir,isolated:req.isolated===true,executable,driverExecutable,product:null,headless:req.headless!==false};
  try{
   await waitDriver(driver,port);
@@ -120,6 +156,31 @@ async function relaunch(req){
  const current=redactUrl(await evaluate('location.href'));
  return {...next,resumedUrl:current.url,urlQueryRedacted:current.queryRedacted,urlFragmentRedacted:current.fragmentRedacted,sameOwnedProfile:true,resumeNavigationFailed};
 }
+async function uploadStagedFileFirefox(req){
+ if(!browser?.sessionId)throw fail('BROWSER_SESSION_NOT_RUNNING');
+ const origin=await evaluate('location.origin');
+ if(typeof req.origin!=='string'||req.origin!==origin||!/^https?:\/\//.test(origin))
+  throw fail('BROWSER_TRANSFER_PAGE_ORIGIN_CHANGED');
+ if(typeof req.selector!=='string'||!req.selector||req.selector.length>512)
+  throw fail('BROWSER_TRANSFER_INVALID_ARGUMENTS');
+ let staged;try{staged=resolveBrowserStagedUpload({profileDir:browser.profileDir,filename:req.filename,expectedSha256:req.sha256});}
+ catch(e){throw fail(e.code||'BROWSER_TRANSFER_STAGE_DENIED');}
+ const selector=serializePageValue(req.selector);
+ const acceptable=await evaluate('(()=>{const e=document.querySelector('+selector+');return !!e&&e.tagName===\'INPUT\'&&e.type===\'file\'&&!e.disabled})()');
+ if(!acceptable)throw fail('BROWSER_TRANSFER_FILE_INPUT_REQUIRED');
+ if(await evaluate('location.origin')!==origin)throw fail('BROWSER_TRANSFER_PAGE_ORIGIN_CHANGED');
+ let found;try{found=await http('POST','/session/'+browser.sessionId+'/element',{using:'css selector',value:req.selector},15000);}
+ catch{throw fail('BROWSER_TRANSFER_INPUT_NOT_FOUND');}
+ const elementId=found?.['element-6066-11e4-a52e-4f735466cecf'];
+ if(!elementId)throw fail('BROWSER_TRANSFER_INPUT_NOT_FOUND');
+ try{await http('POST','/session/'+browser.sessionId+'/element/'+elementId+'/value',{text:staged.absolutePath},15000);}
+ catch{throw fail('BROWSER_TRANSFER_WEBDRIVER_UPLOAD_FAILED');}
+ if(await evaluate('location.origin')!==origin)throw fail('BROWSER_TRANSFER_PAGE_ORIGIN_CHANGED');
+ const result=await evaluate('(()=>{const e=document.querySelector('+selector+');return {name:e?.files?.[0]?.name,size:e?.files?.[0]?.size,count:e?.files?.length}})()');
+ if(result?.name!==staged.filename||result?.size!==staged.bytes||result?.count!==1)
+  throw fail('BROWSER_TRANSFER_UPLOAD_NOT_CONFIRMED');
+ return {ok:true,attached:true,filename:staged.filename,bytes:staged.bytes,sha256:staged.sha256,background:true,verificationRequired:true};
+}
 async function handle(req){
  switch(req.action){
   case 'status':{const executable=detectFirefox(req.executable),driverExecutable=detectGecko();return {ok:true,available:!!executable&&!!driverExecutable,backend:executable&&driverExecutable?'firefox-webdriver':null,executable,driverExecutable,active:!!browser,headless:browser?.headless??null,foreground:browser?browser.headless===false:false,backgroundOnly:browser?browser.headless===true:true,userDesktopTouched:browser?browser.headless===false:false,savedPasswordStoreAccess:false};}
@@ -129,9 +190,14 @@ async function handle(req){
   case 'navigate':{if(!browser)throw fail('BROWSER_SESSION_NOT_RUNNING');const u=new URL(req.url);if(!['http:','https:'].includes(u.protocol)||u.username||u.password)throw fail('BROWSER_URL_NOT_ALLOWED');await http('POST','/session/'+browser.sessionId+'/url',{url:u.href},req.timeoutMs??30000);const current=redactUrl(await evaluate('location.href'));return {ok:true,url:current.url,urlQueryRedacted:current.queryRedacted,urlFragmentRedacted:current.fragmentRedacted,title:await evaluate('document.title'),background:true};}
   case 'snapshot':return {ok:true,...await snapshot(req)};
   case 'screenshot':{if(!browser)throw fail('BROWSER_SESSION_NOT_RUNNING');const data=await http('GET','/session/'+browser.sessionId+'/screenshot',undefined,30000);if(typeof data!=='string'||!data)throw fail('BROWSER_SCREENSHOT_FAILED');const bytes=Buffer.from(data,'base64');if(bytes.length>(req.maxBytes??2097152))throw fail('BROWSER_SCREENSHOT_TOO_LARGE');const current=redactUrl(await evaluate('location.href'));return {ok:true,data,mimeType:'image/png',bytes:bytes.length,url:current.url,urlQueryRedacted:current.queryRedacted,urlFragmentRedacted:current.fragmentRedacted,title:await evaluate('document.title'),background:true};}
-  case 'fill':{const sel=JSON.stringify(req.selector),txt=JSON.stringify(req.text);const expr=`(()=>{const el=document.querySelector(${sel});if(!el)return {ok:false,code:'BROWSER_SELECTOR_NOT_FOUND'};if(el.disabled||el.readOnly)return {ok:false,code:'BROWSER_ELEMENT_NOT_EDITABLE'};if(el.tagName==='INPUT'&&(el.type||'').toLowerCase()==='file')return {ok:false,code:'BROWSER_FILE_INPUT_NOT_ALLOWED'};const v=${txt};if(el.isContentEditable){el.textContent=v;}else if(el.tagName==='SELECT'){el.value=v;}else{const proto=el.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;const set=Object.getOwnPropertyDescriptor(proto,'value')?.set;if(set)set.call(el,v);else el.value=v;}el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return {ok:true,tag:el.tagName.toLowerCase(),type:(el.type||null)};})()`;const v=await evaluate(expr);if(!v?.ok)throw fail(v?.code??'BROWSER_FILL_FAILED');return {ok:true,filled:true,selector:req.selector,background:true,valueReturned:false};}
-  case 'click':{const sel=JSON.stringify(req.selector);const expr=`(()=>{const el=document.querySelector(${sel});if(!el)return {ok:false,code:'BROWSER_SELECTOR_NOT_FOUND'};if(el.disabled)return {ok:false,code:'BROWSER_ELEMENT_DISABLED'};el.scrollIntoView({block:'center',inline:'center'});el.click();return {ok:true,tag:el.tagName.toLowerCase()};})()`;const v=await evaluate(expr);if(!v?.ok)throw fail(v?.code??'BROWSER_CLICK_FAILED');await sleep(50);return {ok:true,clicked:true,selector:req.selector,background:true,verificationRequired:true};}
-  case 'wait':{const timeout=Math.max(100,Math.min(30000,req.timeoutMs??5000)),until=Date.now()+timeout;while(Date.now()<until){let ok=false;if(req.selector!==undefined){const s=JSON.stringify(req.selector);ok=await evaluate(`!!document.querySelector(${s})`);}else if(req.textIncludes!==undefined){const t=JSON.stringify(req.textIncludes);ok=await evaluate(`(document.body?.innerText??'').includes(${t})`);}else if(req.urlIncludes!==undefined){const u=JSON.stringify(req.urlIncludes);ok=await evaluate(`location.href.includes(${u})`);}if(ok)return {ok:true,matched:true,background:true};await sleep(75);}throw fail('BROWSER_WAIT_TIMEOUT');}
+  case 'transfer_upload':return uploadStagedFileFirefox(req);
+  case 'transfer_download':{
+   if(!browser?.sessionId)throw fail('BROWSER_SESSION_NOT_RUNNING');
+   return downloadSameOriginCdp({req,profileDir:browser.profileDir,evaluate,send:async()=>{}});
+  }
+  case 'fill':{const sel=serializePageValue(req.selector),txt=serializePageValue(req.text);const expr=`(()=>{const el=document.querySelector(${sel});if(!el)return {ok:false,code:'BROWSER_SELECTOR_NOT_FOUND'};if(el.disabled||el.readOnly)return {ok:false,code:'BROWSER_ELEMENT_NOT_EDITABLE'};if(el.tagName==='INPUT'&&(el.type||'').toLowerCase()==='file')return {ok:false,code:'BROWSER_FILE_INPUT_NOT_ALLOWED'};const v=${txt};if(el.isContentEditable){el.textContent=v;}else if(el.tagName==='SELECT'){el.value=v;}else{const proto=el.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;const set=Object.getOwnPropertyDescriptor(proto,'value')?.set;if(set)set.call(el,v);else el.value=v;}el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return {ok:true,tag:el.tagName.toLowerCase(),type:(el.type||null)};})()`;const v=await evaluate(expr);if(!v?.ok)throw fail(v?.code??'BROWSER_FILL_FAILED');return {ok:true,filled:true,selector:req.selector,background:true,valueReturned:false};}
+  case 'click':{const sel=serializePageValue(req.selector);const expr=`(()=>{const el=document.querySelector(${sel});if(!el)return {ok:false,code:'BROWSER_SELECTOR_NOT_FOUND'};if(el.disabled)return {ok:false,code:'BROWSER_ELEMENT_DISABLED'};el.scrollIntoView({block:'center',inline:'center'});el.click();return {ok:true,tag:el.tagName.toLowerCase()};})()`;const v=await evaluate(expr);if(!v?.ok)throw fail(v?.code??'BROWSER_CLICK_FAILED');await sleep(50);return {ok:true,clicked:true,selector:req.selector,background:true,verificationRequired:true};}
+  case 'wait':{const timeout=Math.max(100,Math.min(30000,req.timeoutMs??5000)),until=Date.now()+timeout;while(Date.now()<until){let ok=false;if(req.selector!==undefined){const s=serializePageValue(req.selector);ok=await evaluate(`!!document.querySelector(${s})`);}else if(req.textIncludes!==undefined){const t=serializePageValue(req.textIncludes);ok=await evaluate(`(document.body?.innerText??'').includes(${t})`);}else if(req.urlIncludes!==undefined){const u=serializePageValue(req.urlIncludes);ok=await evaluate(`location.href.includes(${u})`);}if(ok)return {ok:true,matched:true,background:true};await sleep(75);}throw fail('BROWSER_WAIT_TIMEOUT');}
   default:throw fail('BROWSER_UNKNOWN_ACTION');
  }
 }

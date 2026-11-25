@@ -14,9 +14,11 @@ await rm(backups, { recursive: true, force: true, maxRetries: 10, retryDelay: 10
 await mkdir(root, { recursive: true });
 const ctx = {
   roots: [root],
+  accessStatus: {configuredTier:'FULL_POWER',effectiveTier:'FULL_POWER',hostExecution:{mode:'FULL_HOST_USER',hostFilesystem:true,shellAvailable:true},nativeRoot:{nonRootTokenVerified:true},nativeAdmin:{nonElevatedTokenVerified:false}},
   config: {
+    capabilityProfile: {tier:'FULL_POWER',explicitlyAuthorized:true,disabledCapabilities:[]},
     powerMode: {
-      enabled: true, fullFilesystem: false, allowShell: true,
+      enabled: true, fullFilesystem: true, allowShell: true,
       allowProcessControl: true, allowPermanentDelete: false,
       backupRoot: backups, maxFileBytes: 1024 * 1024,
       maxCommandMs: 10000, maxOutputBytes: 1024 * 1024,
@@ -41,16 +43,20 @@ assert.equal(await readFile(path.join(root, 'moved.txt'), 'utf8'), 'alpha');
 const search = await searchFiles(ctx, { path: root, pattern: 'alpha', searchContent: true, depth: 5 });
 assert.ok(search.results.some((item) => item.path.endsWith('moved.txt')));
 
-const shell = await runShell(ctx, { command: "Write-Output 'POWER_SHELL_PASS'", cwd: root, timeoutMs: 5000 });
-assert.equal(shell.exitCode, 0);
-assert.match(shell.stdout, /POWER_SHELL_PASS/);
-await assert.rejects(() => runShell(ctx, { command: 'shutdown /s', cwd: root }), /blocked by policy/);
+if (process.platform === 'win32') {
+  const shell = await runShell(ctx, { command: "Write-Output 'POWER_SHELL_PASS'", cwd: root, timeoutMs: 5000 });
+  assert.equal(shell.exitCode, 0);
+  assert.match(shell.stdout, /POWER_SHELL_PASS/);
+  await assert.rejects(() => runShell(ctx, { command: 'shutdown /s', cwd: root }), /blocked by policy/);
 
-const term = await startTerminal(ctx, { cwd: root, command: "Write-Output 'TERM_PASS'" });
-await new Promise((resolve) => setTimeout(resolve, 400));
-const termOut = await readTerminal(ctx, { id: term.id });
-assert.match(termOut.stdout, /TERM_PASS/);
-await stopTerminal(ctx, { id: term.id });
+  const term = await startTerminal(ctx, { cwd: root, command: "Write-Output 'TERM_PASS'" });
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  const termOut = await readTerminal(ctx, { id: term.id });
+  assert.match(termOut.stdout, /TERM_PASS/);
+  await stopTerminal(ctx, { id: term.id });
+} else {
+  console.log('POWER_SHELL_SMOKE_SKIP_NON_WINDOWS');
+}
 
 const deleted = await deletePath(ctx, { path: path.join(root, 'moved.txt') });
 assert.ok(deleted.backupPath);

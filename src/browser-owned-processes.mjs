@@ -1,6 +1,29 @@
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 
+// A browser launcher can exit after handing off its custom profile to a child.
+// A short grace period is allowed only when that exact profile produces its
+// DevToolsActivePort file. Nothing is attached to a personal/default profile.
+export async function waitForBrowserDevToolsPort(portFile,child,{waitMs=6000,exitGraceMs=2500,pollMs=25}={}){
+ const started=Date.now();
+ let parentExitAt=null;
+ for(;;){
+  if(fs.existsSync(portFile)){
+   const lines=fs.readFileSync(portFile,'utf8').trim().split(/\r?\n/);
+   const port=Number(lines[0]);
+   if(Number.isInteger(port)&&port>0&&port<=65535)return port;
+  }
+  const now=Date.now();
+  if(child.exitCode!==null){
+   if(parentExitAt===null)parentExitAt=now;
+   if(now-parentExitAt>=exitGraceMs)throw new Error('BROWSER_LAUNCH_FAILED');
+  }
+  if(now-started>=waitMs)break;
+  await new Promise(resolve=>setTimeout(resolve,Math.max(1,Math.min(pollMs,waitMs-(now-started)))));
+ }
+ throw new Error(child.exitCode!==null?'BROWSER_LAUNCH_FAILED':'BROWSER_DEVTOOLS_TIMEOUT');
+}
+
 export function browserProfileArgument(profileDir){
  if(typeof profileDir!=='string'||!profileDir)return null;
  return '--user-data-dir='+profileDir;

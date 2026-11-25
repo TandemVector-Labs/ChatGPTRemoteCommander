@@ -62,3 +62,10 @@ test('literal text uses Mutter clipboard plus physical keycodes, never extension
   assert.match(helper,/clipboard_owner_generation/); assert.match(helper,/clipboard_session_is_owner/);
   assert.doesNotMatch(helper,/NotifyKeyboardKeysym/);
 });
+
+test('GNOME owner window inventory reports real monitor index and frame rectangle',()=>{
+ assert.match(ext,/w\.get_monitor\(\)/);
+ assert.match(ext,/w\.get_frame_rect\(\)/);
+ assert.match(ext,/screenIndex/);
+ assert.match(ext,/bounds=\{left:rect\.x,top:rect\.y,width:rect\.width,height:rect\.height\}/);
+});

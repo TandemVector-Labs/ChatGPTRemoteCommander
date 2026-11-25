@@ -1,6 +1,34 @@
+import './browser-script-literal-security.test.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createBrowserController } from '../src/browser-tools.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+
+test('Chromium auto-discovery ignores untrusted PATH while preserving explicit owner-selected executable', {skip:process.platform!=='linux'},()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'rc-chrome-path-'));
+ try{
+  for(const name of ['google-chrome','google-chrome-stable','chromium','chromium-browser','microsoft-edge','msedge'])
+   fs.writeFileSync(path.join(dir,name),'#!/bin/sh\nexit 37\n',{mode:0o755});
+  const helper=path.resolve('tools/browser-control.mjs');
+  const probe=executable=>spawnSync(process.execPath,[helper],{
+    input:JSON.stringify({action:'status',...(executable?{executable}:{})}),encoding:'utf8',
+    timeout:10000,windowsHide:true,shell:false,
+    env:{...process.env,PATH:dir+path.delimiter+(process.env.PATH??'')}
+  });
+  const autodetected=probe();
+  assert.equal(autodetected.status,0,autodetected.stderr||autodetected.stdout);
+  const state=JSON.parse(autodetected.stdout);
+  assert.notEqual(state.executable,path.join(dir,'google-chrome'),'PATH is not browser authorization');
+  const explicit=probe(path.join(dir,'google-chrome'));
+  assert.equal(explicit.status,0,explicit.stderr||explicit.stdout);
+  assert.equal(JSON.parse(explicit.stdout).executable,path.join(dir,'google-chrome'),
+    'explicit trusted config route remains available to owner');
+ }finally{fs.rmSync(dir,{recursive:true,force:true});}
+});
+
 
 const config=()=>({instance:{profile:'default'},powerMode:{enabled:true,browserControl:{
  enabled:true,allowNavigate:true,allowInput:true,allowScreenshot:true,allowForegroundFallback:true,

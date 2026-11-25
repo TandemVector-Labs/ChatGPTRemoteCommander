@@ -22,12 +22,29 @@ const image=()=>({
 const config={config:{powerMode:{enabled:true,guiControl:{
  enabled:true,allowScreenshot:true,allowMouse:true,allowKeyboard:true,allowWindowFocus:true
 }}}};
+function fixtureTakeoverProvider(platform='win32'){
+ const providerId='fixture-native-'+platform;
+ const session={ownerPrincipal:'fixture-owner',sessionId:'fixture-session',seatId:'fixture-seat',displayId:'fixture-display',interactive:true,ownerAuthenticated:true};
+ const grant=async({ttlSeconds=60}={})=>{
+  const nowMs=Date.now();
+  return {ok:true,takeoverEvidence:{
+   provider:{providerId,platform,transport:'synthetic-test-provider',session,
+    activityEvidenceSource:'physical',activityEvidenceIncludesSynthetic:false,isolationAuthority:null,
+    capabilities:{observe:true,screenshot:true,activityDetection:true,physicalInputProtection:true,emergencyRelease:true,pointer:true,keyboard:true,semanticInvoke:true,isolatedDesktop:false}},
+   expectedSession:session,activityEvidence:{source:'physical',reliable:true,excludesSyntheticInput:true,observedAtMs:nowMs,idleMs:60000},
+   explicitOwnerApproval:false
+  },inputProtectionReceipt:{active:true,kind:'NATIVE_PHYSICAL_INPUT_PROTECTION',providerId,sessionId:session.sessionId,leaseId:'fixture-protection-lease',
+   releaseOnAgentExit:true,releaseOnEmergency:true,expiresAtMs:nowMs+ttlSeconds*1000}};
+ };
+ grant.release=async()=>({ok:true,released:true});
+ return grant;
+}
 function controller(incidentStore,{invoke=async(req)=>(req.action==='screenshot'?image():{ok:true,available:true}),platform='win32'}={}){
  let calls=0;
  const c=createGuiController({
   platform,incidentStore,token:()=>('a'.repeat(48)),isStopped:async()=>false,
   invoke:async req=>{calls++;return invoke(req);},closeInvoke:()=>{},
-  now:()=>1000
+  takeoverProvider:fixtureTakeoverProvider(platform),now:()=>1000
  });
  return {run:(name,args={})=>c.execute(config,name,args),get calls(){return calls}};
 }
@@ -72,9 +89,14 @@ test('unknown native input persists across fresh controller and never replays',(
  const status=await fresh.run('gui_status');
  assert.equal(status.uncertain,true);
  assert.equal(status.incidentPending,true);
- assert.equal(status.reason,'NATIVE_OUTCOME_UNCERTAIN_RESTART_REQUIRED');
- await assert.rejects(fresh.run('gui_session_begin',{mode:'observe'}),/GUI_OUTCOME_UNCERTAIN/);
- assert.equal(fresh.calls,0);
+ assert.equal(status.reason,'GUI_INCIDENT_REVIEW_REQUIRED');
+ assert.equal(status.readOnlyAvailable,true);
+ assert.equal(status.inputAvailable,false);
+ const lease=await fresh.run('gui_session_begin',{mode:'observe'});
+ assert.equal(lease.mode,'observe');
+ await assert.rejects(fresh.run('gui_key_press',{lease:lease.lease,frame:'ignored',keys:['A']}),/GUI_INCIDENT_REVIEW_REQUIRED/);
+ assert.equal(fresh.calls,2);
+ assert.equal(await fs.readFile(file,'utf8'),json);
 }));
 test('strong Linux pre-dispatch no-effect proof clears pending evidence without replay',()=>ownFile(async file=>{
  const store=createGuiInputIncidentStore({file});
@@ -136,9 +158,14 @@ test('real child process termination leaves private pending evidence and blocks 
  const fresh=controller(createGuiInputIncidentStore({file}));
  const status=await fresh.run('gui_status');
  assert.equal(status.available,false);
+ assert.equal(status.inputAvailable,false);
+ assert.equal(status.incidentPending,true);
  assert.equal(status.uncertain,true);
- await assert.rejects(fresh.run('gui_session_begin',{mode:'observe'}),/GUI_OUTCOME_UNCERTAIN/);
- assert.equal(fresh.calls,0);
+ const observed=await fresh.run('gui_session_begin',{mode:'observe'});
+ assert.equal(observed.mode,'observe');
+ await assert.rejects(fresh.run('gui_mouse_click',{lease:observed.lease,frame:'ignored',x:1,y:1}),/GUI_INCIDENT_REVIEW_REQUIRED/);
+ assert.equal(fresh.calls,2);
+ assert.equal((await fs.readFile(file,'utf8')).includes('PENDING_NATIVE_EFFECT'),true);
 }));
 test('read-only status and screenshot do not create a phantom incident',()=>ownFile(async file=>{
  const store=createGuiInputIncidentStore({file});

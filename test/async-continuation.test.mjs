@@ -9,14 +9,27 @@ function fixture(){
   const base=fs.mkdtempSync(path.join(os.tmpdir(),'rc-async-continuation-'));
   const state=path.join(base,'state');
   const config={instance:{profile:'test'},asyncOperations:{stateDir:state,maxOutputBytes:1024*1024}};
+  // The test spawns a real worker from the installed source tree. It must not
+  // inherit the owner's config.local.json / production executionAccess policy.
+  // A fixture-only config keeps the positive synthetic worker test isolated;
+  // the native worker still enforces required grants for actual installations.
+  const testConfigPath=path.join(base,'worker-config.json');
+  fs.writeFileSync(testConfigPath,JSON.stringify({...config,executionAccess:{required:false}}),{mode:0o600});
+  const inheritedConfigPath=process.env.REMOTE_COMMANDER_CONFIG;
+  process.env.REMOTE_COMMANDER_CONFIG=testConfigPath;
   return {base,state,config,dispose:async()=>{
     const deadline=Date.now()+3000;
-    while(true){
-      try{fs.rmSync(base,{recursive:true,force:true,maxRetries:4,retryDelay:25});return;}
-      catch(error){
-        if(!['ENOTEMPTY','EBUSY','EPERM'].includes(error?.code)||Date.now()>=deadline)throw error;
-        await new Promise(r=>setTimeout(r,25));
+    try {
+      while(true){
+        try{fs.rmSync(base,{recursive:true,force:true,maxRetries:4,retryDelay:25});return;}
+        catch(error){
+          if(!['ENOTEMPTY','EBUSY','EPERM'].includes(error?.code)||Date.now()>=deadline)throw error;
+          await new Promise(r=>setTimeout(r,25));
+        }
       }
+    } finally {
+      if(inheritedConfigPath===undefined)delete process.env.REMOTE_COMMANDER_CONFIG;
+      else process.env.REMOTE_COMMANDER_CONFIG=inheritedConfigPath;
     }
   }};
 }
@@ -50,7 +63,7 @@ test('operation terminal event triggers attached continuation without status pol
     assert.equal(started.continuationAttached,true);
     assert.equal(validated,1);
     const state=await Promise.race([terminal,timeout(4000)]);
-    assert.equal(state.status,'SUCCEEDED');
+    assert.equal(state.status,'SUCCEEDED',JSON.stringify({failureCode:state.failureCode,exitCode:state.exitCode}));
     assert.equal(state.continuation.projectId,'p1');
     assert.equal(state.continuation.eventKey,'op:req-1');
   }finally{await api.close();await f.dispose();}
@@ -75,7 +88,7 @@ test('continuation metadata is part of request idempotency identity',async()=>{
       ...input,continuation:{projectId:'p1',eventKey:'op:req-2',root:f.base,summary:'changed'}
     }),/REQUEST_ID_CONFLICT/);
     const settled=await waitTerminal(api,a.operationId);
-    assert.equal(settled.status,'SUCCEEDED');
+    assert.equal(settled.status,'SUCCEEDED',JSON.stringify({failureCode:settled.failureCode,exitCode:settled.exitCode}));
   }finally{await api.close();await f.dispose();}
 });
 
@@ -106,7 +119,7 @@ test('restart reconciliation recovers terminal continuation after watcher is gon
     });
     try{
       const state=await Promise.race([recovered,timeout(8000)]);
-      assert.equal(state.status,'SUCCEEDED');
+      assert.equal(state.status,'SUCCEEDED',JSON.stringify({failureCode:state.failureCode,exitCode:state.exitCode}));
       assert.equal(state.continuation.eventKey,'op:req-3');
     }finally{await second.close();}
   }finally{await f.dispose();}

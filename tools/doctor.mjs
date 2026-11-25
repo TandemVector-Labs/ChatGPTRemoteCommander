@@ -19,15 +19,23 @@ export function validateEndpoint(value) {
   if (!['127.0.0.1', 'localhost', '::1', '[::1]'].includes(host)) {
     throw new Error('doctor endpoint must be loopback-only');
   }
-  if (!url.pathname.endsWith('/mcp')) throw new Error('doctor endpoint path must end with /mcp');
-  return url;
+  if (url.pathname !== '/mcp') throw new Error('doctor endpoint path must be exactly /mcp');
+  if (!url.port || !Number.isSafeInteger(Number(url.port)) ||
+    Number(url.port) < 1 || Number(url.port) > 65535) {
+    throw new Error('doctor endpoint must include an explicit port');
+  }
+  const scheme = url.protocol === 'http:' ? 'http' : 'https';
+  const pinnedHost = host === '127.0.0.1' ? '127.0.0.1'
+    : host === 'localhost' ? 'localhost' : '[::1]';
+  return new URL(scheme + '://' + pinnedHost + ':' + Number(url.port) + '/mcp');
 }
 
 export function parseArgs(argv) {
-  const out = { endpoint: DEFAULT_ENDPOINT, expectedDevice: null, expectedVersion: null, configPath: null, json: false, timeoutMs: DEFAULT_TIMEOUT_MS };
+  const out = { endpoint: DEFAULT_ENDPOINT, expectedDevice: null, expectedVersion: null, configPath: null, json: false, expectAnonymousQuarantine: false, timeoutMs: DEFAULT_TIMEOUT_MS };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--json') out.json = true;
+    else if (arg === '--expect-anonymous-quarantine') out.expectAnonymousQuarantine = true;
     else if (arg === '--url') out.endpoint = argv[++i];
     else if (arg === '--expected-device') out.expectedDevice = argv[++i];
     else if (arg === '--expected-version') out.expectedVersion = argv[++i];
@@ -82,6 +90,18 @@ async function toolCall(endpoint, name, args, timeoutMs, id) {
   return result?.structuredContent ?? result;
 }
 
+function isExactTrustedTransportDenial(error) {
+  const prefix = 'HTTP 403: ';
+  if (!(error instanceof Error) || !error.message.startsWith(prefix)) return false;
+  try {
+    const body = JSON.parse(error.message.slice(prefix.length));
+    return body && typeof body === 'object' && !Array.isArray(body) &&
+      Object.keys(body).length === 1 && body.error === 'trusted_transport_required';
+  } catch {
+    return false;
+  }
+}
+
 async function fileSha256(filePath) {
   const data = await readFile(filePath);
   return createHash('sha256').update(data).digest('hex');
@@ -94,6 +114,7 @@ export async function runDoctor(options = {}) {
   const timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS;
   const checks = [];
   const warnings = [];
+  const quarantineOnly = options.expectAnonymousQuarantine === true;
   let id = 1;
 
   const health = new URL(endpoint.href);
@@ -111,9 +132,15 @@ export async function runDoctor(options = {}) {
   let status = null;
   try {
     status = await toolCall(endpoint, 'system_status', {}, timeoutMs, id++);
-    checks.push({ name: 'system_status', ok: true, detail: `${status?.deviceName || 'unknown'} / ${status?.version || 'unknown'}` });
+    if (quarantineOnly) {
+      status = null;
+      checks.push({ name: 'system_status', ok: false, detail: 'anonymous tool unexpectedly accepted' });
+    } else {
+      checks.push({ name: 'system_status', ok: true, detail: `${status?.deviceName || 'unknown'} / ${status?.version || 'unknown'}` });
+    }
   } catch (error) {
-    checks.push({ name: 'system_status', ok: false, detail: error.message });
+    const denied = quarantineOnly && isExactTrustedTransportDenial(error);
+    checks.push({ name: 'system_status', ok: denied, detail: denied ? 'HTTP 403 trusted_transport_required' : error.message });
   }
 
   let toolNames = [];
@@ -122,9 +149,15 @@ export async function runDoctor(options = {}) {
     toolNames = Array.isArray(listed?.tools) ? listed.tools.map((tool) => tool.name) : [];
     const required = ['system_status', 'list_directory', 'read_text', 'write_text', 'run_project_command'];
     const missing = required.filter((name) => !toolNames.includes(name));
-    checks.push({ name: 'tools/list', ok: missing.length === 0, detail: missing.length ? `missing: ${missing.join(', ')}` : `${toolNames.length} tools` });
+    if (quarantineOnly) {
+      toolNames = [];
+      checks.push({ name: 'tools/list', ok: false, detail: 'anonymous tool list unexpectedly accepted' });
+    } else {
+      checks.push({ name: 'tools/list', ok: missing.length === 0, detail: missing.length ? `missing: ${missing.join(', ')}` : `${toolNames.length} tools` });
+    }
   } catch (error) {
-    checks.push({ name: 'tools/list', ok: false, detail: error.message });
+    const denied = quarantineOnly && isExactTrustedTransportDenial(error);
+    checks.push({ name: 'tools/list', ok: denied, detail: denied ? 'HTTP 403 trusted_transport_required' : error.message });
   }
 
   if (status) {
@@ -145,6 +178,7 @@ export async function runDoctor(options = {}) {
   const failures = checks.filter((check) => !check.ok);
   return {
     ok: failures.length === 0,
+    qualificationScope: quarantineOnly ? 'ANONYMOUS_QUARANTINE_ONLY' : 'LEGACY_DOCTOR',
     expected: { version: expectedVersion, device: options.expectedDevice || null },
     active: status ? {
       version: status.version ?? null,
@@ -166,7 +200,7 @@ function printHuman(report) {
     console.log(`${check.ok ? 'PASS' : 'FAIL'}  ${check.name}: ${check.detail}`);
   }
   for (const warning of report.warnings) console.log(`WARN  ${warning}`);
-  console.log(report.ok ? 'REMOTE_COMMANDER_DOCTOR_PASS' : 'REMOTE_COMMANDER_DOCTOR_FAIL');
+  console.log(report.ok ? (report.qualificationScope === 'ANONYMOUS_QUARANTINE_ONLY' ? 'REMOTE_COMMANDER_QUARANTINE_ONLY_PASS' : 'REMOTE_COMMANDER_DOCTOR_PASS') : 'REMOTE_COMMANDER_DOCTOR_FAIL');
 }
 
 async function main() {
