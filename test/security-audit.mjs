@@ -38,20 +38,10 @@ const knownFixtureDiff = 'diff --git a/test/notion-mcp-engine.test.mjs b/test/no
 // commit, exact diff path/kind and full SHA256 of the source line. A real or
 // changed PEM block, a different commit, or a cross-line match still fails.
 const knownStaticPemSourceLines = new Set([
-  "07ce35da16a63b6d77883671320bccfb5b97c398|test/security-audit.mjs|+|142b22e7160ef720e82c82a9836230b43027c590fab1e08297ce65525c8e411d",
-  "0bd13b5c443171e2829d84358a82c8af09f60c1d|test/security-audit.mjs|+|142b22e7160ef720e82c82a9836230b43027c590fab1e08297ce65525c8e411d",
-  "0bd13b5c443171e2829d84358a82c8af09f60c1d|test/security-audit.mjs|-|973aa672b7a5e891977e4fb9cc188aefa3ba25770f34254a7cbe7e095a78109e",
-  "594e79ff16c66c770446a0a27f38bf1d6bb59191|vendor/jose/dist/webapi/key/import.js|+|eddc42eb6b4e168d1ca5b05a8a6504e202295ce1b94a38cff6d97ad20acf189d",
-  "c4978731c897a755f55b8610fc58be0497a636c4|test/security-audit.mjs|+|5a498e6198fbf81554859c4cacf937ad72301adddcf214de6b580eea822a38b9",
-  "cd89517c1e615eb8823214fda352efe696cf705b|test/security-audit.mjs|+|142b22e7160ef720e82c82a9836230b43027c590fab1e08297ce65525c8e411d",
-  "d890bd978b07aa738ceeef97bd6af2782538bac1|test/v2-mcp-http-ingress.test.mjs|+|daed99a1a24261bca3d705644f795724bf828846b3cc50a48459afcabcdeb8b4",
-  "d890bd978b07aa738ceeef97bd6af2782538bac1|test/v2-mcp-http-ingress.test.mjs|+|44fd70c690bfb9f473ffe7a55d3d44de55930dd7de1869eec36bf62dbfff9c9e",
   "eea2acb9b1c24e6417692b0cac23f32a5298e271|test/security-audit.mjs|+|142b22e7160ef720e82c82a9836230b43027c590fab1e08297ce65525c8e411d",
   "eea2acb9b1c24e6417692b0cac23f32a5298e271|test/v101-linux-v2-candidate-host.test.mjs|+|20ae3d60c456784c869392956eb2504587276c29ad7e1a8a732f37564a034882",
   "eea2acb9b1c24e6417692b0cac23f32a5298e271|test/v101-linux-v2-candidate-host.test.mjs|+|bfc914b72cca2e161edc8063f0c8639ec18e44811d76d020829afaf02823d6d1",
   "eea2acb9b1c24e6417692b0cac23f32a5298e271|vendor/jose/dist/webapi/key/import.js|+|eddc42eb6b4e168d1ca5b05a8a6504e202295ce1b94a38cff6d97ad20acf189d",
-  "f31392c127e682762988b5bee70164752208b176|test/v101-linux-v2-candidate-host.test.mjs|+|20ae3d60c456784c869392956eb2504587276c29ad7e1a8a732f37564a034882",
-  "f31392c127e682762988b5bee70164752208b176|test/v101-linux-v2-candidate-host.test.mjs|+|bfc914b72cca2e161edc8063f0c8639ec18e44811d76d020829afaf02823d6d1"
 ]);
 function makeHistoryScanner(rules) {
   const hits = new Set(), recognized = new Set(), recognizedStaticPem = new Set();
