@@ -17,7 +17,8 @@ permissions:
   contents: read
 
 env:
-  RC_SOURCE_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
+  # Fetch the immutable object SHA: the organization review branch may not exist at the canonical personal origin.
+  RC_SOURCE_REF: ${{ github.event.pull_request.head.sha || github.sha }}
   RC_EXPECTED_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
 
 jobs:
@@ -69,6 +70,8 @@ jobs:
           }
 
   linux-clean-container:
+    # Match the Windows bootstrap trust boundary: never execute fork PR installers.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
