@@ -76,3 +76,26 @@ test('tokens from different file diffs must not combine',()=>{
   assert.equal(r.status,0,'audit unexpectedly failed: '+r.stderr);
   assert.match(r.stdout,/SECURITY_AUDIT_PASS/);
 });
+
+const syntheticPemHeader = '-----BEGIN ' + 'PRIVATE KEY-----';
+test('historical unknown inline PEM marker is still a finding',()=>{
+  const r=fixture(cwd=>{
+    git(cwd,'branch','clean');
+    writeFileSync(join(cwd,'untrusted.js'),"const literal = '" + syntheticPemHeader + "';\n");
+    git(cwd,'add','untrusted.js');git(cwd,'commit','-qm','unknown PEM source literal');
+    git(cwd,'switch','-q','clean');
+  });
+  assert.equal(r.status,1);
+  assert.match(r.stderr,/"scope":"HISTORY","type":"Private key block"/);
+});
+test('historical full PEM block is never excluded by source syntax pinning',()=>{
+  const r=fixture(cwd=>{
+    git(cwd,'branch','clean');
+    writeFileSync(join(cwd,'sample.txt'),syntheticPemHeader+'\n'+'A'.repeat(192)+'\n'+syntheticPemHeader.replace('BEGIN','END')+'\n');
+    git(cwd,'add','sample.txt');git(cwd,'commit','-qm','synthetic PEM block security regression');
+    git(cwd,'switch','-q','clean');
+  });
+  assert.equal(r.status,1);
+  assert.match(r.stderr,/"scope":"HISTORY","type":"Private key block"/);
+});
+
