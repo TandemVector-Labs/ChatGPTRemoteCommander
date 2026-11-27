@@ -10,6 +10,7 @@ import path from 'node:path';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { canonicalizeRoots } from './security-v0.3.mjs';
+import { readBoundHostConfiguration } from './file-write-guard.mjs';
 import { audit, listDirectory, prepareProjectCommand, readText, runProjectCommand, writeText } from './tools-v0.3.mjs';
 import { executePowerTool, powerToolDefinitions, prepareDeferredPowerMutation, prepareShellCommand } from './power-tools-v0.3.mjs';
 import { executeGuiTool, guiToolDefinitions } from './gui-tools-windows.mjs';
@@ -53,11 +54,10 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const projectDir = path.resolve(here, '..');
 const defaultConfigPath = path.join(projectDir, 'config.json');
 const localConfigPath = path.join(projectDir, 'config.local.json');
-let configPath = process.env.REMOTE_COMMANDER_CONFIG || defaultConfigPath;
-if (!process.env.REMOTE_COMMANDER_CONFIG) {
-  try { await readFile(localConfigPath, 'utf8'); configPath = localConfigPath; } catch { /* safe public config fallback */ }
-}
-const configRaw = await readFile(configPath, 'utf8');
+const { configPath, configRaw } = await readBoundHostConfiguration({
+  explicitConfigPath: process.env.REMOTE_COMMANDER_CONFIG,
+  defaultConfigPath, localConfigPath
+});
 const configSha256 = createHash('sha256').update(configRaw).digest('hex');
 const config = JSON.parse(configRaw);
 const readWindowsAdminToken = async () => process.platform === 'win32'

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Read-only KWin scripting metadata; no capture, focus, or input operations."""
 import json
+import math
 import os
 import re
 import secrets
@@ -27,13 +28,18 @@ def validate_metadata(data):
 
     for rect in data["screens"]:
         valid_rect(rect)
-    if not isinstance(data.get("cursor"),dict) or any(type(data["cursor"].get(k)) not in (int,float) for k in ("x","y")):
+    def finite_coordinate(value):
+        return type(value) is int or (type(value) is float and math.isfinite(value))
+
+    if not isinstance(data.get("cursor"),dict) or any(not finite_coordinate(data["cursor"].get(k)) for k in ("x","y")):
         raise MetadataError("KDE_CURSOR_INVALID")
 
     # An idle KDE/X11 desktop may legitimately have NO active foreground window.
     # This is read-only status, NEVER authority to capture or send GUI input.
     if data.get("foreground")=="" and data.get("processId")==0 and \
        data.get("windowBounds") is None and data.get("clientBounds") is None:
+        if type(data.get("processId")) is not int:
+            raise MetadataError("KDE_FOREGROUND_PID_INVALID")
         return {**data,"activeWindowPresent":False}
 
     valid_rect(data.get("windowBounds"))

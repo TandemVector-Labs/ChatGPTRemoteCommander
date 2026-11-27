@@ -18,7 +18,7 @@ export function normalizeRoots(roots) {
   return roots.map((root) => path.resolve(root));
 }
 
-function isWithinCanonical(candidate, roots) {
+export function isWithinCanonical(candidate, roots) {
   const target = comparePath(candidate);
   return roots.some((root) => {
     const base = comparePath(root);
@@ -66,7 +66,7 @@ export function lexicalPath(userPath, roots, base = roots[0]) {
 export async function safeExistingPath(userPath, roots, base) {
   const candidate = lexicalPath(userPath, roots, base);
   const resolved = await realpath(candidate);
-  if (!isWithin(resolved, roots)) throw new Error('resolved path escapes allowed roots');
+  if (!isWithinCanonical(resolved, roots)) throw new Error('resolved path escapes allowed roots');
   return resolved;
 }
 export async function safeWritablePath(userPath, roots, base) {
@@ -75,13 +75,13 @@ export async function safeWritablePath(userPath, roots, base) {
     const info = await lstat(candidate);
     if (info.isSymbolicLink()) throw new Error('symbolic-link writes are not allowed');
     const resolved = await realpath(candidate);
-    if (!isWithin(resolved, roots)) throw new Error('resolved path escapes allowed roots');
+    if (!isWithinCanonical(resolved, roots)) throw new Error('resolved path escapes allowed roots');
     return candidate;
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
   }
   const parent = await realpath(path.dirname(candidate));
-  if (!isWithin(parent, roots)) throw new Error('parent path escapes allowed roots');
+  if (!isWithinCanonical(parent, roots)) throw new Error('parent path escapes allowed roots');
   return candidate;
 }
 

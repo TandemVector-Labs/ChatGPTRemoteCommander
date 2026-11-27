@@ -2,7 +2,7 @@ import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { createAsyncOperationTools } from '../src/async-operations.mjs';
@@ -114,6 +114,45 @@ test('large output is file-backed and inline result stays bounded', async () => 
     assert.equal(result.result.stdout.truncated, true);
     assert.equal(Buffer.byteLength(result.stdoutTail), 1024);
     assert.ok(JSON.stringify(result).length < 10000);
+  });
+});
+
+test('operation result tail handles short reads and early EOF without invented bytes', async (t) => {
+  await withManager(async ({ manager }) => {
+    const marker = 'tail-fixture-1234567';
+    const started = await manager.execute('operation_start', {
+      requestId: 'short-tail-read', tool: 'run_project_command',
+      arguments: { argv: ['sleep', '1', marker] }
+    });
+    await waitFor(manager, started.operationId);
+    const input = { operationId: started.operationId, tailBytes: 1024 };
+    const baseline = await manager.execute('operation_result', input);
+    assert.equal(baseline.stdoutTail, marker);
+    const probe = await open(baseline.result.stdout.path, 'r');
+    const proto = Object.getPrototypeOf(probe);
+    const original = proto.read;
+    await probe.close();
+    let earlyEof = false;
+    let reads = 0;
+    const mock = t.mock.method(proto, 'read', function(buffer, offset, length, position) {
+      if (Buffer.isBuffer(buffer) && buffer.length === Buffer.byteLength(marker) &&
+          Number.isInteger(position) && Number.isInteger(length)) {
+        reads += 1;
+        if (earlyEof && position > 0) return Promise.resolve({ bytesRead: 0, buffer });
+        return original.call(this, buffer, offset, Math.min(3, length), position);
+      }
+      return original.apply(this, arguments);
+    });
+    try {
+      const short = await manager.execute('operation_result', input);
+      assert.equal(short.stdoutTail, marker);
+      assert.ok(reads > 1, 'fixture must perform multiple reads');
+      earlyEof = true;
+      reads = 0;
+      const truncated = await manager.execute('operation_result', input);
+      assert.equal(truncated.stdoutTail, marker.slice(0, 3));
+      assert.equal(reads, 2, 'fixture must encounter early EOF');
+    } finally { mock.mock.restore(); }
   });
 });
 

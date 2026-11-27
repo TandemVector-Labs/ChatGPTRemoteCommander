@@ -891,3 +891,42 @@ test('Linux qualification preserves a pinned user-local Node PATH instead of lau
     fs.rmSync(temp,{recursive:true,force:true});
   }
 });
+
+test('R470 check failure emits bounded counts and contiguous unfinished phase without raw log names',{
+  skip:process.platform!=='win32'
+},t=>{
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'rc-r470-check-fixture-'));
+  t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+  const commit='a'.repeat(40);
+  const probe=(name,lines)=>{
+    const temp=path.join(dir,name);
+    const logs=path.join(temp,'STATE','ChatGPTRemoteCommander','update-logs');
+    fs.mkdirSync(logs,{recursive:true});
+    fs.writeFileSync(path.join(logs,'qualification-output-qualification-check-'+commit.slice(0,12)+'-fixture.stdout.log'),lines.join('\n')+'\n');
+    const run=spawnSync('pwsh.exe',['-NoLogo','-NoProfile','-NonInteractive','-File',
+      path.join(root,'tools/diagnose-updater-gate-r470.ps1'),'-Root',temp,'-ExpectedCommit',commit],
+      {encoding:'utf8',timeout:15000});
+    assert.equal(run.status,0,run.error?.message||run.stderr);
+    const report=JSON.parse(fs.readFileSync(path.join(temp,'DIAGNOSTIC_R470.json'),'utf8'));
+    assert.equal(report.failedGate,'check');
+    assert.doesNotMatch(run.stdout,/synthetic-private-name|fixture-secret-123|STATE[\\/]/);
+    return {report,out:run.stdout};
+  };
+  const phases=Array.from({length:100},(_,i)=>{
+    const index=String(i).padStart(2,'0');
+    return ['RC_QUAL_PHASE_START_'+index,'RC_QUAL_PHASE_PASS_'+index];
+  }).flat();
+  const valid=probe('valid',[...phases,'RC_QUAL_PHASE_START_100','\u2716 synthetic-private-name (1ms)',
+    '\u2139 fail 1','fixture-secret-123']);
+  assert.match(valid.out,/R470_SAFE_CHECK_SUMMARY_KIND=SPEC_SUMMARY_EXTRACTED/);
+  assert.match(valid.out,/R470_SAFE_SPEC_FAIL_COUNT=1(?:\r?\n)/);
+  assert.match(valid.out,/R470_SAFE_FAILURE_PHASE=100(?:\r?\n)/);
+  assert.equal(valid.report.failurePhaseIndex,100);
+  const invalid=probe('invalid',['RC_QUAL_PHASE_START_00','RC_QUAL_PHASE_PASS_00',
+    'RC_QUAL_PHASE_START_02','\u2139 fail 1']);
+  assert.equal(invalid.report.failurePhaseIndex,null);
+  assert.doesNotMatch(invalid.out,/R470_SAFE_FAILURE_PHASE=/);
+  const noPhase=probe('no-phase',['# fail 1','not ok 1 - synthetic-private-name','fixture-secret-123']);
+  assert.match(noPhase.out,/R470_SAFE_TAP_FAIL_COUNT=1(?:\r?\n)/);
+  assert.doesNotMatch(noPhase.out,/R470_SAFE_FAILURE_PHASE=/);
+});

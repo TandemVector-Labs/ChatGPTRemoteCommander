@@ -37,6 +37,78 @@ test('Windows exact owner selector has no default or cross-profile credential fa
  }finally{fs.rmSync(home,{recursive:true,force:true});}
 });
 
+for(const kind of ['Windows','Linux']){
+ test(kind+' profile preflight rejects changed descriptor and bounds read before parsing', {
+  skip:kind==='Linux'&&process.platform!=='linux'
+ },()=>{
+  const home=fs.mkdtempSync(path.join(os.tmpdir(),'rc012-profile-read-contract-'));
+  const directory=kind==='Windows'?path.join(home,'tunnel-client'):path.join(home,'.config','tunnel-client');
+  const file=path.join(directory,'fixture.yaml');
+  const yaml=port=>['mcp:','  server_urls:','    - channel: main',
+    '      url: "http://127.0.0.1:'+port+'/mcp"'].join('\n');
+  const read=()=>kind==='Windows'
+    ?readWindowsOwnerTunnelBinding({appData:home,profileName:'fixture'})
+    :readLinuxOwnerTunnelBinding({home,ownerUid:process.getuid(),profileName:'fixture'});
+  const write=()=>fs.writeFileSync(file,yaml(48833),{mode:0o600});
+  const originalOpen=fs.openSync,originalReadFile=fs.readFileSync,originalRead=fs.readSync;
+  const invalid={profilePresent:true,valid:false};
+  try{
+   fs.mkdirSync(directory,{recursive:true,mode:0o700});
+   write();
+   assert.deepEqual(read(),{profilePresent:true,valid:true,port:48833,tls:false});
+   let swapped=false,bytes=0,pathReads=0;
+   fs.openSync=function(target,...args){
+    if(target===file&&!swapped){
+     swapped=true;
+     fs.renameSync(file,file+'.original');
+     fs.writeFileSync(file,yaml(48834),{mode:0o600});
+    }
+    return originalOpen.call(this,target,...args);
+   };
+   fs.readFileSync=function(target,...args){
+    if(target===file)pathReads++;
+    return originalReadFile.call(this,target,...args);
+   };
+   fs.readSync=function(fd,buffer,offset,length,position){
+    const n=originalRead.call(this,fd,buffer,offset,length,position);
+    bytes+=n;return n;
+   };
+   const replaced=read();
+   assert.equal(swapped,true);
+   assert.deepEqual(replaced,invalid);
+   assert.equal(pathReads,0,'unbound path read must not occur');
+   assert.equal(bytes,0,'changed inode must be refused before reading');
+   fs.openSync=originalOpen;fs.readFileSync=originalReadFile;fs.readSync=originalRead;
+   fs.unlinkSync(file);fs.renameSync(file+'.original',file);
+   // Grow a validated file immediately after open, before reading.
+   let grown=false;
+   fs.openSync=function(target,...args){
+    const fd=originalOpen.call(this,target,...args);
+    if(target===file&&!grown){
+     grown=true;fs.appendFileSync(file,'#'+'x'.repeat(20000));
+    }
+    return fd;
+   };
+   bytes=0;
+   fs.readSync=function(fd,buffer,offset,length,position){
+    const n=originalRead.call(this,fd,buffer,offset,length,position);bytes+=n;return n;
+   };
+   assert.deepEqual(read(),invalid);
+   assert.equal(grown,true);assert.equal(bytes,0);
+   fs.openSync=originalOpen;fs.readSync=originalRead;
+   write();
+   // Short reads of a stable descriptor must still decode the complete YAML.
+   fs.readSync=function(fd,buffer,offset,length,position){
+    return originalRead.call(this,fd,buffer,offset,Math.min(length,3),position);
+   };
+   assert.deepEqual(read(),{profilePresent:true,valid:true,port:48833,tls:false});
+  }finally{
+   fs.openSync=originalOpen;fs.readFileSync=originalReadFile;fs.readSync=originalRead;
+   fs.rmSync(home,{recursive:true,force:true});
+  }
+ });
+}
+
 test('owner-local legacy Commander tunnels are discovered by executable identity, not host names',()=>{
  const home='/home/owner';
  const unit='profile-A-tunnel.service';

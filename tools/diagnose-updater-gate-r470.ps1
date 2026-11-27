@@ -17,6 +17,7 @@ $specNames=@()
 $specTotals=@{}
 $phaseStarted=@()
 $phasePassed=@()
+$phaseSequenceValid=$true
 $failedPhaseIndex=$null
 $nativeTokenProbe=$null
 $httpQuarantine=$null
@@ -113,10 +114,14 @@ if(Test-Path -LiteralPath $logRoot -PathType Container){
         } elseif($line -match '^R157_ASYNC_HTTP_QUARANTINE=(true|false)$'){
           $httpQuarantine=([string]$Matches[1] -eq 'true')
         }
-        if($line -match '^RC_QUAL_PHASE_START_([0-9]{2})\s*$'){
-          if($phaseStarted.Count -lt 90){$phaseStarted+=([int]$Matches[1])}
-        } elseif($line -match '^RC_QUAL_PHASE_PASS_([0-9]{2})\s*$'){
-          if($phasePassed.Count -lt 90){$phasePassed+=([int]$Matches[1])}
+        if($line -match '^RC_QUAL_PHASE_START_([0-9]{2,3})\s*$'){
+          $index=[int]$Matches[1]
+          if($index -ne $phaseStarted.Count -or $phaseStarted.Count -ne $phasePassed.Count -or $index -ge 160){$phaseSequenceValid=$false}
+          if($phaseStarted.Count -lt 160){$phaseStarted+=$index}
+        } elseif($line -match '^RC_QUAL_PHASE_PASS_([0-9]{2,3})\s*$'){
+          $index=[int]$Matches[1]
+          if($index -ne $phasePassed.Count -or $phaseStarted.Count -ne ($phasePassed.Count+1) -or $index -ge 160){$phaseSequenceValid=$false}
+          if($phasePassed.Count -lt 160){$phasePassed+=$index}
         } elseif($line -match '^\s*not ok\s+([0-9]+)\s+-\s+([^\r\n]+)$'){
           $number=[int]$Matches[1]
           $label=[string]$Matches[2]
@@ -143,18 +148,19 @@ if(Test-Path -LiteralPath $logRoot -PathType Container){
           if($types.Count -lt 20){$types+=([string]$Matches[1])}
         }
       }
+      # Numeric phase evidence is independent of TAP/spec summaries.
+      if($phaseSequenceValid -and $phaseStarted.Count -eq ($phasePassed.Count+1)){
+        $failedPhaseIndex=[int]$phaseStarted[-1]
+      }
       if($failures.Count -gt 0 -or $types.Count -gt 0 -or
           ($totals.ContainsKey('fail') -and [double]$totals['fail'] -gt 0)){
         $status='TAP_SUMMARY_EXTRACTED'
       } elseif($specNames.Count -gt 0 -or ($specTotals.ContainsKey('fail') -and [double]$specTotals['fail'] -gt 0)){
         $status='SPEC_SUMMARY_EXTRACTED'
       } elseif($phaseStarted.Count -gt 0){
-        $lastStarted=[int]$phaseStarted[-1]
-        if($phasePassed.Count -eq ($phaseStarted.Count-1) -and
-           ($phasePassed -notcontains $lastStarted)){
-          $failedPhaseIndex=$lastStarted
+        if($null -ne $failedPhaseIndex){
           $status='NON_TAP_FAILURE_PHASE_IDENTIFIED'
-        } elseif($phasePassed.Count -eq $phaseStarted.Count){
+        } elseif($phaseSequenceValid -and $phasePassed.Count -eq $phaseStarted.Count){
           $status='FAILURE_OUTSIDE_MARKED_PHASES'
         } else {
           $status='PHASE_MARKERS_AMBIGUOUS'
@@ -186,6 +192,12 @@ Write-Output ('R470_DIAG_SHA256='+(Get-FileHash -LiteralPath $out -Algorithm SHA
 # The hosted updater hides raw qualification output to avoid leaking keys.
 # Report only the already redacted bounded test names and numerical counts,
 # so a fresh CI failure has a decision-grade, non-secret root-cause signal.
+if($failedGate -eq 'check'){
+  Write-Output ('R470_SAFE_CHECK_SUMMARY_KIND='+$status)
+  if($specTotals.ContainsKey('fail')){Write-Output ('R470_SAFE_SPEC_FAIL_COUNT='+$specTotals['fail'])}
+  if($totals.ContainsKey('fail')){Write-Output ('R470_SAFE_TAP_FAIL_COUNT='+$totals['fail'])}
+  if($null -ne $failedPhaseIndex){Write-Output ('R470_SAFE_FAILURE_PHASE='+$failedPhaseIndex)}
+}
 if($failedGate -eq 'test'){
   Write-Output ('R470_SAFE_TEST_SUMMARY_KIND='+$status)
   if($specTotals.ContainsKey('fail')){

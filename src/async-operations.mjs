@@ -52,13 +52,19 @@ function alive(pid) {
 async function tailText(target, maxBytes) {
   if (!maxBytes) return '';
   try {
-    const info = await stat(target);
-    const start = Math.max(0, info.size - maxBytes);
     const handle = await open(target, 'r');
     try {
+      // Size and bytes must describe the same open file, not two path lookups.
+      const info = await handle.stat();
+      const start = Math.max(0, info.size - maxBytes);
       const buffer = Buffer.alloc(info.size - start);
-      await handle.read(buffer, 0, buffer.length, start);
-      return buffer.toString('utf8');
+      let offset = 0;
+      while (offset < buffer.length) {
+        const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, start + offset);
+        if (bytesRead === 0) break;
+        offset += bytesRead;
+      }
+      return buffer.subarray(0, offset).toString('utf8');
     } finally {
       await handle.close();
     }
