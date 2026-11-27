@@ -19,7 +19,7 @@ jobs:
           - scope: parent-231
             sha: 819fa3da227d8e737520fb37388bccda1c1b66fd
           - scope: candidate-235
-            sha: 18b0b59a9613c41e1bf2572e56d7e735d351ae9d
+            sha: f9c8864c7cc89e08ae1646afff7696aa220a74e0
     steps:
       - name: Exact immutable public source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
