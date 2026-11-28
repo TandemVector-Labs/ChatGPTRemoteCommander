@@ -194,7 +194,13 @@ export function createTransferMeshTools({ config = {}, receiptAuthority = null }
           peerAlias: args.peer, transferId: args.id, challenge, artifact
         });
       }
-      cmd = ['receive','--peer',args.peer,'--id',args.id,'--dest',dest];
+      // Carry Core's admitted directory identity across the child boundary.
+      // This does not hold a native directory handle across later writes.
+      const approved=fs.lstatSync(dest,{bigint:true});
+      if(!approved.isDirectory()||approved.isSymbolicLink())
+        throw new Error('TRANSFER_DEST_NOT_DIRECTORY');
+      cmd=['receive','--peer',args.peer,'--id',args.id,'--dest',dest,
+        '--dest-dev',String(approved.dev),'--dest-ino',String(approved.ino)];
     }
     if (name === 'transfer_mesh_enqueue') {
       if (!PEERS.includes(args.peer) || !ID_PATTERN.test(args.id)) throw new Error('TRANSFER_ARGS_INVALID');

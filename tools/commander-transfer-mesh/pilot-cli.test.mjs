@@ -43,6 +43,7 @@ test('send -> mirror -> receive validates bytes and hash and no overwrite',()=>{
   const st=run(dst,'status','--peer','PC','--id','test-hash-001');
   assert.equal(JSON.parse(st.stdout).status,'RECEIVED_HASH_VERIFIED');
   const dest=path.join(dst,'inbox');
+  fs.mkdirSync(dest);
   const recv=run(dst,'receive','--peer','PC','--id','test-hash-001','--dest',dest);
   assert.equal(recv.status,0,recv.stderr);
   assert.deepEqual(fs.readFileSync(path.join(dest,'sample.bin')),input);
@@ -236,6 +237,7 @@ test('fifth MMZ peer uses the existing authenticated transfer contract without o
   assert.equal(observed.status,0,observed.stderr);
   assert.equal(JSON.parse(observed.stdout).status,'RECEIVED_HASH_VERIFIED');
   const output=path.join(dst,'inbox');
+  fs.mkdirSync(output);
   const delivered=run(dst,'receive','--peer','MMZ','--id',id,'--dest',output);
   assert.equal(delivered.status,0,delivered.stderr);
   assert.equal(JSON.parse(delivered.stdout).status,'DELIVERED_HASH_VERIFIED');
