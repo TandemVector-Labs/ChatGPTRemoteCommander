@@ -145,7 +145,15 @@ try{
        if(cmd==='status')json({status:'RECEIVED_HASH_VERIFIED',...m});
        else{
          const dest=path.resolve(arg('dest',path.join(root,'received')));
-         fs.mkdirSync(dest,{recursive:true});
+         // Caller must provision a real destination before any writes; do not
+         // create untrusted ancestors before a pinned-directory security layer.
+         let destinationStat;
+         try{destinationStat=fs.lstatSync(dest);}catch(e){
+           if(e.code==='ENOENT')fail('DESTINATION_MUST_EXIST');
+           throw e;
+         }
+         if(!destinationStat.isDirectory()||destinationStat.isSymbolicLink())
+           fail('DESTINATION_NOT_DIRECTORY');
          const target=path.join(dest,m.name);
          if(fs.existsSync(target))fail('Destination exists; overwrite forbidden');
          const part=path.join(dest,'.ctmesh-'+id+'.part');
