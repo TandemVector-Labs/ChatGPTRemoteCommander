@@ -62,6 +62,15 @@ jobs:
       - name: Reject specialist payloads in public Release ZIPs (negative fixtures)
         if: runner.os == 'Linux'
         run: python3 tools/check-public-release-boundary.py --self-test
+      - name: Verify native destination security regressions
+        run: >-
+          node --test --test-concurrency=1
+          test/transfer-direct-dest-prepin-20261023.test.mjs
+          test/transfer-dest-identity-cross-process-20261128.test.mjs
+          test/transfer-dest-guard-contract-20261023.test.mjs
+          test/transfer-dest-guard-active-20261023.test.mjs
+          test/transfer-dest-swap-red-probe-20261023.test.mjs
+          test/transfer-dest-native-postcheck-race-20261128.test.mjs
       - name: Run qualification check with bounded Windows file concurrency
         if: runner.os == 'Windows'
         run: node tools/run-bounded-test-script.mjs --script check --concurrency 1 --prioritize-sensitive 1
