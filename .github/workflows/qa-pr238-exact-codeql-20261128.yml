@@ -101,4 +101,41 @@ jobs:
           assert sum(by_file.values())==sum(counts[r] for r in watch_rules)
           print('CODEQL_WATCH_BY_FILE',json.dumps(sorted((p,r,c) for (p,r),c in by_file.items())))
           print('CODEQL_FOCUS_IDENTITIES',json.dumps(sorted(identities,key=lambda x:json.dumps(x))))
+          # Bounded metadata-only taint routes for three NEW read guards.
+          guarded={
+              'b73ebde5e86f4389a0693f06e8e10831057e53db7f5a7ecf0c432e932ee04068':'lstat-precheck',
+              '42a5b26e7ccbe6139358a88ed8ca515b10403b543e4a5773c3d77e15d3c27ad7':'exists-pinned-target',
+              '232a8ec1b949e1a96132a8d6d307d7b075787e9f6555620fce7dad1a88869f51':'lstat-postcheck'
+          }
+          flow_evidence=[]
+          for f in files:
+              for sarif_run in json.loads(f.read_text(encoding='utf8')).get('runs',[]):
+                  for finding in sarif_run.get('results',[]):
+                      if finding.get('ruleId')!='js/path-injection':
+                          continue
+                      locations=finding.get('locations',[])
+                      physical=locations[0].get('physicalLocation',{}) if locations else {}
+                      if relative(physical.get('artifactLocation',{}).get('uri',''))!='tools/commander-transfer-mesh/pilot-cli.mjs':
+                          continue
+                      prints=finding.get('partialFingerprints',{}) or finding.get('fingerprints',{})
+                      identity=hashlib.sha256(json.dumps(prints,sort_keys=True).encode()).hexdigest() if prints else None
+                      if identity not in guarded:
+                          continue
+                      flows=[]
+                      for codeflow in finding.get('codeFlows',[])[:2]:
+                          for thread in codeflow.get('threadFlows',[])[:2]:
+                              locs=thread.get('locations',[])
+                              nodes=[]
+                              for point in locs[:20]:
+                                  loc=point.get('location',{}).get('physicalLocation',{})
+                                  region=loc.get('region',{})
+                                  nodes.append([relative(loc.get('artifactLocation',{}).get('uri','')),
+                                      region.get('startLine'),region.get('startColumn')])
+                              flows.append({'nodes':nodes,'length':len(locs)})
+                      flow_evidence.append({'guard':guarded[identity],
+                           'sinkLine':physical.get('region',{}).get('startLine'),
+                           'codeflowCount':len(finding.get('codeFlows',[])),
+                           'flows':flows})
+          assert len(flow_evidence)==(3 if '${{ matrix.scope }}'=='candidate-238' else 0),flow_evidence
+          print('CODEQL_NEW_GUARD_FLOWS',json.dumps(sorted(flow_evidence,key=lambda x:x['guard'])))
           PY
