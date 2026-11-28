@@ -32,7 +32,21 @@ function verifyDest(file,identity){
  if(!s.isDirectory()||s.isSymbolicLink()||
     (identity&&(s.dev!==identity.dev||s.ino!==identity.ino)))fail('DESTINATION_IDENTITY_CHANGED');
 }
-async function withPinnedDest(dest,identity,fn){
+// Linux strict mode is opt-in: the pinned directory's ancestors must have
+// trusted root-owned parents, with no group/other write bit. Otherwise a
+// same-UID actor can rename the approved inode even while its fd is held.
+// A root-capable adversary / mount-namespace administrator remains out of scope.
+function assertTrustedLinuxAncestry(fds){
+ if(process.platform!=='linux'||typeof process.geteuid!=='function'||process.geteuid()===0)
+  fail('DESTINATION_TRUSTED_LINUX_ANCESTRY_UNSUPPORTED');
+ if(fds.length<2)fail('DESTINATION_TRUSTED_LINUX_ANCESTRY_REQUIRED');
+ for(const fd of fds.slice(0,-1)){
+  const st=fs.fstatSync(fd,{bigint:true});
+  if(!st.isDirectory()||st.uid!==0n||(st.mode&0o022n)!==0n)
+   fail('DESTINATION_TRUSTED_LINUX_ANCESTRY_REQUIRED');
+ }
+}
+async function withPinnedDest(dest,identity,fn,requireTrustedLinuxAncestry=false){
  if(process.platform==='linux'){
   const flags=fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_NOFOLLOW,fds=[];
   try{
@@ -48,9 +62,11 @@ async function withPinnedDest(dest,identity,fn){
    const opened=fs.fstatSync(fds.at(-1),{bigint:true});
    if(!opened.isDirectory()||(identity&&(opened.dev!==identity.dev||opened.ino!==identity.ino)))
     fail('DESTINATION_IDENTITY_CHANGED');
+   if(requireTrustedLinuxAncestry)assertTrustedLinuxAncestry(fds);
    return await fn(pinned);
   }finally{for(let i=fds.length-1;i>=0;i--)fs.closeSync(fds[i]);}
  }
+ if(requireTrustedLinuxAncestry)fail('DESTINATION_TRUSTED_LINUX_ANCESTRY_UNSUPPORTED');
  if(process.platform!=='win32')fail('DESTINATION_PIN_UNSUPPORTED_PLATFORM');
  const {spawn}=await import('node:child_process');
  const child=spawn('pwsh.exe',['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',WIN_DEST_PIN_SCRIPT_B64],{
@@ -227,6 +243,9 @@ try{
            fail('DESTINATION_IDENTITY_CHANGED');
          if(!destinationStat.isDirectory()||destinationStat.isSymbolicLink())
            fail('DESTINATION_NOT_DIRECTORY');
+         const strictLinuxAncestry=arg('require-trusted-linux-ancestry');
+         if(strictLinuxAncestry!==undefined&&strictLinuxAncestry!=='1')
+          fail('DESTINATION_TRUSTED_LINUX_ANCESTRY_OPTION_INVALID');
          await withPinnedDest(dest,admitted,async pinnedDest=>{
          const target=path.join(pinnedDest,m.name);
          if(fs.existsSync(target))fail('Destination exists; overwrite forbidden');
@@ -251,7 +270,7 @@ try{
            fail('DESTINATION_IDENTITY_CHANGED');
          json({status:'DELIVERED_HASH_VERIFIED',id,path:path.join(dest,m.name),bytes:m.bytes,sha256:m.sha256,
            resumedBytes});
-         });
+         },strictLinuxAncestry==='1');
        }
      }
    }else fail('Valid commands: info | send --peer DEVICE --path FILE | status/receive --peer DEVICE --id TRANSFER [--dest DIR]');

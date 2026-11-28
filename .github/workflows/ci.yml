@@ -71,6 +71,22 @@ jobs:
           test/transfer-dest-guard-active-20261023.test.mjs
           test/transfer-dest-swap-red-probe-20261023.test.mjs
           test/transfer-dest-native-postcheck-race-20261128.test.mjs
+      - name: Verify opt-in trusted Linux receive ancestry fail-closed contract
+        run: node --test --test-concurrency=1 test/transfer-trusted-linux-ancestry-20261128.test.mjs
+      - name: Verify Linux trusted ancestry with an independently owned parent
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+          parent="/var/lib/ctmesh-trusted-qa-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          test ! -e "$parent"
+          cleanup() { sudo rmdir -- "$parent/admitted" "$parent" 2>/dev/null || :; }
+          trap cleanup EXIT
+          sudo install -d -m 0755 -o root -g root -- "$parent"
+          sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" -- "$parent/admitted"
+          TVL_TRUSTED_ANCESTRY_PARENT="$parent" node --test --test-concurrency=1             --test-name-pattern='Linux strict ancestry permits root-managed parent'             test/transfer-trusted-linux-ancestry-20261128.test.mjs
       - name: Run qualification check with bounded Windows file concurrency
         if: runner.os == 'Windows'
         run: node tools/run-bounded-test-script.mjs --script check --concurrency 1 --prioritize-sensitive 1

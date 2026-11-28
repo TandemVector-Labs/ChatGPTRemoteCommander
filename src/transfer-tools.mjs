@@ -90,6 +90,8 @@ function readBoundedJson(target, maxBytes = 65536) {
 export function createTransferMeshTools({ config = {}, receiptAuthority = null } = {}) {
   const policy = config.transferMesh || {};
   if (policy.enabled !== true || config.powerMode?.enabled !== true) return { enabled: false, definitions: [], execute: async () => { throw new Error('TRANSFER_MESH_DISABLED'); } };
+  if(policy.requireTrustedLinuxAncestry!==undefined&&typeof policy.requireTrustedLinuxAncestry!=='boolean')
+    throw new Error('TRANSFER_TRUSTED_LINUX_ANCESTRY_CONFIG_INVALID');
   if (!path.isAbsolute(String(policy.root || ''))) throw new Error('TRANSFER_MESH_ROOT_INVALID');
   const root = canonicalExisting(policy.root);
   const cli = canonicalExisting(path.join(root,'transfer.mjs'));
@@ -201,6 +203,10 @@ export function createTransferMeshTools({ config = {}, receiptAuthority = null }
         throw new Error('TRANSFER_DEST_NOT_DIRECTORY');
       cmd=['receive','--peer',args.peer,'--id',args.id,'--dest',dest,
         '--dest-dev',String(approved.dev),'--dest-ino',String(approved.ino)];
+      if(policy.requireTrustedLinuxAncestry===true){
+        if(process.platform!=='linux')throw new Error('TRANSFER_TRUSTED_LINUX_ANCESTRY_UNSUPPORTED');
+        cmd.push('--require-trusted-linux-ancestry','1');
+      }
     }
     if (name === 'transfer_mesh_enqueue') {
       if (!PEERS.includes(args.peer) || !ID_PATTERN.test(args.id)) throw new Error('TRANSFER_ARGS_INVALID');
