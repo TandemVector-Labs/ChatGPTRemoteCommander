@@ -1,0 +1,104 @@
+name: PR238 exact-head comparative CodeQL QA (no upload)
+on:
+  push:
+    branches: [qa/pr238-exact-codeql-20261128]
+    paths: ['.github/workflows/qa-pr238-exact-codeql-20261128.yml']
+permissions:
+  contents: read
+  actions: read
+  security-events: read
+jobs:
+  compare:
+    name: ${{ matrix.scope }} / JavaScript-TypeScript / no-upload
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scope: parent-237
+            sha: 11515c8beb20238618c6940265c393922261f420
+          - scope: candidate-238
+            sha: f0160d07405aa2b7e9fcb562b44acd27f566bd9e
+    steps:
+      - name: Exact immutable public source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ matrix.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check exact source identity
+        run: test "$(git rev-parse HEAD)" = "${{ matrix.sha }}"
+      - name: Initialize pinned CodeQL
+        uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee
+        with:
+          languages: javascript-typescript
+          build-mode: none
+          queries: security-and-quality
+          config: |
+            threat-models: local
+      - name: Analyze without upload or database publication
+        uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee
+        with:
+          upload: never
+          upload-database: false
+          output: sarif-results
+      - name: Report bounded aggregate evidence
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import collections, json, pathlib
+          files=sorted(pathlib.Path('sarif-results').rglob('*.sarif'))
+          assert files, 'NO_SARIF'
+          counts=collections.Counter()
+          focus=collections.Counter()
+          engines=set()
+          total=0
+          for f in files:
+              for run in json.loads(f.read_text(encoding='utf-8')).get('runs',[]):
+                  driver=run.get('tool',{}).get('driver',{})
+                  engines.add((driver.get('name','unknown'),driver.get('semanticVersion',driver.get('version','unknown'))))
+                  for result in run.get('results',[]):
+                      total+=1
+                      rule=result.get('ruleId','unknown')
+                      counts[rule]+=1
+                      locs=result.get('locations',[])
+                      uri=(locs[0].get('physicalLocation',{}).get('artifactLocation',{}).get('uri','') if locs else '')
+                      for name in ('tools/commander-transfer-mesh/pilot-cli.mjs','test/transfer-dest-guard-active-20261023.test.mjs','test/transfer-dest-guard-contract-20261023.test.mjs'):
+                          if uri==name or uri.endswith('/'+name):
+                              focus[(name,rule)]+=1
+          print('CODEQL_ENGINES',json.dumps(sorted(engines)))
+          print('CODEQL_TOTAL',total)
+          print('CODEQL_RULE_COUNTS',json.dumps(sorted(counts.items())))
+          print('CODEQL_FOCUS_COUNTS',json.dumps(sorted((p,r,c) for (p,r),c in focus.items())))
+          # Bounded metadata, without messages, source snippets, absolute paths or raw SARIF.
+          import hashlib
+          from urllib.parse import unquote
+          focus_files={'test/transfer-dest-guard-active-20261023.test.mjs','test/transfer-dest-guard-contract-20261023.test.mjs','tools/commander-transfer-mesh/pilot-cli.mjs'}
+          watch_rules={'js/path-injection','js/resource-exhaustion','js/user-controlled-bypass','js/command-line-injection','js/file-system-race'}
+          def relative(uri):
+              v=unquote(uri).replace(chr(92),'/')
+              if v.startswith('/') or ':' in v or '..' in v.split('/') or len(v)>220:
+                  return '<nonrelative>'
+              return v.removeprefix('./')
+          by_file=collections.Counter()
+          identities=[]
+          for f in files:
+              for run in json.loads(f.read_text(encoding='utf-8')).get('runs',[]):
+                  for result in run.get('results',[]):
+                      rule=result.get('ruleId','unknown')
+                      locs=result.get('locations',[])
+                      physical=locs[0].get('physicalLocation',{}) if locs else {}
+                      uri=relative(physical.get('artifactLocation',{}).get('uri',''))
+                      region=physical.get('region',{})
+                      if rule in watch_rules:
+                          by_file[(uri,rule)]+=1
+                      if uri not in focus_files and rule!='js/command-line-injection':
+                          continue
+                      fingerprints=result.get('partialFingerprints',{}) or result.get('fingerprints',{})
+                      fp=hashlib.sha256(json.dumps(fingerprints,sort_keys=True).encode()).hexdigest() if fingerprints else None
+                      identities.append([uri,rule,region.get('startLine'),region.get('startColumn'),fp])
+          assert sum(by_file.values())==sum(counts[r] for r in watch_rules)
+          print('CODEQL_WATCH_BY_FILE',json.dumps(sorted((p,r,c) for (p,r),c in by_file.items())))
+          print('CODEQL_FOCUS_IDENTITIES',json.dumps(sorted(identities,key=lambda x:json.dumps(x))))
+          PY
