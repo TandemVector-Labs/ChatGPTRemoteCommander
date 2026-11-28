@@ -147,11 +147,23 @@ try{
          const dest=path.resolve(arg('dest',path.join(root,'received')));
          // Caller must provision a real destination before any writes; do not
          // create untrusted ancestors before a pinned-directory security layer.
+         const admittedDev=arg('dest-dev'),admittedIno=arg('dest-ino');
+         if((admittedDev===undefined)!==(admittedIno===undefined))
+           fail('DESTINATION_IDENTITY_INCOMPLETE');
+         let admitted=null;
+         if(admittedDev!==undefined){
+           const valid=x=>x.length<=20&&/^(0|[1-9][0-9]*)$/.test(x);
+           if(!valid(admittedDev)||!valid(admittedIno))
+             fail('DESTINATION_IDENTITY_INVALID');
+           admitted={dev:BigInt(admittedDev),ino:BigInt(admittedIno)};
+         }
          let destinationStat;
-         try{destinationStat=fs.lstatSync(dest);}catch(e){
+         try{destinationStat=fs.lstatSync(dest,{bigint:true});}catch(e){
            if(e.code==='ENOENT')fail('DESTINATION_MUST_EXIST');
            throw e;
          }
+         if(admitted&&(destinationStat.dev!==admitted.dev||destinationStat.ino!==admitted.ino))
+           fail('DESTINATION_IDENTITY_CHANGED');
          if(!destinationStat.isDirectory()||destinationStat.isSymbolicLink())
            fail('DESTINATION_NOT_DIRECTORY');
          const target=path.join(dest,m.name);
