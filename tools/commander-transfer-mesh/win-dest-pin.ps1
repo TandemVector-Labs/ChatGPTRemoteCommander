@@ -28,6 +28,31 @@ public static class CtMeshWinDirectoryGuard {
  [DllImport("kernel32.dll",SetLastError=true)]
  static extern bool GetFileInformationByHandleEx(SafeFileHandle handle,
    int infoClass,out TagInfo info,uint length);
+ // The receiver, not the disposable helper, must keep the native pins alive.
+ // Duplicated non-inheritable handles are closed by the OS at Pilot process exit.
+ [DllImport("kernel32.dll",SetLastError=true)]
+ static extern IntPtr GetCurrentProcess();
+ [DllImport("kernel32.dll",SetLastError=true)]
+ static extern IntPtr OpenProcess(uint rights,bool inherit,uint pid);
+ [DllImport("kernel32.dll",SetLastError=true)]
+ static extern bool DuplicateHandle(IntPtr fromProcess,SafeFileHandle fromHandle,
+     IntPtr toProcess,out IntPtr duplicate,uint rights,bool inherit,uint flags);
+ [DllImport("kernel32.dll",SetLastError=true)]
+ static extern bool CloseHandle(IntPtr handle);
+ public static void HoldInReceiver(List<SafeFileHandle> pins,string receiverPid){
+  if(!UInt32.TryParse(receiverPid,out uint pid)||pid<5)
+   throw new IOException("DESTINATION_RECEIVER_PID_INVALID");
+  // Request only PROCESS_DUP_HANDLE (0x40).
+  IntPtr receiver=OpenProcess(0x40,false,pid);
+  if(receiver==IntPtr.Zero)throw new IOException("DESTINATION_RECEIVER_OPEN_DENIED");
+  try{
+   foreach(var pin in pins){
+    if(pin.IsInvalid||!DuplicateHandle(GetCurrentProcess(),pin,receiver,
+        out IntPtr clone,0,false,0x2)||clone==IntPtr.Zero)
+     throw new IOException("DESTINATION_RECEIVER_HANDLE_DUP_FAILED");
+   }
+  }finally{CloseHandle(receiver);}
+ }
  static void Check(SafeFileHandle h) {
   if(h.IsInvalid || !GetFileInformationByHandleEx(h,9,out TagInfo info,
       (uint)Marshal.SizeOf<TagInfo>()) ||
@@ -88,6 +113,7 @@ public static class CtMeshWinDirectoryGuard {
 $held=$null
 try{
  $held=[CtMeshWinDirectoryGuard]::Pin($env:CTMESH_PIN_DEST)
+ [CtMeshWinDirectoryGuard]::HoldInReceiver($held,$env:CTMESH_RECEIVER_PID)
  [Console]::Out.WriteLine('CTMESH_PIN_READY')
  [Console]::Out.Flush()
  $null=[Console]::ReadLine()

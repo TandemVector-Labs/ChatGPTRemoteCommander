@@ -19,4 +19,10 @@ test('portable Win32 native directory guard exactly matches reviewed source',()=
  assert.match(guard,/0x200021/);
  assert.match(guard,/0x02200000/);
  assert.match(guard,/NtCreateFile\(out SafeFileHandle h,0x1000A0/);
+ assert.match(guard,/DuplicateHandle/,'receiver PID must be used for native handle duplication');
+ assert.match(guard,/OpenProcess\(0x40,false,pid\)/,'least-privileged PROCESS_DUP_HANDLE');
+ assert.match(guard,/HoldInReceiver\(\$held,\$env:CTMESH_RECEIVER_PID\)/);
+ assert.ok(guard.indexOf('::HoldInReceiver(')<guard.indexOf("'CTMESH_PIN_READY'"),
+  'ready cannot be emitted until receiver owns all native handles');
+ assert.match(pilot,/CTMESH_RECEIVER_PID:String\(process.pid\)/);
 });
