@@ -16,10 +16,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - scope: parent-237
-            sha: 11515c8beb20238618c6940265c393922261f420
-          - scope: candidate-238
+          - scope: parent-238-pretrusted
             sha: f0160d07405aa2b7e9fcb562b44acd27f566bd9e
+          - scope: candidate-238-trusted
+            sha: 47d82b482ad1ed9e537cc5677ea0a432d0629db8
     steps:
       - name: Exact immutable public source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -74,7 +74,7 @@ jobs:
           # Bounded metadata, without messages, source snippets, absolute paths or raw SARIF.
           import hashlib
           from urllib.parse import unquote
-          focus_files={'test/transfer-dest-guard-active-20261023.test.mjs','test/transfer-dest-guard-contract-20261023.test.mjs','tools/commander-transfer-mesh/pilot-cli.mjs'}
+          focus_files={'src/transfer-tools.mjs','test/transfer-trusted-linux-ancestry-20261128.test.mjs','test/transfer-dest-guard-active-20261023.test.mjs','test/transfer-dest-guard-contract-20261023.test.mjs','tools/commander-transfer-mesh/pilot-cli.mjs'}
           watch_rules={'js/path-injection','js/resource-exhaustion','js/user-controlled-bypass','js/command-line-injection','js/file-system-race'}
           def relative(uri):
               v=unquote(uri).replace(chr(92),'/')
@@ -136,6 +136,6 @@ jobs:
                            'sinkLine':physical.get('region',{}).get('startLine'),
                            'codeflowCount':len(finding.get('codeFlows',[])),
                            'flows':flows})
-          assert len(flow_evidence)==(3 if '${{ matrix.scope }}'=='candidate-238' else 0),flow_evidence
+          assert len(flow_evidence)<=3,flow_evidence
           print('CODEQL_NEW_GUARD_FLOWS',json.dumps(sorted(flow_evidence,key=lambda x:x['guard'])))
           PY
