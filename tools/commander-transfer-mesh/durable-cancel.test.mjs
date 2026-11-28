@@ -7,8 +7,13 @@ import crypto from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 const cli=fileURLToPath(new URL('./durable-send.mjs',import.meta.url));
+function installedCli(root){
+ const target=path.join(root,'durable-send.mjs');
+ if(!fs.existsSync(target))fs.copyFileSync(cli,target,fs.constants.COPYFILE_EXCL);
+ return target;
+}
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
-function cmd(root,...args){return JSON.parse(execFileSync(process.execPath,[cli,...args],{encoding:'utf8',timeout:10000,env:{...process.env,COMMANDER_TRANSFER_HOME:root}}));}
+function cmd(root,...args){return JSON.parse(execFileSync(process.execPath,[installedCli(root),...args],{encoding:'utf8',timeout:10000,env:{...process.env,COMMANDER_TRANSFER_HOME:root}}));}
 async function published(root,id){
  let state;
  for(let i=0;i<180;i++){
@@ -20,7 +25,7 @@ async function published(root,id){
  throw Error('PUBLISH_TIMEOUT '+JSON.stringify(state));
 }
 function makeRoot(id){
- const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-cancel-race-'));
+ const root=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-cancel-race-')));
  const allowed=path.join(root,'allowed');fs.mkdirSync(allowed);
  fs.writeFileSync(path.join(root,'node.json'),JSON.stringify({alias:'PC'}));
  const file=path.join(allowed,'source.dat');const bytes=crypto.randomBytes(8192);fs.writeFileSync(file,bytes);

@@ -2,26 +2,82 @@
 // Durable local staging; Syncthing handles the encrypted peer data plane.
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import crypto from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 process.umask(0o077);
-const root=path.resolve(process.env.COMMANDER_TRANSFER_HOME||(
- process.platform==='win32'?path.join(process.env.LOCALAPPDATA||path.join(os.homedir(),'AppData','Local'),'CommanderTransferPilot'):path.join(os.homedir(),'.local','share','commander-transfer-pilot')));
+// Core and the portable updater install this module inside the enrolled
+// pilot root. The executing module's directory, not inherited environment
+// data, is the authority for local queue/staging/publication paths.
+const root=path.dirname(fileURLToPath(import.meta.url));
+const configuredRoot=process.env.COMMANDER_TRANSFER_HOME;
 const peers=['PC','Linux','EmadServer','Amirreza'];
 const re=/^[a-zA-Z0-9][a-zA-Z0-9._-]{2,90}$/;
 const [command,...args]=process.argv.slice(2);
 const opt=k=>{const i=args.indexOf('--'+k);return i<0?undefined:args[i+1];};
 const assertion=(test,code)=>{if(!test)throw Error(code);};
 const within=(file,base)=>{const rel=path.relative(base,file);return rel===''||(rel!=='..'&&!rel.startsWith('..'+path.sep)&&!path.isAbsolute(rel));};
+// Never follow a symlink inside the app-managed queue/staging/publication
+// tree, even when the peer and transfer ID are valid.
+function assertInternalDirectories(p){
+ // Legacy launchers may still provide the enrolled canonical root.
+ // Treat it only as a consistency assertion; never use it in filesystem
+ // operations. A different absolute path or alias cannot select data.
+ if(configuredRoot!==undefined){
+  assertion(path.isAbsolute(configuredRoot),'TRANSFER_ROOT_ABSOLUTE_REQUIRED');
+  assertion(path.relative(root,path.resolve(configuredRoot))==='','TRANSFER_ROOT_MISMATCH');
+ }
+ // Walk from the filesystem root down before touching a descendant.
+ // Owner/ACL custody and concurrent mutation remain separate concerns.
+ const ancestry=[];
+ for(let dir=root;;dir=path.dirname(dir)){
+  ancestry.push(dir);
+  if(path.dirname(dir)===dir)break;
+ }
+ for(const dir of ancestry.reverse()){
+  const entry=fs.lstatSync(dir);
+  assertion(entry.isDirectory()&&!entry.isSymbolicLink(),'TRANSFER_ROOT_UNSAFE');
+  if(dir===root && typeof process.getuid==='function'){
+   assertion(entry.uid===process.getuid()&&(entry.mode&0o022)===0,'TRANSFER_ROOT_CUSTODY_UNSAFE');
+  }
+ }
+ const directories=[
+  path.join(root,'jobs'),p.jobDir,
+  path.join(root,'staging'),p.stageDir,
+  path.join(root,'pairs'),path.dirname(path.dirname(p.destination)),
+  path.dirname(p.destination),p.destination
+ ];
+ for(const dir of directories){
+  assertion(within(dir,root),'TRANSFER_DIRECTORY_UNSAFE');
+  let st;
+  try{st=fs.lstatSync(dir);}
+  catch(e){if(e?.code==='ENOENT')continue;throw e;}
+  assertion(st.isDirectory()&&!st.isSymbolicLink(),'TRANSFER_DIRECTORY_UNSAFE');
+ }
+ // App-managed leaves must not alias another file, even if all ancestors
+ // are real directories. This is a preexisting-layout check, not race-free
+ // path resolution or Windows ACL validation.
+ for(const file of [path.join(root,'node.json'),path.join(root,'jobs','.admission.lock'),
+  p.record,p.lock,p.part,path.join(p.destination,'payload.bin'),path.join(p.destination,'manifest.json')]){
+  assertInternalFile(file);
+ }
+}
+function assertInternalFile(file){
+ assertion(within(file,root),'TRANSFER_FILE_UNSAFE');
+ let st;
+ try{st=fs.lstatSync(file);}
+ catch(e){if(e?.code==='ENOENT')return;throw e;}
+ assertion(st.isFile()&&!st.isSymbolicLink()&&st.nlink===1,'TRANSFER_FILE_UNSAFE');
+}
 function safePaths(peer,id){
  assertion(peers.includes(peer)&&re.test(String(id||'')),'INVALID_TRANSFER_ID_OR_PEER');
  const jobDir=path.join(root,'jobs',peer);
  const stageDir=path.join(root,'staging',peer);
- return {jobDir,stageDir,record:path.join(jobDir,id+'.json'),lock:path.join(jobDir,id+'.lock'),part:path.join(stageDir,id+'.part'),destination:path.join(root,'pairs',peer,'transfers',id)};
+ const p={jobDir,stageDir,record:path.join(jobDir,id+'.json'),lock:path.join(jobDir,id+'.lock'),part:path.join(stageDir,id+'.part'),destination:path.join(root,'pairs',peer,'transfers',id)};
+ assertInternalDirectories(p);
+ return p;
 }
-const recordRead=p=>JSON.parse(fs.readFileSync(p.record,'utf8'));
+const recordRead=p=>{assertInternalFile(p.record);return JSON.parse(fs.readFileSync(p.record,'utf8'));};
 function atomicRename(from,to){
  let last;
  const sleeper=new Int32Array(new SharedArrayBuffer(4));
@@ -36,6 +92,7 @@ function atomicRename(from,to){
  throw last;
 }
 function save(p,record){
+ assertInternalFile(p.record);
  if(fs.existsSync(p.record) && !['PUBLISHED','CANCELLED','CANCEL_REQUESTED'].includes(record.status)){
   const last=recordRead(p);
   if(['CANCEL_REQUESTED','CANCELLED'].includes(last.status) && !(record.status==='INTERRUPTED' && record.errorCode==='PUBLISH_RECOVERY_REQUIRED'))record.status='CANCEL_REQUESTED';
@@ -63,7 +120,9 @@ function enforceAdmission(bytes){
   for(const item of fs.readdirSync(path.join(dir,peerDir.name),{withFileTypes:true})){
    if(!item.name.endsWith('.json'))continue;
    assertion(item.isFile()&&!item.isSymbolicLink(),'QUEUE_RECORD_UNSAFE');
-   const j=JSON.parse(fs.readFileSync(path.join(dir,peerDir.name,item.name),'utf8'));
+   const file=path.join(dir,peerDir.name,item.name);
+   assertInternalFile(file);
+   const j=JSON.parse(fs.readFileSync(file,'utf8'));
    assertion(Number.isSafeInteger(j.bytes)&&j.bytes>=0,'QUEUE_RECORD_INVALID');
    if(['PUBLISHED','CANCELLED'].includes(j.status))continue;
    pending+=j.bytes;
@@ -102,6 +161,7 @@ function hash(file){
 }
 function noExistingArtifact(p){assertion(!fs.existsSync(p.destination),'TRANSFER_ALREADY_PUBLISHED');}
 function copyJob(p,j){
+ assertInternalDirectories(p);
  fs.mkdirSync(p.stageDir,{recursive:true});
  const source=checkInput(j);
  const existingPayload=path.join(p.destination,'payload.bin');
@@ -117,7 +177,7 @@ function copyJob(p,j){
   }else{fs.writeFileSync(existingManifest,JSON.stringify(expected)+'\n',{flag:'wx',mode:0o600});}
   j.sha256=verified;j.copiedBytes=j.bytes;j.status='PUBLISHED';save(p,j);return;
  }
- if(fs.existsSync(p.part))assertion(fs.lstatSync(p.part).isFile()&&!fs.lstatSync(p.part).isSymbolicLink(),'BAD_PARTIAL_FILE');
+ assertInternalFile(p.part);
  const input=fs.openSync(source,'r');
  const out=fs.openSync(p.part,fs.existsSync(p.part)?'r+':'wx+',0o600);
  let offset=fs.fstatSync(out).size;
@@ -144,6 +204,7 @@ function copyJob(p,j){
  checkInput(j);
  const recent=recordRead(p);
  if(['CANCEL_REQUESTED','CANCELLED'].includes(recent.status)){j.status='CANCELLED';save(p,j);return;}
+ assertInternalDirectories(p);
  fs.mkdirSync(path.dirname(p.destination),{recursive:true});
  if(fs.existsSync(p.destination)){
   const entry=fs.lstatSync(p.destination);

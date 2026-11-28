@@ -6,9 +6,14 @@ import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 const cli=fileURLToPath(new URL('./durable-send.mjs',import.meta.url));
+function installedCli(root){
+ const target=path.join(root,'durable-send.mjs');
+ if(!fs.existsSync(target))fs.copyFileSync(cli,target,fs.constants.COPYFILE_EXCL);
+ return target;
+}
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
 const alive=pid=>{try{process.kill(pid,0);return true;}catch(e){return e.code==='EPERM';}};
-function call(root,...args){const o=execFileSync(process.execPath,[cli,...args],{encoding:'utf8',timeout:12000,env:{...process.env,COMMANDER_TRANSFER_HOME:root}});return JSON.parse(o);}
+function call(root,...args){const o=execFileSync(process.execPath,[installedCli(root),...args],{encoding:'utf8',timeout:12000,env:{...process.env,COMMANDER_TRANSFER_HOME:root}});return JSON.parse(o);}
 async function until(root,id,states,timeout=25000){
  const f=path.join(root,'jobs','Linux',id+'.json');const start=Date.now();
  while(Date.now()-start<timeout){
@@ -19,7 +24,7 @@ async function until(root,id,states,timeout=25000){
  throw Error('TIMED_OUT_WAITING_FOR_'+states.join(','));
 }
 test('real worker termination during partial copy can be resumed and hash-verified', {timeout:60000},async t=>{
- const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-kill-resume-'));
+ const root=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-kill-resume-')));
  let workerPid=0;
  try{
   fs.writeFileSync(path.join(root,'node.json'),JSON.stringify({alias:'PC'}));

@@ -7,8 +7,13 @@ import crypto from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 const cli=fileURLToPath(new URL('./durable-send.mjs',import.meta.url));
+function installedCli(root){
+ const target=path.join(root,'durable-send.mjs');
+ if(!fs.existsSync(target))fs.copyFileSync(cli,target,fs.constants.COPYFILE_EXCL);
+ return target;
+}
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-function call(root,...args){const raw=execFileSync(process.execPath,[cli,...args],{encoding:'utf8',timeout:10000,env:{...process.env,COMMANDER_TRANSFER_HOME:root}}).trim();return JSON.parse(raw);}
+function call(root,...args){const raw=execFileSync(process.execPath,[installedCli(root),...args],{encoding:'utf8',timeout:10000,env:{...process.env,COMMANDER_TRANSFER_HOME:root}}).trim();return JSON.parse(raw);}
 async function done(root,peer,id){
  for(let i=0;i<200;i++){
   const r=call(root,'job-status','--peer',peer,'--id',id);
@@ -19,7 +24,7 @@ async function done(root,peer,id){
  throw Error('JOB_TIMEOUT');
 }
 test('durable job stages multi-MiB file without synchronous RPC timeout and publishes verified manifest',async()=>{
- const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-durable-'));
+ const root=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-durable-')));
  try{
   const allowed=path.join(root,'source');fs.mkdirSync(allowed);
   fs.writeFileSync(path.join(root,'node.json'),JSON.stringify({alias:'PC'}));
@@ -61,7 +66,7 @@ test('durable job stages multi-MiB file without synchronous RPC timeout and publ
  }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
 test('durable enqueue refuses source outside allowlisted root',()=>{
- const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-durable-deny-'));
+ const root=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-durable-deny-')));
  try{
   const allow=path.join(root,'allowed');fs.mkdirSync(allow);
   fs.writeFileSync(path.join(root,'node.json'),JSON.stringify({alias:'PC'}));

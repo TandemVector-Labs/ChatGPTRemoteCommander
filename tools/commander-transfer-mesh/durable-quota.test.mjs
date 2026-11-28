@@ -6,9 +6,14 @@ import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 const cli=fileURLToPath(new URL('./durable-send.mjs',import.meta.url));
-const call=(root,...args)=>execFileSync(process.execPath,[cli,...args],{encoding:'utf8',timeout:12000,env:{...process.env,COMMANDER_TRANSFER_HOME:root}});
+function installedCli(root){
+ const target=path.join(root,'durable-send.mjs');
+ if(!fs.existsSync(target))fs.copyFileSync(cli,target,fs.constants.COPYFILE_EXCL);
+ return target;
+}
+const call=(root,...args)=>execFileSync(process.execPath,[installedCli(root),...args],{encoding:'utf8',timeout:12000,env:{...process.env,COMMANDER_TRANSFER_HOME:root}});
 test('limits fail closed before queue admission and do not leave admission locks',async()=>{
- const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-quota-'));
+ const root=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-quota-')));
  try{
   fs.writeFileSync(path.join(root,'node.json'),JSON.stringify({alias:'PC'}));
   const allowed=path.join(root,'allowed');fs.mkdirSync(allowed);
@@ -38,7 +43,7 @@ test('limits fail closed before queue admission and do not leave admission locks
 });
 
 test('disk admission reserves all existing unfinished bytes, even if jobs have not copied yet',()=>{
- const root=fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-capacity-'));
+ const root=fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(),'ctmesh-capacity-')));
  try{
   fs.writeFileSync(path.join(root,'node.json'),JSON.stringify({alias:'PC'}));
   const src=path.join(root,'allowed');fs.mkdirSync(src);
